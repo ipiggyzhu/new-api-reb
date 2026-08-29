@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -168,6 +167,16 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 
 	//c.Request.Header.Set("Authorization", "Bearer "+channel.Key)
 	c.Request.Header.Set("Content-Type", "application/json")
+	// Dress the synthetic request as the client this channel type actually
+	// serves. Upstreams that gate on the client shape — the relay sites that
+	// only answer Claude Code, the ones that expect an official SDK — reject a
+	// bare request with a 4xx that tells us nothing about the model. Channels
+	// with request passthrough are the ones that need this most: they exist
+	// because their upstream wants the client's own request, and a test has no
+	// client request to forward. Set before any override is resolved so an
+	// explicitly configured header still wins.
+	testAPIType, _ := common.ChannelType2APIType(channel.Type)
+	applyTestClientHeaders(c.Request.Header, testAPIType, isStream)
 	c.Set("channel", channel.Type)
 	c.Set("base_url", channel.GetBaseURL())
 	group, _ := model.GetUserGroup(testUserID, false)
@@ -542,15 +551,15 @@ func settleTestQuota(info *relaycommon.RelayInfo, priceData types.PriceData, usa
 
 	quota := 0
 	if !priceData.UsePrice {
-		quota = usage.PromptTokens + int(math.Round(float64(usage.CompletionTokens)*priceData.CompletionRatio))
-		quota = int(math.Round(float64(quota) * priceData.ModelRatio))
+		quota = usage.PromptTokens + common.QuotaRound(float64(usage.CompletionTokens)*priceData.CompletionRatio)
+		quota = common.QuotaRound(float64(quota) * priceData.ModelRatio)
 		if priceData.ModelRatio != 0 && quota <= 0 {
 			quota = 1
 		}
 		return quota, nil
 	}
 
-	return int(priceData.ModelPrice * common.QuotaPerUnit), nil
+	return common.QuotaFromFloat(priceData.ModelPrice * common.QuotaPerUnit), nil
 }
 
 func buildTestLogOther(c *gin.Context, info *relaycommon.RelayInfo, priceData types.PriceData, usage *dto.Usage, tieredResult *billingexpr.TieredResult) map[string]interface{} {
@@ -693,7 +702,14 @@ func detectErrorMessageFromJSONBytes(jsonBytes []byte) string {
 }
 
 func buildTestRequest(model string, endpointType string, channel *model.Channel, isStream bool) dto.Request {
-	testResponsesInput := json.RawMessage(`[{"role":"user","content":"hi"}]`)
+	// 每次构建都重新抽取，避免固定的 "hi" 被上游识别成机器人探测。
+	// 补全被 max_tokens 截断不影响判定：validateTestResponseBody 只检查错误
+	// 载荷（非流式）和至少一个流事件（流式），不看 finish_reason。
+	chatPrompt := operation_setting.PickChannelTestPrompt()
+	testResponsesInput, err := common.Marshal([]dto.Message{{Role: "user", Content: chatPrompt}})
+	if err != nil {
+		testResponsesInput = []byte(`[{"role":"user","content":"hi"}]`)
+	}
 
 	// 根据端点类型构建不同的测试请求
 	if endpointType != "" {
@@ -702,13 +718,13 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 			// 返回 EmbeddingRequest
 			return &dto.EmbeddingRequest{
 				Model: model,
-				Input: []any{"hello world"},
+				Input: []any{operation_setting.PickChannelTestEmbeddingInput()},
 			}
 		case constant.EndpointTypeImageGeneration:
 			// 返回 ImageRequest
 			return &dto.ImageRequest{
 				Model:  model,
-				Prompt: "a cute cat",
+				Prompt: operation_setting.PickChannelTestImagePrompt(),
 				N:      lo.ToPtr(uint(1)),
 				Size:   "1024x1024",
 			}
@@ -724,14 +740,14 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 			// 返回 OpenAIResponsesRequest
 			return &dto.OpenAIResponsesRequest{
 				Model:  model,
-				Input:  json.RawMessage(`[{"role":"user","content":"hi"}]`),
+				Input:  json.RawMessage(testResponsesInput),
 				Stream: lo.ToPtr(isStream),
 			}
 		case constant.EndpointTypeOpenAIResponseCompact:
 			// 返回 OpenAIResponsesCompactionRequest
 			return &dto.OpenAIResponsesCompactionRequest{
 				Model: model,
-				Input: testResponsesInput,
+				Input: json.RawMessage(testResponsesInput),
 			}
 		case constant.EndpointTypeAnthropic, constant.EndpointTypeGemini, constant.EndpointTypeOpenAI:
 			// 返回 GeneralOpenAIRequest
@@ -745,7 +761,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 				Messages: []dto.Message{
 					{
 						Role:    "user",
-						Content: "hi",
+						Content: chatPrompt,
 					},
 				},
 				MaxTokens: lo.ToPtr(maxTokens),
@@ -774,7 +790,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 		// 返回 EmbeddingRequest
 		return &dto.EmbeddingRequest{
 			Model: model,
-			Input: []any{"hello world"},
+			Input: []any{operation_setting.PickChannelTestEmbeddingInput()},
 		}
 	}
 
@@ -782,7 +798,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 	if strings.HasSuffix(model, ratio_setting.CompactModelSuffix) {
 		return &dto.OpenAIResponsesCompactionRequest{
 			Model: model,
-			Input: testResponsesInput,
+			Input: json.RawMessage(testResponsesInput),
 		}
 	}
 
@@ -790,7 +806,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 	if strings.Contains(strings.ToLower(model), "codex") {
 		return &dto.OpenAIResponsesRequest{
 			Model:  model,
-			Input:  json.RawMessage(`[{"role":"user","content":"hi"}]`),
+			Input:  json.RawMessage(testResponsesInput),
 			Stream: lo.ToPtr(isStream),
 		}
 	}
@@ -802,7 +818,7 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 		Messages: []dto.Message{
 			{
 				Role:    "user",
-				Content: "hi",
+				Content: chatPrompt,
 			},
 		},
 	}
@@ -906,10 +922,6 @@ type channelTestSummary struct {
 // the system task can surface progress.
 func performChannelTests(ctx context.Context, channels []*model.Channel, testUserID int, allowDisable bool, report func(processed, total int)) channelTestSummary {
 	summary := channelTestSummary{}
-	var disableThreshold = int64(common.ChannelDisableThreshold * 1000)
-	if disableThreshold == 0 {
-		disableThreshold = 10000000 // a impossible value
-	}
 
 	total := len(channels)
 	for index, channel := range channels {
@@ -941,15 +953,21 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 		}
 
 		// 当错误检查通过，才检查响应时间
-		if common.AutomaticDisableChannelEnabled && !shouldBanChannel {
-			if milliseconds > disableThreshold {
-				err := fmt.Errorf("响应时间 %.2fs 超过阈值 %.2fs", float64(milliseconds)/1000.0, float64(disableThreshold)/1000.0)
-				newAPIError = types.NewOpenAIError(err, types.ErrorCodeChannelResponseTimeExceeded, http.StatusRequestTimeout)
-				shouldBanChannel = true
-			}
+		// Latency is only held against a channel that is currently serving traffic.
+		// An auto-disabled channel is retested to answer exactly one question —
+		// has it come back? — and a cold start, a long context, or a reasoning
+		// model chewing on one of the built-in prompts routinely outruns the
+		// threshold on first byte. Judging that as a fresh fault would leave a
+		// recovered channel pinned in auto-disabled with no way out but a manual
+		// click, eroding the usable pool one probe at a time.
+		var responseTimeError *types.NewAPIError
+		if !shouldBanChannel && service.ShouldDisableChannelForResponseTime(milliseconds, common.ChannelDisableThreshold, isChannelEnabled) {
+			err := fmt.Errorf("响应时间 %.2fs 超过阈值 %.2fs", float64(milliseconds)/1000.0, common.ChannelDisableThreshold)
+			responseTimeError = types.NewOpenAIError(err, types.ErrorCodeChannelResponseTimeExceeded, http.StatusRequestTimeout)
+			shouldBanChannel = true
 		}
 
-		if newAPIError == nil {
+		if newAPIError == nil && responseTimeError == nil {
 			summary.Succeeded++
 		} else {
 			summary.Failed++
@@ -957,7 +975,14 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 
 		// disable channel
 		if allowDisable && isChannelEnabled && shouldBanChannel && channel.GetAutoBan() {
-			processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
+			// The latency verdict is what triggered the ban whenever it is set, so
+			// it is the reason worth recording; it stays out of newAPIError so the
+			// enable decision below reads only the upstream test result.
+			disableError := newAPIError
+			if responseTimeError != nil {
+				disableError = responseTimeError
+			}
+			processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), disableError)
 			summary.Disabled++
 		}
 

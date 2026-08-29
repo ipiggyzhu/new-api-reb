@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"sync"
@@ -236,9 +237,16 @@ func TestUpdateVideoTasksSlowChannelDoesNotBlockOtherChannels(t *testing.T) {
 	fastFirst := seedPollingTask(t, fastChannelID, "task_public_fast_1", "upstream_fast_parallel_1")
 	fastSecond := seedPollingTask(t, fastChannelID, "task_public_fast_2", "upstream_fast_parallel_2")
 
+	// The polling workers mutate these Task values through GORM, so read the ids
+	// out once up front. Calling GetUpstreamTaskID from the assertion goroutine
+	// while a worker is writing the same struct is a data race.
+	slowTaskID := slowTask.GetUpstreamTaskID()
+	fastFirstID := fastFirst.GetUpstreamTaskID()
+	fastSecondID := fastSecond.GetUpstreamTaskID()
+
 	adaptor := &taskPollingFetchAdaptor{
 		fetched:      make(chan string, 4),
-		blockTaskID:  slowTask.GetUpstreamTaskID(),
+		blockTaskID:  slowTaskID,
 		blockStarted: make(chan struct{}),
 		releaseBlock: make(chan struct{}),
 	}
@@ -256,17 +264,12 @@ func TestUpdateVideoTasksSlowChannelDoesNotBlockOtherChannels(t *testing.T) {
 	errCh := make(chan error, 1)
 	gopool.Go(func() {
 		errCh <- UpdateVideoTasks(context.Background(), constant.TaskPlatform("kling"), map[int][]string{
-			slowChannelID: {
-				slowTask.GetUpstreamTaskID(),
-			},
-			fastChannelID: {
-				fastFirst.GetUpstreamTaskID(),
-				fastSecond.GetUpstreamTaskID(),
-			},
+			slowChannelID: {slowTaskID},
+			fastChannelID: {fastFirstID, fastSecondID},
 		}, map[string]*model.Task{
-			slowTask.GetUpstreamTaskID():   slowTask,
-			fastFirst.GetUpstreamTaskID():  fastFirst,
-			fastSecond.GetUpstreamTaskID(): fastSecond,
+			slowTaskID:   slowTask,
+			fastFirstID:  fastFirst,
+			fastSecondID: fastSecond,
 		})
 	})
 
@@ -279,17 +282,13 @@ func TestUpdateVideoTasksSlowChannelDoesNotBlockOtherChannels(t *testing.T) {
 	require.Eventually(t, func() bool {
 		fetchedTaskIDs := adaptor.fetchedTaskIDs()
 		return len(fetchedTaskIDs) == 2 &&
-			fetchedTaskIDs[0] == fastFirst.GetUpstreamTaskID() &&
-			fetchedTaskIDs[1] == fastSecond.GetUpstreamTaskID()
+			fetchedTaskIDs[0] == fastFirstID &&
+			fetchedTaskIDs[1] == fastSecondID
 	}, 500*time.Millisecond, 10*time.Millisecond)
 
 	releaseBlockedTask()
 	require.NoError(t, <-errCh)
-	assert.ElementsMatch(t, []string{
-		slowTask.GetUpstreamTaskID(),
-		fastFirst.GetUpstreamTaskID(),
-		fastSecond.GetUpstreamTaskID(),
-	}, adaptor.fetchedTaskIDs())
+	assert.ElementsMatch(t, []string{slowTaskID, fastFirstID, fastSecondID}, adaptor.fetchedTaskIDs())
 }
 
 func TestUpdateVideoTasksMixedChannelSleepSettings(t *testing.T) {
@@ -330,4 +329,148 @@ func TestUpdateVideoTasksMixedChannelSleepSettings(t *testing.T) {
 
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.ElementsMatch(t, []string{"upstream_sleepy_1", "upstream_fast_1", "upstream_fast_2"}, adaptor.fetchedTaskIDs())
+}
+
+// sunoPollAdaptor replies to the bulk Suno fetch with one item per requested id,
+// each carrying the configured status/fail_reason.
+type sunoPollAdaptor struct {
+	status     string
+	failReason string
+}
+
+func (a *sunoPollAdaptor) Init(_ *relaycommon.RelayInfo) {}
+
+func (a *sunoPollAdaptor) FetchTask(_ string, _ string, body map[string]any, _ string) (*http.Response, error) {
+	ids, _ := body["ids"].([]string)
+	items := make([]dto.SunoDataResponse, 0, len(ids))
+	for _, id := range ids {
+		items = append(items, dto.SunoDataResponse{
+			TaskID:     id,
+			Status:     a.status,
+			FailReason: a.failReason,
+			Data:       json.RawMessage(`{}`),
+		})
+	}
+	responseBody, err := common.Marshal(dto.TaskResponse[[]dto.SunoDataResponse]{
+		Code: dto.TaskSuccessCode,
+		Data: items,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewReader(responseBody)),
+	}, nil
+}
+
+func (a *sunoPollAdaptor) ParseTaskResult([]byte) (*relaycommon.TaskInfo, error) {
+	return &relaycommon.TaskInfo{}, nil
+}
+
+func (a *sunoPollAdaptor) AdjustBillingOnComplete(_ *model.Task, _ *relaycommon.TaskInfo) int {
+	return 0
+}
+
+func seedSunoTask(t *testing.T, userID, tokenID, channelID, quota int, upstreamID string) *model.Task {
+	t.Helper()
+	task := &model.Task{
+		TaskID:    "suno_public_" + upstreamID,
+		Platform:  constant.TaskPlatformSuno,
+		UserId:    userID,
+		ChannelId: channelID,
+		Quota:     quota,
+		Status:    model.TaskStatusInProgress,
+		Progress:  "30%",
+		Group:     "default",
+		Data:      json.RawMessage(`{}`),
+		CreatedAt: time.Now().Unix(),
+		UpdatedAt: time.Now().Unix(),
+		Properties: model.Properties{
+			OriginModelName: "suno_music",
+		},
+		PrivateData: model.TaskPrivateData{
+			UpstreamTaskID: upstreamID,
+			BillingSource:  BillingSourceWallet,
+			TokenId:        tokenID,
+		},
+	}
+	require.NoError(t, model.DB.Create(task).Error)
+	return task
+}
+
+func seedSunoChannel(t *testing.T, id int) {
+	t.Helper()
+	baseURL := "http://suno.test"
+	ch := &model.Channel{
+		Id:      id,
+		Type:    constant.ChannelTypeSunoAPI,
+		Name:    "suno_channel",
+		Key:     "sk-suno",
+		BaseURL: &baseURL,
+		Status:  common.ChannelStatusEnabled,
+	}
+	require.NoError(t, model.DB.Create(ch).Error)
+}
+
+func TestUpdateSunoTasksFailureRefundsOnceAfterWinningClaim(t *testing.T) {
+	truncate(t)
+
+	const userID, tokenID, channelID = 40, 40, 40
+	const initQuota, preConsumed, tokenRemain = 10000, 2000, 5000
+
+	seedUser(t, userID, initQuota)
+	seedToken(t, tokenID, userID, "sk-suno-refund-win", tokenRemain)
+	seedSunoChannel(t, channelID)
+	task := seedSunoTask(t, userID, tokenID, channelID, preConsumed, "suno_up_1")
+
+	adaptor := &sunoPollAdaptor{failReason: "generation failed"}
+	previousFactory := GetTaskAdaptorFunc
+	GetTaskAdaptorFunc = func(constant.TaskPlatform) TaskPollingAdaptor { return adaptor }
+	t.Cleanup(func() { GetTaskAdaptorFunc = previousFactory })
+
+	err := updateSunoTasks(context.Background(), channelID, []string{"suno_up_1"}, map[string]*model.Task{"suno_up_1": task})
+	require.NoError(t, err)
+
+	var reloaded model.Task
+	require.NoError(t, model.DB.First(&reloaded, task.ID).Error)
+	assert.EqualValues(t, model.TaskStatusFailure, reloaded.Status)
+	assert.Equal(t, "100%", reloaded.Progress)
+	assert.Equal(t, "generation failed", reloaded.FailReason)
+
+	assert.Equal(t, initQuota+preConsumed, getUserQuota(t, userID))
+	assert.Equal(t, tokenRemain+preConsumed, getTokenRemainQuota(t, tokenID))
+	assert.Equal(t, int64(1), countLogs(t))
+}
+
+func TestUpdateSunoTasksRefundSkippedWhenClaimLost(t *testing.T) {
+	truncate(t)
+
+	const userID, tokenID, channelID = 41, 41, 41
+	const initQuota, preConsumed, tokenRemain = 10000, 2000, 5000
+
+	seedUser(t, userID, initQuota)
+	seedToken(t, tokenID, userID, "sk-suno-refund-lose", tokenRemain)
+	seedSunoChannel(t, channelID)
+	task := seedSunoTask(t, userID, tokenID, channelID, preConsumed, "suno_up_2")
+
+	// Another poller already completed the FAILURE transition (and its refund);
+	// our in-memory copy is stale at IN_PROGRESS.
+	require.NoError(t, model.DB.Model(&model.Task{}).Where("id = ?", task.ID).Updates(map[string]any{
+		"status":   model.TaskStatusFailure,
+		"progress": "100%",
+	}).Error)
+
+	adaptor := &sunoPollAdaptor{status: model.TaskStatusFailure, failReason: "generation failed"}
+	previousFactory := GetTaskAdaptorFunc
+	GetTaskAdaptorFunc = func(constant.TaskPlatform) TaskPollingAdaptor { return adaptor }
+	t.Cleanup(func() { GetTaskAdaptorFunc = previousFactory })
+
+	err := updateSunoTasks(context.Background(), channelID, []string{"suno_up_2"}, map[string]*model.Task{"suno_up_2": task})
+	require.NoError(t, err)
+
+	// The claim CAS must lose, so no second refund is issued.
+	assert.Equal(t, initQuota, getUserQuota(t, userID))
+	assert.Equal(t, tokenRemain, getTokenRemainQuota(t, tokenID))
+	assert.Equal(t, int64(0), countLogs(t))
 }

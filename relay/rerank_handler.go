@@ -42,7 +42,9 @@ func RerankHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	adaptor.Init(info)
 
 	var requestBody io.Reader
-	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+	// A channel test builds its payload as a Go struct and leaves the gin body nil,
+	// so passing it through would send an empty body upstream.
+	if (model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled) && !info.IsChannelTest {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
@@ -101,6 +103,10 @@ func RerankHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 		return newAPIError
 	}
-	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+	usageDto, newAPIError := adaptorUsage(usage)
+	if newAPIError != nil {
+		return newAPIError
+	}
+	service.PostTextConsumeQuota(c, info, usageDto, nil)
 	return nil
 }

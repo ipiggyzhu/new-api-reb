@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
@@ -56,25 +57,33 @@ func sanitizeClickHouseLikePattern(input string) (string, error) {
 	return input, nil
 }
 
+// Log is the highest-volume write in the system: one row per relay request.
+// Every extra index is paid on every insert, so single-column indexes that are
+// already a leading prefix of a composite index are omitted here — user_id is
+// covered by idx_user_id_id and model_name by index_username_model_name.
+// repairLogIndexes drops the ones existing databases still carry.
 type Log struct {
-	Id                int    `json:"id" gorm:"index:idx_created_at_id,priority:2;index:idx_user_id_id,priority:2"`
-	UserId            int    `json:"user_id" gorm:"index;index:idx_user_id_id,priority:1"`
-	CreatedAt         int64  `json:"created_at" gorm:"bigint;index:idx_created_at_id,priority:1;index:idx_created_at_type"`
-	Type              int    `json:"type" gorm:"index:idx_created_at_type"`
-	Content           string `json:"content"`
-	Username          string `json:"username" gorm:"index;index:index_username_model_name,priority:2;default:''"`
-	TokenName         string `json:"token_name" gorm:"index;default:''"`
-	ModelName         string `json:"model_name" gorm:"index;index:index_username_model_name,priority:1;default:''"`
-	Quota             int    `json:"quota" gorm:"default:0"`
-	PromptTokens      int    `json:"prompt_tokens" gorm:"default:0"`
-	CompletionTokens  int    `json:"completion_tokens" gorm:"default:0"`
-	UseTime           int    `json:"use_time" gorm:"default:0"`
-	IsStream          bool   `json:"is_stream"`
-	ChannelId         int    `json:"channel" gorm:"index"`
-	ChannelName       string `json:"channel_name" gorm:"->"`
-	TokenId           int    `json:"token_id" gorm:"default:0;index"`
-	Group             string `json:"group" gorm:"index"`
-	Ip                string `json:"ip" gorm:"index;default:''"`
+	Id               int    `json:"id" gorm:"index:idx_created_at_id,priority:2;index:idx_user_id_id,priority:2"`
+	UserId           int    `json:"user_id" gorm:"index:idx_user_id_id,priority:1"`
+	CreatedAt        int64  `json:"created_at" gorm:"bigint;index:idx_created_at_id,priority:1;index:idx_created_at_type"`
+	Type             int    `json:"type" gorm:"index:idx_created_at_type"`
+	Content          string `json:"content"`
+	Username         string `json:"username" gorm:"index;index:index_username_model_name,priority:2;default:''"`
+	TokenName        string `json:"token_name" gorm:"index;default:''"`
+	ModelName        string `json:"model_name" gorm:"index:index_username_model_name,priority:1;default:''"`
+	Quota            int    `json:"quota" gorm:"default:0"`
+	PromptTokens     int    `json:"prompt_tokens" gorm:"default:0"`
+	CompletionTokens int    `json:"completion_tokens" gorm:"default:0"`
+	UseTime          int    `json:"use_time" gorm:"default:0"`
+	IsStream         bool   `json:"is_stream"`
+	ChannelId        int    `json:"channel" gorm:"index"`
+	ChannelName      string `json:"channel_name" gorm:"->"`
+	TokenId          int    `json:"token_id" gorm:"default:0;index"`
+	Group            string `json:"group" gorm:"index"`
+	// Ip is written and displayed only: nothing filters, sorts or groups by it,
+	// so an index on it would be a B-tree update on every log insert for nothing.
+	// repairLogIndexes removes the index existing databases still carry.
+	Ip                string `json:"ip" gorm:"default:''"`
 	RequestId         string `json:"request_id,omitempty" gorm:"type:varchar(64);index:idx_logs_request_id;default:''"`
 	UpstreamRequestId string `json:"upstream_request_id,omitempty" gorm:"type:varchar(128);index:idx_logs_upstream_request_id;default:''"`
 	Other             string `json:"other"`
@@ -101,6 +110,24 @@ func ensureLogRequestId(log *Log) {
 func createLog(log *Log) error {
 	ensureLogRequestId(log)
 	return LOG_DB.Create(log).Error
+}
+
+// clientIpForLog returns the IP to store on a log row, or "" when recording is
+// off. record_ip_log is a per-user setting the user controls and it defaults to
+// off, which left an operator with no way to trace abuse; the site-level switch
+// overrides it and also skips the per-user lookup this would otherwise do on
+// every single log write.
+func clientIpForLog(c *gin.Context, userId int) string {
+	if c == nil {
+		return ""
+	}
+	if !operation_setting.ShouldRecordIpForAllUsers() {
+		userSetting, err := GetUserSetting(userId, false)
+		if err != nil || !userSetting.RecordIpLog {
+			return ""
+		}
+	}
+	return c.ClientIP()
 }
 
 func clickHouseLogOrder(prefix string) string {
@@ -286,35 +313,23 @@ func RecordErrorLog(c *gin.Context, userId int, channelId int, modelName string,
 	requestId := c.GetString(common.RequestIdKey)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	otherStr := common.MapToJsonStr(other)
-	// 判断是否需要记录 IP
-	needRecordIp := false
-	if settingMap, err := GetUserSetting(userId, false); err == nil {
-		if settingMap.RecordIpLog {
-			needRecordIp = true
-		}
-	}
 	log := &Log{
-		UserId:           userId,
-		Username:         username,
-		CreatedAt:        common.GetTimestamp(),
-		Type:             LogTypeError,
-		Content:          content,
-		PromptTokens:     0,
-		CompletionTokens: 0,
-		TokenName:        tokenName,
-		ModelName:        modelName,
-		Quota:            0,
-		ChannelId:        channelId,
-		TokenId:          tokenId,
-		UseTime:          useTimeSeconds,
-		IsStream:         isStream,
-		Group:            group,
-		Ip: func() string {
-			if needRecordIp {
-				return c.ClientIP()
-			}
-			return ""
-		}(),
+		UserId:            userId,
+		Username:          username,
+		CreatedAt:         common.GetTimestamp(),
+		Type:              LogTypeError,
+		Content:           content,
+		PromptTokens:      0,
+		CompletionTokens:  0,
+		TokenName:         tokenName,
+		ModelName:         modelName,
+		Quota:             0,
+		ChannelId:         channelId,
+		TokenId:           tokenId,
+		UseTime:           useTimeSeconds,
+		IsStream:          isStream,
+		Group:             group,
+		Ip:                clientIpForLog(c, userId),
 		RequestId:         requestId,
 		UpstreamRequestId: upstreamRequestId,
 		Other:             otherStr,
@@ -350,35 +365,23 @@ func RecordConsumeLog(c *gin.Context, userId int, params RecordConsumeLogParams)
 	upstreamRequestId := c.GetString(common.UpstreamRequestIdKey)
 	createdAt := common.GetTimestamp()
 	otherStr := common.MapToJsonStr(params.Other)
-	// 判断是否需要记录 IP
-	needRecordIp := false
-	if settingMap, err := GetUserSetting(userId, false); err == nil {
-		if settingMap.RecordIpLog {
-			needRecordIp = true
-		}
-	}
 	log := &Log{
-		UserId:           userId,
-		Username:         username,
-		CreatedAt:        createdAt,
-		Type:             LogTypeConsume,
-		Content:          params.Content,
-		PromptTokens:     params.PromptTokens,
-		CompletionTokens: params.CompletionTokens,
-		TokenName:        params.TokenName,
-		ModelName:        params.ModelName,
-		Quota:            params.Quota,
-		ChannelId:        params.ChannelId,
-		TokenId:          params.TokenId,
-		UseTime:          params.UseTimeSeconds,
-		IsStream:         params.IsStream,
-		Group:            params.Group,
-		Ip: func() string {
-			if needRecordIp {
-				return c.ClientIP()
-			}
-			return ""
-		}(),
+		UserId:            userId,
+		Username:          username,
+		CreatedAt:         createdAt,
+		Type:              LogTypeConsume,
+		Content:           params.Content,
+		PromptTokens:      params.PromptTokens,
+		CompletionTokens:  params.CompletionTokens,
+		TokenName:         params.TokenName,
+		ModelName:         params.ModelName,
+		Quota:             params.Quota,
+		ChannelId:         params.ChannelId,
+		TokenId:           params.TokenId,
+		UseTime:           params.UseTimeSeconds,
+		IsStream:          params.IsStream,
+		Group:             params.Group,
+		Ip:                clientIpForLog(c, userId),
 		RequestId:         requestId,
 		UpstreamRequestId: upstreamRequestId,
 		Other:             otherStr,
@@ -500,7 +503,9 @@ func GetAllLogs(logType int, startTimestamp int64, endTimestamp int64, modelName
 	if group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", group)
 	}
-	err = tx.Model(&Log{}).Count(&total).Error
+	// Bounded like the user-facing query: an unbounded COUNT(*) scans the whole
+	// logs table and, on SQLite, holds a read lock that stalls billing writes.
+	err = countUpTo(tx.Model(&Log{}), logSearchCountLimit, &total)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -590,7 +595,7 @@ func GetUserLogs(userId int, logType int, startTimestamp int64, endTimestamp int
 	if group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", group)
 	}
-	err = tx.Model(&Log{}).Limit(logSearchCountLimit).Count(&total).Error
+	err = countUpTo(tx.Model(&Log{}), logSearchCountLimit, &total)
 	if err != nil {
 		common.SysError("failed to count user logs: " + err.Error())
 		return nil, 0, errors.New("查询日志失败")
@@ -700,9 +705,21 @@ func CountOldLog(ctx context.Context, targetTimestamp int64) (int64, error) {
 	return total, nil
 }
 
+// defaultLogDeleteBatch is used when a caller passes a non-positive limit.
+const defaultLogDeleteBatch = 100
+
+// maxLogDeleteBatch caps a single batch. The bounded delete binds one
+// placeholder per id, and SQLite's compiled-in SQLITE_MAX_VARIABLE_NUMBER is the
+// lowest of the three supported databases, so an unbounded caller-supplied limit
+// could otherwise produce a statement the driver refuses to prepare.
+const maxLogDeleteBatch = 1000
+
 func DeleteOldLogBatch(ctx context.Context, targetTimestamp int64, limit int) (int64, error) {
 	if limit <= 0 {
-		limit = 100
+		limit = defaultLogDeleteBatch
+	}
+	if limit > maxLogDeleteBatch {
+		limit = maxLogDeleteBatch
 	}
 	if nil != ctx.Err() {
 		return 0, ctx.Err()
@@ -729,7 +746,38 @@ func DeleteOldLogBatch(ctx context.Context, targetTimestamp int64, limit int) (i
 		return total, nil
 	}
 
-	result := LOG_DB.WithContext(ctx).Where("created_at < ?", targetTimestamp).Limit(limit).Delete(&Log{})
+	// The batch is bounded by selecting primary keys first and deleting by id.
+	// GORM's Limit() is silently dropped on Delete() for SQLite — the dialect
+	// registers a LIMIT clause builder for queries only — so the emitted
+	// statement was an unbounded `DELETE FROM logs WHERE created_at < ?` that
+	// removed every matching row at once. On a single-file SQLite deploy that
+	// holds the sole write lock for the whole purge and queues every
+	// relay-completion write behind it, which is exactly what batching exists to
+	// prevent. `DELETE ... LIMIT` is not portable either (PostgreSQL has no such
+	// clause, and MySQL rejects a subquery over the table being deleted), so the
+	// two-statement form is the only shape that bounds the batch on all three.
+	// Ordering by created_at alone keeps the key selection on a created_at-leading
+	// index, so it is a range scan that stops after limit rows with no sort step.
+	// Do not add id as a second sort key: idx_created_at_id was originally created
+	// as (id, created_at) and AutoMigrate never rewrites an existing index of the
+	// same name, so on deployed databases created_at is not its leading column and
+	// the extra key would force a temporary sort for no benefit. The batch only
+	// needs some limit rows below the cutoff, and oldest-first falls out of the
+	// range scan anyway.
+	var ids []int
+	if err := LOG_DB.WithContext(ctx).
+		Model(&Log{}).
+		Where("created_at < ?", targetTimestamp).
+		Order("created_at").
+		Limit(limit).
+		Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	result := LOG_DB.WithContext(ctx).Where("id IN ?", ids).Delete(&Log{})
 	if nil != result.Error {
 		return 0, result.Error
 	}
@@ -738,7 +786,7 @@ func DeleteOldLogBatch(ctx context.Context, targetTimestamp int64, limit int) (i
 
 func DeleteOldLog(ctx context.Context, targetTimestamp int64, limit int) (int64, error) {
 	if limit <= 0 {
-		limit = 100
+		limit = defaultLogDeleteBatch
 	}
 
 	var total int64 = 0
@@ -755,7 +803,10 @@ func DeleteOldLog(ctx context.Context, targetTimestamp int64, limit int) (int64,
 
 		total += rowsAffected
 
-		if rowsAffected < int64(limit) {
+		// Stop only on an empty batch, not on a short one. DeleteOldLogBatch
+		// clamps its own limit, and a row removed between the key selection and
+		// the delete makes a batch short without meaning the table is drained.
+		if rowsAffected == 0 {
 			break
 		}
 	}

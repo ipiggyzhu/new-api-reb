@@ -134,13 +134,23 @@ export function UsersMutateDrawer({
 
   // Load existing data when updating
   useEffect(() => {
+    // The fetch was not cancelled on close, so reopening the drawer on another
+    // row (or typing before it landed) let a stale response reset the form with
+    // the previous row's values.
+    let cancelled = false
+
     if (open && isUpdate && currentRow) {
       // For update, fetch fresh data
       getUser(currentRow.id).then((result) => {
+        if (cancelled) return
         if (result.success && result.data) {
           form.reset(transformUserToFormDefaults(result.data))
         }
       })
+
+      return () => {
+        cancelled = true
+      }
     } else if (open && !isUpdate) {
       // For create, reset to defaults
       form.reset(USER_FORM_DEFAULT_VALUES)

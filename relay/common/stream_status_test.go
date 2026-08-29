@@ -2,10 +2,13 @@ package common
 
 import (
 	"fmt"
+	"net/http"
 	"sync"
 	"testing"
 
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStreamStatus_SetEndReason_FirstWins(t *testing.T) {
@@ -179,4 +182,59 @@ func TestStreamStatus_Summary_NilSafe(t *testing.T) {
 	t.Parallel()
 	var s *StreamStatus
 	assert.Equal(t, "StreamStatus<nil>", s.Summary())
+}
+
+func TestStreamStatus_FailureError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		reason      StreamEndReason
+		err         error
+		wantFailure bool
+	}{
+		{"done is clean", StreamEndReasonDone, nil, false},
+		{"eof is clean", StreamEndReasonEOF, nil, false},
+		{"handler stop is clean", StreamEndReasonHandlerStop, nil, false},
+		{"client gone is not a channel fault", StreamEndReasonClientGone, fmt.Errorf("context canceled"), false},
+		{"scanner error fails", StreamEndReasonScannerErr, fmt.Errorf("unexpected EOF"), true},
+		{"timeout fails", StreamEndReasonTimeout, nil, true},
+		{"panic fails", StreamEndReasonPanic, fmt.Errorf("nil map"), true},
+		{"ping failure fails", StreamEndReasonPingFail, nil, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewStreamStatus()
+			s.SetEndReason(tc.reason, tc.err)
+
+			failure := s.FailureError()
+			if !tc.wantFailure {
+				assert.Nil(t, failure)
+				return
+			}
+
+			require.NotNil(t, failure)
+			assert.Equal(t, http.StatusBadGateway, failure.StatusCode)
+			assert.Contains(t, failure.Error(), string(tc.reason))
+			if tc.err != nil {
+				assert.Contains(t, failure.Error(), tc.err.Error())
+			}
+			assert.False(t, operation_setting.IsAlwaysSkipRetryCode(failure.GetErrorCode()),
+				"an abnormal stream end must not map to a never-retry error code")
+		})
+	}
+}
+
+// A stream that ends with reason none has not been through the scanner at all —
+// a non-stream relay, or a stream that failed before StreamScannerHandler ran.
+// That is not evidence of an abnormal end, and reporting it as one would fail
+// every non-stream request.
+func TestStreamStatus_FailureError_NoneAndNil(t *testing.T) {
+	t.Parallel()
+
+	var nilStatus *StreamStatus
+	assert.Nil(t, nilStatus.FailureError())
+
+	assert.Nil(t, NewStreamStatus().FailureError())
 }

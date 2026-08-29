@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/pkg/channel_score"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -189,6 +190,17 @@ func InitOptionMap() {
 func loadOptionsFromDatabase() {
 	options, _ := AllOption()
 	for _, option := range options {
+		// updateOptionMap fans a value out to ~150 plain globals across several
+		// packages, and those globals are read by request handlers without the
+		// option mutex. SyncOptions runs on a timer, so rewriting unchanged
+		// values turned a rare admin action into a permanent background race.
+		// Skipping no-op updates leaves writes only where a value really changed.
+		common.OptionMapRWMutex.RLock()
+		current, ok := common.OptionMap[option.Key]
+		common.OptionMapRWMutex.RUnlock()
+		if ok && current == option.Value {
+			continue
+		}
 		err := updateOptionMap(option.Key, option.Value)
 		if err != nil {
 			common.SysLog("failed to update option map: " + err.Error())
@@ -196,7 +208,20 @@ func loadOptionsFromDatabase() {
 	}
 }
 
+// SyncOptions reloads options from the database on a fixed interval so config
+// edits made on another node reach this one.
+//
+// A non-positive frequency disables the sync rather than tight-looping. That is
+// the same reading authz.StartPolicySync gives the very same SYNC_FREQUENCY value
+// on the adjacent line in main.go, and it is the only safe one here: time.Sleep(0)
+// returns immediately, so the loop would spin a full core on SysLog plus a
+// SELECT * FROM options, hold one of the four DB connections continuously, and
+// fight request-path readers for OptionMapRWMutex.
 func SyncOptions(frequency int) {
+	if frequency <= 0 {
+		common.SysLog("option sync disabled: SYNC_FREQUENCY is not positive")
+		return
+	}
 	for {
 		time.Sleep(time.Duration(frequency) * time.Second)
 		common.SysLog("syncing options from database")
@@ -205,19 +230,26 @@ func SyncOptions(frequency int) {
 }
 
 func UpdateOption(key string, value string) error {
-	// Save to database first
+	// Apply to memory first: for JSON-backed options updateOptionMap is the only
+	// validation, so a malformed value must be rejected here before it is
+	// persisted — a poisoned row would keep breaking the map on every restart.
+	if err := updateOptionMap(key, value); err != nil {
+		return err
+	}
 	option := Option{
 		Key: key,
 	}
 	// https://gorm.io/docs/update.html#Save-All-Fields
-	DB.FirstOrCreate(&option, Option{Key: key})
+	if err := DB.FirstOrCreate(&option, Option{Key: key}).Error; err != nil {
+		return err
+	}
 	option.Value = value
 	// Save is a combination function.
 	// If save value does not contain primary key, it will execute Create,
 	// otherwise it will execute Update (with all fields).
-	DB.Save(&option)
-	// Update OptionMap
-	return updateOptionMap(key, value)
+	// A failed write must surface to the caller: the in-memory change alone
+	// would be silently reverted by the next SyncOptions pass.
+	return DB.Save(&option).Error
 }
 
 // UpdateOptionsBulk persists multiple key/value pairs in a single database
@@ -603,6 +635,14 @@ func handleConfigUpdate(key, value string) bool {
 		performance_setting.UpdateAndSync()
 	} else if configName == "tool_price_setting" {
 		operation_setting.RebuildToolPriceIndex()
+	} else if configName == "channel_affinity_setting" {
+		operation_setting.RepublishChannelAffinitySetting()
+	} else if configName == "channel_dynamic_score_setting" {
+		operation_setting.RepublishChannelDynamicScoreSetting()
+		// Thresholds just changed, so every offset in flight was earned under
+		// different rules. Starting clean keeps what the admin sees consistent with
+		// what they configured.
+		channel_score.ResetAll()
 	} else if configName == "billing_setting" {
 		InvalidatePricingCache()
 		ratio_setting.InvalidateExposedDataCache()

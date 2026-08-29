@@ -53,7 +53,7 @@ import {
 } from '@/lib/currency'
 import { toIntlLocale } from '@/i18n/languages'
 import { formatTimestampToDate } from '@/lib/format'
-import { truncateText } from '@/lib/utils'
+import { truncateText, cn } from '@/lib/utils'
 
 import { getCodexUsage } from '../api'
 import { CHANNEL_STATUS_CONFIG, MODEL_FETCHABLE_TYPES } from '../constants'
@@ -281,6 +281,124 @@ function WeightCell({ channel }: { channel: Channel }) {
       }}
       min={0}
     />
+  )
+}
+
+/**
+ * Concurrency cell: the channel's cap and its live in-flight count as one value.
+ *
+ * The cap is what makes a busy channel step aside — once it is reached, further
+ * requests fall through to the next priority tier instead of queueing — so the
+ * pair is what an operator reads: "2/5" means the cap is idle, "5/5" means
+ * overflow is happening right now and turns amber. A cap of 0 is stored as 0 but
+ * shown as "∞", because a literal 0 in the denominator reads as "no capacity"
+ * when it means the opposite.
+ *
+ * Editing operates on the cap alone; the ratio is display only.
+ */
+function MaxConcurrencyCell({ channel }: { channel: Channel }) {
+  const { t } = useTranslation()
+  const queryClient = useQueryClient()
+  const isTagRow = isTagAggregateRow(channel)
+  const maxConcurrency = channel.max_concurrency
+  const inFlight = channel.in_flight ?? 0
+  const [confirmOpen, setConfirmOpen] = useState(false)
+  const [pendingValue, setPendingValue] = useState<number | null>(null)
+
+  const spinner = (
+    onChange: (value: number) => void,
+    options: { renderValue: (limit: number) => React.ReactNode; title: string }
+  ) => (
+    <NumericSpinnerInput
+      value={maxConcurrency ?? 0}
+      onChange={onChange}
+      min={0}
+      renderValue={options.renderValue}
+      title={options.title}
+    />
+  )
+
+  if (isTagRow) {
+    const tag = channel.tag || ''
+    const channelCount = channel.children?.length || 0
+
+    // A tag row edits one cap that lands on every child, but its in-flight count
+    // is the sum across children. Showing "7/5" for three channels capped at 5
+    // each would be nonsense, so the ratio stays off the tag row and the total
+    // moves into the tooltip. A null cap means the children disagree, which is
+    // neither a number nor "unlimited" — it shows as a dash until the operator
+    // sets one value for the whole tag.
+    const mixedCaps = maxConcurrency === null || maxConcurrency === undefined
+
+    return (
+      <>
+        {spinner(
+          (value) => {
+            setPendingValue(value)
+            setConfirmOpen(true)
+          },
+          {
+            renderValue: (limit) => {
+              if (mixedCaps) return '—'
+              return limit > 0 ? String(limit) : '∞'
+            },
+            title: t(
+              '{{inFlight}} concurrent request(s) in flight across {{count}} channel(s)',
+              { inFlight, count: channelCount }
+            ),
+          }
+        )}
+        <ConfirmDialog
+          open={confirmOpen}
+          onOpenChange={setConfirmOpen}
+          title={t('Confirm Batch Update')}
+          desc={t(
+            'This will update the concurrency limit to {{value}} for all {{count}} channel(s) with tag "{{tag}}". Continue?',
+            { value: pendingValue, count: channelCount, tag }
+          )}
+          confirmText={t('Update')}
+          handleConfirm={() => {
+            if (pendingValue !== null) {
+              handleUpdateTagField(
+                tag,
+                'max_concurrency',
+                pendingValue,
+                queryClient
+              )
+            }
+            setConfirmOpen(false)
+          }}
+        />
+      </>
+    )
+  }
+
+  const saturated = !!maxConcurrency && inFlight >= maxConcurrency
+
+  return spinner(
+    (value) => {
+      handleUpdateChannelField(channel.id, 'max_concurrency', value, queryClient)
+    },
+    {
+      renderValue: (limit) => (
+        <span className={cn(saturated && 'text-amber-600 dark:text-amber-500')}>
+          <span className={cn(inFlight > 0 && !saturated && 'text-foreground')}>
+            {inFlight}
+          </span>
+          <span className='text-muted-foreground'>/</span>
+          {limit > 0 ? limit : '∞'}
+        </span>
+      ),
+      title:
+        maxConcurrency && maxConcurrency > 0
+          ? t('{{inFlight}} of {{limit}} concurrent requests in flight', {
+              inFlight,
+              limit: maxConcurrency,
+            })
+          : t('{{inFlight}} concurrent request(s) in flight, no limit set', {
+              inFlight,
+            }),
+    }
   )
 }
 
@@ -1054,6 +1172,17 @@ export function useChannelsColumns(
         meta: { mobileHidden: true },
         cell: ({ row }) => <WeightCell channel={row.original} />,
         size: 90,
+        enableSorting: false,
+      },
+
+      // Concurrency limit column (sits next to priority: the two together are
+      // what route overflow from a saturated channel down to the next tier)
+      {
+        accessorKey: 'max_concurrency',
+        header: t('Concurrency'),
+        meta: { mobileHidden: true },
+        cell: ({ row }) => <MaxConcurrencyCell channel={row.original} />,
+        size: 120,
         enableSorting: false,
       },
 

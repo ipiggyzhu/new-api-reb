@@ -154,6 +154,10 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 		return errors.New("充值失败，请稍后重试")
 	}
 
+	if cerr := cacheIncrUserQuota(topUp.UserId, int64(common.QuotaFromFloat(quota))); cerr != nil {
+		common.SysLog("failed to sync user quota cache: " + cerr.Error())
+	}
+
 	RecordTopupLog(topUp.UserId, fmt.Sprintf("使用在线充值成功，充值金额: %v，支付金额：%d", logger.FormatQuota(int(quota)), topUp.Amount), callerIp, topUp.PaymentMethod, PaymentMethodStripe)
 
 	return nil
@@ -258,7 +262,7 @@ func SearchUserTopUps(userId int, keyword string, pageInfo *common.PageInfo) (to
 		query = query.Where("trade_no LIKE ? ESCAPE '!'", pattern)
 	}
 
-	if err = query.Limit(searchTopUpCountHardLimit).Count(&total).Error; err != nil {
+	if err = countUpTo(query, searchTopUpCountHardLimit, &total); err != nil {
 		tx.Rollback()
 		common.SysError("failed to count search topups: " + err.Error())
 		return nil, 0, errors.New("搜索充值记录失败")
@@ -298,7 +302,7 @@ func SearchAllTopUps(keyword string, pageInfo *common.PageInfo) (topups []*TopUp
 		query = query.Where("trade_no LIKE ? ESCAPE '!'", pattern)
 	}
 
-	if err = query.Limit(searchTopUpCountHardLimit).Count(&total).Error; err != nil {
+	if err = countUpTo(query, searchTopUpCountHardLimit, &total); err != nil {
 		tx.Rollback()
 		common.SysError("failed to count search topups: " + err.Error())
 		return nil, 0, errors.New("搜索充值记录失败")
@@ -353,11 +357,11 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 		// - 其他订单（如易支付）：Amount 为美元数量，* QuotaPerUnit
 		if topUp.PaymentProvider == PaymentProviderStripe {
 			dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
-			quotaToAdd = int(decimal.NewFromFloat(topUp.Money).Mul(dQuotaPerUnit).IntPart())
+			quotaToAdd = common.QuotaFromDecimal(decimal.NewFromFloat(topUp.Money).Mul(dQuotaPerUnit))
 		} else {
 			dAmount := decimal.NewFromInt(topUp.Amount)
 			dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
-			quotaToAdd = int(dAmount.Mul(dQuotaPerUnit).IntPart())
+			quotaToAdd = common.QuotaFromDecimal(dAmount.Mul(dQuotaPerUnit))
 		}
 		if quotaToAdd <= 0 {
 			return errors.New("无效的充值额度")
@@ -383,6 +387,13 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 
 	if err != nil {
 		return err
+	}
+
+	// 幂等路径（订单已成功）不会设置 quotaToAdd，避免重复推高缓存
+	if quotaToAdd > 0 {
+		if cerr := cacheIncrUserQuota(userId, int64(quotaToAdd)); cerr != nil {
+			common.SysLog("failed to sync user quota cache: " + cerr.Error())
+		}
 	}
 
 	// 事务外记录日志，避免阻塞
@@ -459,6 +470,10 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 		return errors.New("充值失败，请稍后重试")
 	}
 
+	if cerr := cacheIncrUserQuota(topUp.UserId, quota); cerr != nil {
+		common.SysLog("failed to sync user quota cache: " + cerr.Error())
+	}
+
 	RecordTopupLog(topUp.UserId, fmt.Sprintf("使用Creem充值成功，充值额度: %v，支付金额：%.2f", quota, topUp.Money), callerIp, topUp.PaymentMethod, PaymentMethodCreem)
 
 	return nil
@@ -497,7 +512,7 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 
 		dAmount := decimal.NewFromInt(topUp.Amount)
 		dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
-		quotaToAdd = int(dAmount.Mul(dQuotaPerUnit).IntPart())
+		quotaToAdd = common.QuotaFromDecimal(dAmount.Mul(dQuotaPerUnit))
 		if quotaToAdd <= 0 {
 			return errors.New("无效的充值额度")
 		}
@@ -521,6 +536,9 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 	}
 
 	if quotaToAdd > 0 {
+		if cerr := cacheIncrUserQuota(topUp.UserId, int64(quotaToAdd)); cerr != nil {
+			common.SysLog("failed to sync user quota cache: " + cerr.Error())
+		}
 		RecordTopupLog(topUp.UserId, fmt.Sprintf("Waffo充值成功，充值额度: %v，支付金额: %.2f", logger.FormatQuota(quotaToAdd), topUp.Money), callerIp, topUp.PaymentMethod, PaymentMethodWaffo)
 	}
 
@@ -558,7 +576,7 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 			return errors.New("充值订单状态错误")
 		}
 
-		quotaToAdd = int(decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)).IntPart())
+		quotaToAdd = common.QuotaFromDecimal(decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)))
 		if quotaToAdd <= 0 {
 			return errors.New("无效的充值额度")
 		}
@@ -582,6 +600,9 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 	}
 
 	if quotaToAdd > 0 {
+		if cerr := cacheIncrUserQuota(topUp.UserId, int64(quotaToAdd)); cerr != nil {
+			common.SysLog("failed to sync user quota cache: " + cerr.Error())
+		}
 		RecordLog(topUp.UserId, LogTypeTopup, fmt.Sprintf("Waffo Pancake充值成功，充值额度: %v，支付金额: %.2f", logger.FormatQuota(quotaToAdd), topUp.Money))
 	}
 

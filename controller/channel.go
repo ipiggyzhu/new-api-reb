@@ -184,10 +184,16 @@ func GetAllChannels(c *gin.Context) {
 		typeCounts[r.Type] = r.Count
 	}
 	common.ApiSuccess(c, gin.H{
-		"items":       channelData,
-		"total":       total,
-		"page":        pageInfo.GetPage(),
-		"page_size":   pageInfo.GetPageSize(),
+		"items":     channelData,
+		"total":     total,
+		"page":      pageInfo.GetPage(),
+		"page_size": pageInfo.GetPageSize(),
+		// in_flight is a live gauge keyed by channel id, sent alongside the rows
+		// rather than on them because it is process state rather than a stored
+		// column: it is what makes the concurrency limit legible in the list, where
+		// "2 / 5" says the cap is doing nothing and "5 / 5" says requests are
+		// overflowing to the next priority tier right now.
+		"in_flight":   model.ChannelInFlightSnapshot(),
 		"type_counts": typeCounts,
 	})
 	return
@@ -198,8 +204,20 @@ func buildFetchModelsHeaders(channel *model.Channel, key string) (http.Header, e
 	switch channel.Type {
 	case constant.ChannelTypeAnthropic:
 		headers = GetClaudeAuthHeader(key)
+		// 真 Anthropic API 只认 x-api-key 并忽略 Authorization，而 new-api 系
+		// 网关（anyrouter 等）的 /v1/models 只认 Bearer——只发 x-api-key 会在
+		// 这类上游拿到 401，模型列表永远拉不下来。两个头都带对双方都无害。
+		headers.Set("Authorization", "Bearer "+key)
 	default:
 		headers = GetAuthHeader(key)
+	}
+
+	// 部分上游（agentrouter 等）按客户端身份放行：裸的 Go 默认 UA 会被当成
+	// 未授权客户端拒掉（401 "unauthorized client detected"）。复用渠道测试的
+	// 客户端画像，让拉取请求看起来像该渠道类型对应的真实客户端；画像只填
+	// 空缺，不会覆盖上面已设置的认证头。
+	if apiType, ok := common.ChannelType2APIType(channel.Type); ok {
+		applyTestClientHeaders(headers, apiType, false)
 	}
 
 	headerOverride := channel.GetHeaderOverride()
@@ -381,10 +399,22 @@ func SearchChannels(c *gin.Context) {
 		"data": gin.H{
 			"items":       pagedData,
 			"total":       total,
+			"in_flight":   model.ChannelInFlightSnapshot(),
 			"type_counts": typeCounts,
 		},
 	})
 	return
+}
+
+// GetChannelInFlight returns the live in-flight count of every channel, so the
+// admin channel list can track concurrency without refetching the list itself.
+//
+// The channel list is an expensive query (pagination, type counts, per-row
+// masking) and the browser polls this every few seconds; keeping the gauge on
+// its own endpoint means the poll touches no database at all, it only walks an
+// in-memory map.
+func GetChannelInFlight(c *gin.Context) {
+	common.ApiSuccess(c, gin.H{"in_flight": model.ChannelInFlightSnapshot()})
 }
 
 func GetChannel(c *gin.Context) {
@@ -465,14 +495,20 @@ func validateTwoFactorAuth(twoFA *model.TwoFA, code string) bool {
 
 // validateChannel 通用的渠道校验函数
 func validateChannel(channel *model.Channel, isAdd bool) error {
+	// nil 必须在任何解引用之前挡掉：请求体结构不符时 ShouldBindJSON 会让内嵌的
+	// Channel 指针保持 nil，此时调用 ValidateSettings 会直接 panic。
+	if channel == nil {
+		return fmt.Errorf("channel cannot be empty")
+	}
+
 	// 校验 channel settings
 	if err := channel.ValidateSettings(); err != nil {
 		return fmt.Errorf("渠道额外设置[channel setting] 格式错误：%s", err.Error())
 	}
 
-	// 如果是添加操作，检查 channel 和 key 是否为空
+	// 如果是添加操作，检查 key 是否为空
 	if isAdd {
-		if channel == nil || channel.Key == "" {
+		if channel.Key == "" {
 			return fmt.Errorf("channel cannot be empty")
 		}
 
@@ -746,6 +782,7 @@ type ChannelTag struct {
 	NewTag         *string `json:"new_tag"`
 	Priority       *int64  `json:"priority"`
 	Weight         *uint   `json:"weight"`
+	MaxConcurrency *int    `json:"max_concurrency"`
 	ModelMapping   *string `json:"model_mapping"`
 	Models         *string `json:"models"`
 	Groups         *string `json:"groups"`
@@ -849,7 +886,7 @@ func EditTagChannels(c *gin.Context) {
 		}
 		channelTag.HeaderOverride = common.GetPointer[string](trimmed)
 	}
-	err = model.EditChannelByTag(channelTag.Tag, channelTag.NewTag, channelTag.ModelMapping, channelTag.Models, channelTag.Groups, channelTag.Priority, channelTag.Weight, channelTag.ParamOverride, channelTag.HeaderOverride)
+	err = model.EditChannelByTag(channelTag.Tag, channelTag.NewTag, channelTag.ModelMapping, channelTag.Models, channelTag.Groups, channelTag.Priority, channelTag.Weight, channelTag.MaxConcurrency, channelTag.ParamOverride, channelTag.HeaderOverride)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -1219,10 +1256,14 @@ func FetchModels(c *gin.Context) {
 		return
 	}
 
-	client := &http.Client{}
+	client := service.GetHttpClient()
 	url := fmt.Sprintf("%s/v1/models", baseURL)
 
-	request, err := http.NewRequest("GET", url, nil)
+	// Bound the probe: RELAY_TIMEOUT defaults to 0, so without a deadline an
+	// unresponsive upstream would hold this admin request open indefinitely.
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -1241,6 +1282,7 @@ func FetchModels(c *gin.Context) {
 		})
 		return
 	}
+	defer response.Body.Close()
 	//check status code
 	if response.StatusCode != http.StatusOK {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -1249,7 +1291,6 @@ func FetchModels(c *gin.Context) {
 		})
 		return
 	}
-	defer response.Body.Close()
 
 	var result struct {
 		Data []struct {

@@ -41,4 +41,9 @@ func UsingLogDatabase(databaseType DatabaseType) bool {
 	return logDatabaseType == databaseType
 }
 
-var SQLitePath = "one-api.db?_busy_timeout=30000"
+// The glebarez (pure Go) driver only understands the _pragma= form; the
+// mattn-style _busy_timeout= parameter is silently dropped, which left the
+// database on the driver default of 5s and journal_mode=delete. WAL lets
+// readers run without blocking the writer, which matters because every relay
+// request writes billing rows.
+var SQLitePath = "one-api.db?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_txlock=immediate"

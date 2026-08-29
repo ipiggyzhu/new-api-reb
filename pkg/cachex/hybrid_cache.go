@@ -3,6 +3,7 @@ package cachex
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,17 @@ type HybridCache[V any] struct {
 	memOnce sync.Once
 	memInit func() *hot.HotCache[string, V]
 	mem     *hot.HotCache[string, V]
+
+	// memMu serialises the in-memory path's mutations so a compare-and-delete can
+	// be atomic with respect to writes. hot.HotCache locks each individual call but
+	// exposes no CAS primitive, so DeleteIfEquals would otherwise read, compare and
+	// delete as three separately-locked steps and could discard a value written in
+	// between — the very entry the comparison was meant to protect.
+	//
+	// Reads stay outside it: Get is on the request hot path, and letting it observe
+	// a value that is about to be deleted is no worse than the ordinary race
+	// between a cache read and a concurrent invalidation.
+	memMu sync.Mutex
 }
 
 func NewHybridCache[V any](cfg HybridCacheConfig[V]) *HybridCache[V] {
@@ -124,7 +136,10 @@ func (c *HybridCache[V]) SetWithTTL(key string, v V, ttl time.Duration) error {
 		return c.redis.Set(ctx, full, raw, ttl).Err()
 	}
 
-	c.memCache().SetWithTTL(full, v, ttl)
+	mem := c.memCache()
+	c.memMu.Lock()
+	defer c.memMu.Unlock()
+	mem.SetWithTTL(full, v, ttl)
 	return nil
 }
 
@@ -169,7 +184,10 @@ func (c *HybridCache[V]) Purge() error {
 		return err
 	}
 
-	c.memCache().Purge()
+	mem := c.memCache()
+	c.memMu.Lock()
+	defer c.memMu.Unlock()
+	mem.Purge()
 	return nil
 }
 
@@ -267,7 +285,87 @@ func (c *HybridCache[V]) DeleteMany(keys []string) (map[string]bool, error) {
 		return res, nil
 	}
 
-	return c.memCache().DeleteMany(fullKeys), nil
+	mem := c.memCache()
+	c.memMu.Lock()
+	defer c.memMu.Unlock()
+	return mem.DeleteMany(fullKeys), nil
+}
+
+// deleteIfEqualsScript removes a key only when it still holds the expected
+// encoded value.
+//
+// A read followed by a delete cannot express this: between the two round trips
+// another request can replace the value, and the delete then discards a value
+// the caller never inspected. Callers use this to retract their own entry
+// without being able to destroy someone else's.
+var deleteIfEqualsScript = redis.NewScript(`
+local current = redis.call('GET', KEYS[1])
+if current == false then
+  return 0
+end
+if current ~= ARGV[1] then
+  return 0
+end
+return redis.call('DEL', KEYS[1])
+`)
+
+// DeleteIfEquals deletes key only if its current value equals expected, and
+// reports whether the delete happened. A key that is absent, or that holds a
+// different value, is left alone and returns false.
+func (c *HybridCache[V]) DeleteIfEquals(key string, expected V) (bool, error) {
+	full := c.ns.FullKey(key)
+	if full == "" {
+		return false, nil
+	}
+
+	if c.redisOn() {
+		raw, err := c.redisCodec.Encode(expected)
+		if err != nil {
+			return false, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), defaultRedisDelTimeout)
+		defer cancel()
+		deleted, err := deleteIfEqualsScript.Run(ctx, c.redis, []string{full}, raw).Int()
+		if err != nil {
+			return false, err
+		}
+		return deleted > 0, nil
+	}
+
+	// memMu makes the read, the comparison and the delete one step with respect to
+	// every other mutation on this cache. hot.HotCache locks each call separately,
+	// so without this the value could be replaced after the comparison passed and
+	// the delete would discard the newer value the comparison existed to protect.
+	mem := c.memCache()
+	c.memMu.Lock()
+	defer c.memMu.Unlock()
+
+	current, found, err := mem.Get(full)
+	if err != nil || !found {
+		return false, err
+	}
+	currentRaw, err := c.encodeForCompare(current)
+	if err != nil {
+		return false, err
+	}
+	expectedRaw, err := c.encodeForCompare(expected)
+	if err != nil {
+		return false, err
+	}
+	if currentRaw != expectedRaw {
+		return false, nil
+	}
+	return mem.DeleteMany([]string{full})[full], nil
+}
+
+// encodeForCompare renders a value as a comparable string. The codec is the
+// authority when one is configured; without it (memory-only caches may leave it
+// nil) fmt is enough for the scalar value types these caches hold.
+func (c *HybridCache[V]) encodeForCompare(v V) (string, error) {
+	if c.redisCodec != nil {
+		return c.redisCodec.Encode(v)
+	}
+	return fmt.Sprintf("%v", v), nil
 }
 
 func (c *HybridCache[V]) Capacity() (mainCacheCapacity int, missingCacheCapacity int) {

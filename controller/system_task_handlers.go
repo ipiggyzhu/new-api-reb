@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -74,11 +75,21 @@ type modelUpdateHandler struct{}
 
 func (modelUpdateHandler) Type() string { return model.SystemTaskTypeModelUpdate }
 
+// Enabled prefers the admin-facing setting; the env var stays as the fallback so
+// deployments that never touch the new switch keep their current behavior.
 func (modelUpdateHandler) Enabled() bool {
+	if operation_setting.GetMonitorSetting().UpstreamModelUpdateEnabled {
+		return true
+	}
 	return common.GetEnvOrDefaultBool("CHANNEL_UPSTREAM_MODEL_UPDATE_TASK_ENABLED", true)
 }
 
+// Interval is expressed in hours once auto-update is enabled from the UI, since
+// full validation runs are far too expensive to repeat every 30 minutes.
 func (modelUpdateHandler) Interval() time.Duration {
+	if monitor := operation_setting.GetMonitorSetting(); monitor.UpstreamModelUpdateEnabled {
+		return time.Duration(monitor.GetUpstreamModelUpdateIntervalHours()) * time.Hour
+	}
 	intervalMinutes := common.GetEnvOrDefault(
 		"CHANNEL_UPSTREAM_MODEL_UPDATE_TASK_INTERVAL_MINUTES",
 		channelUpstreamModelUpdateTaskDefaultIntervalMinutes,
@@ -93,12 +104,14 @@ func (modelUpdateHandler) NewPayload() any { return nil }
 
 // modelUpdateTaskPayload controls one model_update run. A scheduled run
 // (Manual=false) respects the per-channel minimum check interval and may
-// auto-apply detected models when a channel has auto-sync enabled. A manual
-// "detect all" trigger sets Manual=true to reproduce the legacy detect-all
-// semantics: force a re-check regardless of the interval and never auto-apply,
-// so the admin reviews and applies changes explicitly.
+// auto-apply detected models. A manual "detect all" trigger sets Manual=true to
+// reproduce the legacy detect-all semantics: force a re-check regardless of the
+// interval and never auto-apply, so the admin reviews and applies changes
+// explicitly. AutoApply=true is the "run now" variant of the scheduled job: it
+// forces a re-check and does apply, which is what the settings page button sends.
 type modelUpdateTaskPayload struct {
-	Manual bool `json:"manual,omitempty"`
+	Manual    bool `json:"manual,omitempty"`
+	AutoApply bool `json:"auto_apply,omitempty"`
 }
 
 func (modelUpdateHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
@@ -107,7 +120,14 @@ func (modelUpdateHandler) Run(ctx context.Context, task *model.SystemTask, runne
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
 		return
 	}
-	summary := runChannelUpstreamModelUpdateTaskOnce(ctx, payload.Manual, !payload.Manual, service.NewSystemTaskProgressReporter(task, runnerID))
+	allowAutoApply := !payload.Manual || payload.AutoApply
+	summary := runChannelUpstreamModelUpdateTaskOnce(ctx, payload.Manual, allowAutoApply, service.NewSystemTaskProgressReporter(task, runnerID))
+	if summary.ScanError != "" {
+		// A scan that never read a channel is a failure, not an empty success.
+		// Reporting succeeded here is what let a bad column name run unnoticed.
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, errors.New(summary.ScanError))
+		return
+	}
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 

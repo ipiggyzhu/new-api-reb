@@ -322,6 +322,7 @@ docker run --name new-api -d --restart always \
 | `MAX_REQUEST_BODY_MB` | Taille maximale du corps de requête (Mo, comptée **après décompression** ; évite les requêtes énormes/zip bombs qui saturent la mémoire). Dépassement ⇒ `413` | `32` |
 | `AZURE_DEFAULT_API_VERSION` | Version de l'API Azure | `2025-04-01-preview` |
 | `ERROR_LOG_ENABLED` | Interrupteur du journal d'erreurs | `false` |
+| `TRUSTED_PROXIES` | IPs/CIDRs des reverse proxies (séparés par des virgules) dont les en-têtes `X-Forwarded-For` / `X-Real-IP` sont pris en compte. Les pairs hors de cette liste ne peuvent plus falsifier leur IP client. Restreignez-la à l'adresse de votre proxy (par ex. `172.17.0.1/32`) si les plages privées par défaut sont plus larges que votre topologie. Une entrée invalide interrompt le démarrage | `127.0.0.0/8,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7` |
 | `PYROSCOPE_URL` | Adresse du serveur Pyroscope | - |
 | `PYROSCOPE_APP_NAME` | Nom de l'application Pyroscope | `new-api` |
 | `PYROSCOPE_BASIC_AUTH_USER` | Utilisateur Basic Auth Pyroscope | - |

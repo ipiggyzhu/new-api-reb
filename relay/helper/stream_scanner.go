@@ -3,6 +3,7 @@ package helper
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -23,9 +24,13 @@ import (
 )
 
 const (
-	InitialScannerBufferSize    = 64 << 10  // 64KB (64*1024)
-	DefaultMaxScannerBufferSize = 128 << 20 // 64MB (64*1024*1024) default SSE buffer size
+	InitialScannerBufferSize    = 64 << 10  // 64KB
+	DefaultMaxScannerBufferSize = 128 << 20 // 128MB, max size of a single SSE line
 	DefaultPingInterval         = 10 * time.Second
+	// defaultStreamingTimeout mirrors the STREAMING_TIMEOUT default in
+	// common/init.go and backstops a non-positive configured value, which would
+	// otherwise reach time.NewTicker and panic the process on the first stream.
+	defaultStreamingTimeout = 300 * time.Second
 	// streamWriteTimeout bounds a single blocked write to a slow client so the
 	// unconditional wg.Wait() in cleanup can always finish. Without it, a slow
 	// but connected client (full TCP buffer, no server WriteTimeout) could hang
@@ -64,14 +69,41 @@ func copyCodexSSEHeaders(c *gin.Context, resp *http.Response) {
 	}
 }
 
+// writeDeadlineUnsupportedOnce keeps the "this writer cannot carry a deadline"
+// alarm to one line per process. Whether the Unwrap() chain reaches a writer that
+// supports deadlines is a property of the code, not of the request, so the
+// condition is either always true or always false for a given build — and
+// ExtendWriteDeadline runs once per streamed chunk, which would otherwise turn a
+// single wiring mistake into a log flood.
+var writeDeadlineUnsupportedOnce sync.Once
+
 // ExtendWriteDeadline pushes the connection write deadline forward before each
-// stream write. Best-effort: writers that don't support deadlines (e.g.
-// httptest recorders) are silently ignored.
+// stream write. Best-effort: writers that don't support deadlines (e.g. httptest
+// recorders) cannot be given one.
+//
+// A production writer that cannot carry a deadline is worth an alarm, though. The
+// unconditional wg.Wait() in cleanup relies on streamWriteTimeout to bound a write
+// to a client that is connected but not reading; with no deadline in place that
+// write blocks forever, cleanup never returns, and the request's goroutines,
+// scanner buffer and upstream connection stay pinned until the process restarts.
+// http.NewResponseController walks the Unwrap() chain, so one wrapper added
+// without an Unwrap method is enough to lose the deadline — this makes that a
+// diagnosable symptom instead of a hang with no trace.
 func ExtendWriteDeadline(c *gin.Context) {
 	if c == nil || c.Writer == nil {
 		return
 	}
-	_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(streamWriteTimeout))
+	err := http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(streamWriteTimeout))
+	if err == nil {
+		return
+	}
+	if errors.Is(err, http.ErrNotSupported) {
+		writeDeadlineUnsupportedOnce.Do(func() {
+			logger.LogError(c, "stream writes are running without a write deadline: the response writer chain does not support SetWriteDeadline, so a connected-but-not-reading client can block a stream handler indefinitely: "+err.Error())
+		})
+		return
+	}
+	logger.LogError(c, "failed to extend stream write deadline: "+err.Error())
 }
 
 func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataHandler func(data string, sr *StreamResult)) {
@@ -86,6 +118,9 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	ctx, cancel := context.WithCancel(context.Background())
 
 	streamingTimeout := time.Duration(constant.StreamingTimeout) * time.Second
+	if streamingTimeout <= 0 {
+		streamingTimeout = defaultStreamingTimeout
+	}
 
 	var (
 		stopChan    = make(chan bool, 3) // 增加缓冲区避免阻塞
@@ -129,12 +164,25 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				_ = resp.Body.Close()
 			}
 
+			wg.Wait()
+
+			// Stopped only after the join: the scanner goroutine calls
+			// ticker.Reset on every line it reads, so stopping first left a
+			// window where it re-armed the ticker behind us and nothing stopped
+			// it again. Stopping a ticker never wakes a receiver, so no
+			// goroutine depends on this happening before wg.Wait.
 			ticker.Stop()
 			if pingTicker != nil {
 				pingTicker.Stop()
 			}
 
-			wg.Wait()
+			// All writers have joined, so nothing can re-arm the deadline set by
+			// ExtendWriteDeadline. It must be cleared here: the server runs with
+			// WriteTimeout=0 and net/http only resets a connection's write
+			// deadline between requests when Server.WriteTimeout > 0, so a
+			// leftover deadline would expire and fail the next write on this
+			// keep-alive connection.
+			_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Time{})
 		})
 	}
 	// Ensure gin.Context is not returned to Gin's pool while any stream goroutine can still use it.
@@ -178,6 +226,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 					if err != nil {
 						logger.LogError(c, "ping data error: "+err.Error())
 						info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonPingFail, err)
+						stop()
 						return
 					}
 					logger.LogDebug(c, "ping data sent")
@@ -190,6 +239,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 					return
 				case <-pingTimeout.C:
 					logger.LogError(c, "ping goroutine max duration reached")
+					stop()
 					return
 				}
 			}
@@ -251,31 +301,35 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			data := scanner.Text()
 			logger.LogDebug(c, "stream scanner data: %s", data)
 
-			if len(data) < 6 {
-				continue
-			}
-			if data[:5] != "data:" && data[:6] != "[DONE]" {
-				continue
-			}
-			data = data[5:]
-			data = strings.TrimSpace(data)
-			if data == "" {
-				continue
-			}
+			// Payload lines are "data: ...". A bare "[DONE]" with no prefix is
+			// off-spec but some upstreams send it, so recognise it as the
+			// terminator here; the old length-and-slice form stripped five bytes
+			// off it and forwarded the leftover "]" as a chunk, which reached the
+			// client as a malformed event and ended the stream as EOF.
 			if !strings.HasPrefix(data, "[DONE]") {
-				info.SetFirstResponseTime()
-				info.ReceivedResponseCount++
-
-				select {
-				case dataChan <- data:
-				case <-ctx.Done():
-					return
-				case <-stopChan:
-					return
+				if !strings.HasPrefix(data, "data:") {
+					continue
 				}
-			} else {
+				data = strings.TrimSpace(data[len("data:"):])
+				if data == "" {
+					continue
+				}
+			}
+
+			if strings.HasPrefix(data, "[DONE]") {
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 				logger.LogDebug(c, "received [DONE], stopping scanner")
+				return
+			}
+
+			info.SetFirstResponseTime()
+			info.ReceivedResponseCount++
+
+			select {
+			case dataChan <- data:
+			case <-ctx.Done():
+				return
+			case <-stopChan:
 				return
 			}
 		}

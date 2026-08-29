@@ -31,6 +31,14 @@ interface NumericSpinnerInputProps {
   disabled?: boolean
   className?: string
   label?: string
+  /**
+   * Renders the collapsed (non-editing) value. Editing always operates on the
+   * raw number, so a caller can show a derived label — "2/5" for a concurrency
+   * cap and its live usage — without changing what gets typed or committed.
+   */
+  renderValue?: (value: number) => React.ReactNode
+  /** Overrides the hover tooltip, which otherwise shows the raw value. */
+  title?: string
 }
 
 export function NumericSpinnerInput({
@@ -42,6 +50,8 @@ export function NumericSpinnerInput({
   disabled = false,
   className,
   label,
+  renderValue,
+  title,
 }: NumericSpinnerInputProps) {
   const [localValue, setLocalValue] = useState(String(value ?? 0))
   const [editing, setEditing] = useState(false)
@@ -165,13 +175,13 @@ export function NumericSpinnerInput({
             type='button'
             onClick={handleStartEdit}
             disabled={disabled}
-            title={localValue}
+            title={title ?? localValue}
             className={cn(
               'h-7 min-w-8 max-w-16 cursor-text truncate px-1 text-center font-mono text-sm tabular-nums',
               disabled && 'cursor-default opacity-50'
             )}
           >
-            {localValue}
+            {renderValue ? renderValue(Number(localValue) || 0) : localValue}
           </button>
         )}
 

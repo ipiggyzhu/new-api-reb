@@ -4,11 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
@@ -86,72 +84,48 @@ func calculateAudioQuota(info QuotaInfo) (int, *common.QuotaClamp) {
 	return common.QuotaFromDecimalChecked(quota)
 }
 
+// PreWssConsumeQuota raises the billing reservation as a realtime session
+// accumulates usage, so a client cannot run up unbounded usage and disconnect
+// before settlement. The increments only reserve — the final settle in
+// PostWssConsumeQuota trues the charge up to the session total, so the session
+// is billed exactly once.
 func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.RealtimeUsage) error {
-	if relayInfo.UsePrice {
+	if relayInfo.PriceData.UsePrice {
+		// Fixed per-call price: pre-consumed in full up front and settled once
+		// at session end; token-based increments do not apply.
 		return nil
 	}
-	userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
-	if err != nil {
-		return err
-	}
-
-	token, err := model.GetTokenByKey(strings.TrimPrefix(relayInfo.TokenKey, "sk-"), false)
-	if err != nil {
-		return err
-	}
-
-	modelName := relayInfo.OriginModelName
-	textInputTokens := usage.InputTokenDetails.TextTokens
-	textOutTokens := usage.OutputTokenDetails.TextTokens
-	audioInputTokens := usage.InputTokenDetails.AudioTokens
-	audioOutTokens := usage.OutputTokenDetails.AudioTokens
-	groupRatio := ratio_setting.GetGroupRatio(relayInfo.UsingGroup)
-	modelRatio, _, _ := ratio_setting.GetModelRatio(modelName)
-
-	autoGroup, exists := common.GetContextKey(ctx, constant.ContextKeyAutoGroup)
-	if exists {
-		groupRatio = ratio_setting.GetGroupRatio(autoGroup.(string))
-		logger.LogDebug(ctx, "final group ratio: %f", groupRatio)
-		relayInfo.UsingGroup = autoGroup.(string)
-	}
-
-	actualGroupRatio := groupRatio
-	userGroupRatio, ok := ratio_setting.GetGroupGroupRatio(relayInfo.UserGroup, relayInfo.UsingGroup)
-	if ok {
-		actualGroupRatio = userGroupRatio
+	if relayInfo.Billing == nil {
+		// Free model: no billing session was created and the final settle
+		// charges nothing, so there is nothing to reserve.
+		return nil
 	}
 
 	quotaInfo := QuotaInfo{
 		InputDetails: TokenDetails{
-			TextTokens:  textInputTokens,
-			AudioTokens: audioInputTokens,
+			TextTokens:  usage.InputTokenDetails.TextTokens,
+			AudioTokens: usage.InputTokenDetails.AudioTokens,
 		},
 		OutputDetails: TokenDetails{
-			TextTokens:  textOutTokens,
-			AudioTokens: audioOutTokens,
+			TextTokens:  usage.OutputTokenDetails.TextTokens,
+			AudioTokens: usage.OutputTokenDetails.AudioTokens,
 		},
-		ModelName:  modelName,
-		UsePrice:   relayInfo.UsePrice,
-		ModelRatio: modelRatio,
-		GroupRatio: actualGroupRatio,
+		ModelName:  relayInfo.OriginModelName,
+		UsePrice:   relayInfo.PriceData.UsePrice,
+		ModelRatio: relayInfo.PriceData.ModelRatio,
+		GroupRatio: relayInfo.PriceData.GroupRatioInfo.GroupRatio,
 	}
 
 	quota, clamp := calculateAudioQuota(quotaInfo)
 	noteQuotaClamp(relayInfo, clamp)
-
-	if userQuota < quota {
-		return fmt.Errorf("user quota is not enough, user quota: %s, need quota: %s", logger.FormatQuota(userQuota), logger.FormatQuota(quota))
+	if clamp != nil {
+		return fmt.Errorf("realtime segment quota saturated: %s", clamp.Error())
 	}
 
-	if !token.UnlimitedQuota && token.RemainQuota < quota {
-		return fmt.Errorf("token quota is not enough, token remain quota: %s, need quota: %s", logger.FormatQuota(token.RemainQuota), logger.FormatQuota(quota))
-	}
-
-	err = PostConsumeQuota(relayInfo, quota, 0, false)
-	if err != nil {
+	if err := relayInfo.Billing.Reserve(relayInfo.Billing.GetPreConsumedQuota() + quota); err != nil {
 		return err
 	}
-	logger.LogInfo(ctx, "realtime streaming consume quota success, quota: "+fmt.Sprintf("%d", quota))
+	logger.LogInfo(ctx, fmt.Sprintf("realtime streaming reserve quota success, quota: %d", quota))
 	return nil
 }
 
@@ -258,6 +232,12 @@ func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, mod
 	})
 }
 
+// CalcOpenRouterCacheCreateTokens infers cache-creation tokens from the cost
+// OpenRouter reports. Both inputs are outside our control — `usage.Cost` comes
+// from the upstream response and the ratios come from configuration — so the
+// result is validated here instead of relying on the caller's range check to
+// absorb a garbage value. A zero divisor or a non-finite quotient would make the
+// bare int conversion undefined, and this token count feeds quota math.
 func CalcOpenRouterCacheCreateTokens(usage dto.Usage, priceData types.PriceData) int {
 	if priceData.CacheCreationRatio == 1 {
 		return 0
@@ -267,16 +247,28 @@ func CalcOpenRouterCacheCreateTokens(usage dto.Usage, priceData types.PriceData)
 	promptCacheReadPrice := quotaPrice * priceData.CacheRatio
 	completionPrice := quotaPrice * priceData.CompletionRatio
 
+	denominator := promptCacheCreatePrice - quotaPrice
+	if denominator == 0 || math.IsNaN(denominator) || math.IsInf(denominator, 0) {
+		return 0
+	}
+
 	cost, _ := usage.Cost.(float64)
 	totalPromptTokens := float64(usage.PromptTokens)
 	completionTokens := float64(usage.CompletionTokens)
 	promptCacheReadTokens := float64(usage.PromptTokensDetails.CachedTokens)
 
-	return int(math.Round((cost -
+	inferredTokens := (cost -
 		totalPromptTokens*quotaPrice +
 		promptCacheReadTokens*(quotaPrice-promptCacheReadPrice) -
 		completionTokens*completionPrice) /
-		(promptCacheCreatePrice - quotaPrice)))
+		denominator
+	if math.IsNaN(inferredTokens) || math.IsInf(inferredTokens, 0) {
+		return 0
+	}
+	// Saturating conversion: the caller treats a negative result as "not
+	// inferable", and a value beyond the quota range can never be a real token
+	// count. QuotaRound logs the clamp so the anomaly stays visible.
+	return common.QuotaRound(inferredTokens)
 }
 
 func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent string) {
@@ -391,21 +383,21 @@ func PreConsumeTokenQuota(relayInfo *relaycommon.RelayInfo, quota int) error {
 	if relayInfo.IsPlayground {
 		return nil
 	}
-	//if relayInfo.TokenUnlimited {
-	//	return nil
-	//}
-	token, err := model.GetTokenByKey(relayInfo.TokenKey, false)
-	if err != nil {
-		return err
+	if relayInfo.TokenUnlimited {
+		// No balance to guard; the decrement only feeds usage accounting.
+		return model.DecreaseTokenQuota(relayInfo.TokenId, relayInfo.TokenKey, quota)
 	}
-	if !relayInfo.TokenUnlimited && token.RemainQuota < quota {
-		return fmt.Errorf("token quota is not enough, token remain quota: %s, need quota: %s", logger.FormatQuota(token.RemainQuota), logger.FormatQuota(quota))
+	// The balance check is part of the UPDATE, so concurrent requests on the
+	// same token cannot each observe a sufficient balance and both reserve it.
+	err := model.PreConsumeTokenQuota(relayInfo.TokenId, relayInfo.TokenKey, quota)
+	if errors.Is(err, model.ErrInsufficientTokenQuota) {
+		remain := 0
+		if token, tokenErr := model.GetTokenByKey(relayInfo.TokenKey, false); tokenErr == nil {
+			remain = token.RemainQuota
+		}
+		return fmt.Errorf("token quota is not enough, token remain quota: %s, need quota: %s", logger.FormatQuota(remain), logger.FormatQuota(quota))
 	}
-	err = model.DecreaseTokenQuota(relayInfo.TokenId, relayInfo.TokenKey, quota)
-	if err != nil {
-		return err
-	}
-	return nil
+	return err
 }
 
 func PostConsumeQuota(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQuota int, sendEmail bool) (err error) {

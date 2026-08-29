@@ -38,13 +38,24 @@ type QuotaDataLogParams struct {
 	NodeName  string
 }
 
+// UpdateQuotaData flushes the dashboard quota aggregation on a fixed interval.
+//
+// The interval is floored at one minute: DataExportInterval reaches this loop
+// from an admin option write, where a non-numeric value decodes to 0 and the
+// backend applies no bound (only the settings form does). A zero would make
+// time.Sleep return immediately and turn this into a tight loop over
+// SaveQuotaDataCache, which writes to the same database the request path uses.
 func UpdateQuotaData() {
 	for {
 		if common.DataExportEnabled {
 			common.SysLog("正在更新数据看板数据...")
 			SaveQuotaDataCache()
 		}
-		time.Sleep(time.Duration(common.DataExportInterval) * time.Minute)
+		interval := common.DataExportInterval
+		if interval < 1 {
+			interval = 1
+		}
+		time.Sleep(time.Duration(interval) * time.Minute)
 	}
 }
 
@@ -97,45 +108,68 @@ func LogQuotaData(params QuotaDataLogParams) {
 	logQuotaDataCache(quotaData)
 }
 
+// SaveQuotaDataCache flushes the dashboard aggregation to the database.
+//
+// The pending map is detached under the lock and the database work runs without
+// it: LogQuotaData is on the request path and takes the same lock, so holding it
+// across a round trip per cache key made every relay wait on the flush. Writers
+// arriving during the flush accumulate into the fresh map and are picked up by
+// the next one.
 func SaveQuotaDataCache() {
 	CacheQuotaDataLock.Lock()
-	defer CacheQuotaDataLock.Unlock()
-	size := len(CacheQuotaData)
-	// 如果缓存中有数据，就保存到数据库中
-	// 1. 先查询数据库中是否有数据
-	// 2. 如果有数据，就更新数据
-	// 3. 如果没有数据，就插入数据
-	for _, quotaData := range CacheQuotaData {
-		quotaDataDB := &QuotaData{}
-		DB.Table("quota_data").
-			Where("user_id = ? and username = ? and model_name = ? and created_at = ? and use_group = ? and token_id = ? and channel_id = ? and node_name = ?",
-				quotaData.UserID, quotaData.Username, quotaData.ModelName, quotaData.CreatedAt, quotaData.UseGroup, quotaData.TokenID, quotaData.ChannelID, quotaData.NodeName).
-			First(quotaDataDB)
-		if quotaDataDB.Id > 0 {
-			//quotaDataDB.Count += quotaData.Count
-			//quotaDataDB.Quota += quotaData.Quota
-			//DB.Table("quota_data").Save(quotaDataDB)
-			increaseQuotaData(quotaData)
-		} else {
-			DB.Table("quota_data").Create(quotaData)
+	pending := CacheQuotaData
+	CacheQuotaData = make(map[string]*QuotaData)
+	CacheQuotaDataLock.Unlock()
+
+	// increaseQuotaData reports whether the row existed, so the common case (the
+	// hour bucket is already in the table) costs one UPDATE instead of a SELECT
+	// followed by an UPDATE. Only a first-seen bucket pays a second round trip for
+	// the INSERT.
+	//
+	// Each delta is applied exactly once whichever branch runs, and snapshots are
+	// disjoint, so concurrent flushes cannot double-count. Two flushes racing on a
+	// first-seen bucket can insert two rows for it; every reader aggregates
+	// quota_data with SUM(...) GROUP BY, so the totals stay correct.
+	for _, quotaData := range pending {
+		updated, err := increaseQuotaData(quotaData)
+		if err != nil {
+			common.SysLog(fmt.Sprintf("increaseQuotaData error: %s", err))
+			continue
+		}
+		if updated {
+			continue
+		}
+		if err := DB.Table("quota_data").Create(quotaData).Error; err != nil {
+			common.SysLog(fmt.Sprintf("createQuotaData error: %s", err))
 		}
 	}
-	CacheQuotaData = make(map[string]*QuotaData)
-	common.SysLog(fmt.Sprintf("保存数据看板数据成功，共保存%d条数据", size))
+	common.SysLog(fmt.Sprintf("保存数据看板数据成功，共保存%d条数据", len(pending)))
 }
 
-func increaseQuotaData(quotaData *QuotaData) {
-	err := DB.Table("quota_data").
+// increaseQuotaData adds the cached deltas onto the matching row and reports
+// whether such a row existed.
+//
+// "Existed" is read off RowsAffected, which is only equivalent to "matched" here
+// because every flushed bucket carries Count >= 1: LogQuotaData seeds Count at 1
+// and logQuotaDataCache only ever adds to it, so the count + ? update always
+// changes the row it matches. That distinction matters on MySQL, which reports
+// changed rather than matched rows unless the connection sets CLIENT_FOUND_ROWS
+// — a zero-delta bucket would be misread there as a missing row and inserted a
+// second time. Any future path that can flush a bucket with Count == 0 has to
+// switch this to an explicit existence check rather than rely on the delta.
+func increaseQuotaData(quotaData *QuotaData) (bool, error) {
+	result := DB.Table("quota_data").
 		Where("user_id = ? and username = ? and model_name = ? and created_at = ? and use_group = ? and token_id = ? and channel_id = ? and node_name = ?",
 			quotaData.UserID, quotaData.Username, quotaData.ModelName, quotaData.CreatedAt, quotaData.UseGroup, quotaData.TokenID, quotaData.ChannelID, quotaData.NodeName).
 		Updates(map[string]interface{}{
 			"count":      gorm.Expr("count + ?", quotaData.Count),
 			"quota":      gorm.Expr("quota + ?", quotaData.Quota),
 			"token_used": gorm.Expr("token_used + ?", quotaData.TokenUsed),
-		}).Error
-	if err != nil {
-		common.SysLog(fmt.Sprintf("increaseQuotaData error: %s", err))
+		})
+	if result.Error != nil {
+		return false, result.Error
 	}
+	return result.RowsAffected > 0, nil
 }
 
 func GetQuotaDataByUsername(username string, startTime int64, endTime int64) (quotaData []*QuotaData, err error) {

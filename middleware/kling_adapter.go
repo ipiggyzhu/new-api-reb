@@ -2,7 +2,6 @@ package middleware
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 
 	"github.com/QuantumNous/new-api/common"
@@ -32,7 +31,7 @@ func KlingRequestConvert() func(c *gin.Context) {
 			"metadata": originalReq,
 		}
 
-		jsonData, err := json.Marshal(unifiedReq)
+		jsonData, err := common.Marshal(unifiedReq)
 		if err != nil {
 			c.Next()
 			return
@@ -45,7 +44,10 @@ func KlingRequestConvert() func(c *gin.Context) {
 			c.Set("action", constant.TaskActionTextGenerate)
 		}
 
-		// We have to reset the request body for the next handlers
+		// UnmarshalBodyReusable above cached a BodyStorage built from the
+		// original body, and GetRequestBody prefers that cache over
+		// KeyRequestBody — drop it so downstream readers see the rewrite.
+		common.CleanupBodyStorage(c)
 		c.Set(common.KeyRequestBody, jsonData)
 		c.Next()
 	}

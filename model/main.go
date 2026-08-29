@@ -200,9 +200,17 @@ func InitDB() (err error) {
 		if err != nil {
 			return err
 		}
-		sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100))
-		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
-		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
+		if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
+			// SQLite in WAL mode is many-readers/single-writer: a large pool
+			// only makes connections fight over the same write lock.
+			sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 4))
+			sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 4))
+			sqlDB.SetConnMaxLifetime(0)
+		} else {
+			sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100))
+			sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
+			sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
+		}
 
 		if !common.IsMasterNode {
 			return nil
@@ -244,9 +252,15 @@ func InitLogDB() (err error) {
 		if err != nil {
 			return err
 		}
-		sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100))
-		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
-		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
+		if common.UsingLogDatabase(common.DatabaseTypeSQLite) {
+			sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 4))
+			sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 4))
+			sqlDB.SetConnMaxLifetime(0)
+		} else {
+			sqlDB.SetMaxIdleConns(common.GetEnvOrDefault("SQL_MAX_IDLE_CONNS", 100))
+			sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
+			sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
+		}
 
 		if !common.IsMasterNode {
 			return nil
@@ -312,6 +326,7 @@ func migrateDB() error {
 			return err
 		}
 	}
+	repairLogIndexes(DB)
 	return nil
 }
 
@@ -385,6 +400,7 @@ func migrateDBFast() error {
 		}
 	}
 	common.SysLog("database migrated")
+	repairLogIndexes(DB)
 	return nil
 }
 
@@ -392,7 +408,126 @@ func migrateLOGDB() error {
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		return migrateClickHouseLogDB()
 	}
-	return LOG_DB.AutoMigrate(&Log{})
+	if err := LOG_DB.AutoMigrate(&Log{}); err != nil {
+		return err
+	}
+	repairLogIndexes(LOG_DB)
+	return nil
+}
+
+// unusedLogIndexes lists indexes that older schemas left on the logs table and
+// that no query can use, so every one of them is a pure B-tree update on the
+// hottest write path in the system: one row inserted per relay request.
+//
+//   - idx_logs_ip indexed logs.ip, which is written on insert and displayed in
+//     the log table but never filtered, sorted or grouped by.
+//   - idx_logs_model_name and idx_logs_user_id are strict leading prefixes of
+//     index_username_model_name(model_name, username) and
+//     idx_user_id_id(user_id, id); a query that can use the single-column index
+//     can use the composite one just as well.
+//   - idx_token_created_ip(token_id, created_at, ip) is only broader than
+//     idx_logs_token_id(token_id) by created_at and the unused ip column, and
+//     the one token-scoped query orders by id rather than created_at.
+var unusedLogIndexes = []string{
+	"idx_logs_ip",
+	"idx_logs_model_name",
+	"idx_logs_user_id",
+	"idx_token_created_ip",
+}
+
+// repairLogIndexes brings the logs table's indexes in line with the queries that
+// actually run against it. AutoMigrate never drops an index just because the
+// struct tag stopped asking for one, and it never rewrites an index whose name
+// already exists even when the column order differs, so both fixes need this
+// explicit step. Every check is guarded, making the whole thing a no-op on a
+// fresh install and on every restart after the first.
+//
+// Failures are logged and ignored. A stale index is a write-cost regression and
+// a wrongly ordered one only forces a sort, so neither is a correctness problem
+// and startup must not hinge on either. Skipped for ClickHouse, whose log table
+// is created by explicit DDL that never had these indexes.
+func repairLogIndexes(db *gorm.DB) {
+	migrator := db.Migrator()
+	if !migrator.HasTable(&Log{}) {
+		return
+	}
+	for _, indexName := range unusedLogIndexes {
+		if !migrator.HasIndex(&Log{}, indexName) {
+			continue
+		}
+		if err := migrator.DropIndex(&Log{}, indexName); err != nil {
+			common.SysLog(fmt.Sprintf("Warning: failed to drop unused index %s: %v", indexName, err))
+			continue
+		}
+		common.SysLog(fmt.Sprintf("Successfully dropped unused index %s", indexName))
+	}
+	rebuildMisorderedLogTimeIndex(db)
+}
+
+// rebuildMisorderedLogTimeIndex repairs idx_created_at_id when an older schema
+// built it as (id, created_at) instead of the (created_at, id) the struct tag
+// asks for. That order matters: the admin log listing ends in
+// "ORDER BY created_at desc, id desc", and an index led by the integer primary
+// key can serve neither that ordering nor the "created_at < ?" range the log
+// cleanup job scans, so the table paid for the index on every insert and got
+// nothing back. Dropping it lets CreateIndex rebuild it from the struct tag's
+// priorities, which keeps the column order right on every supported database.
+func rebuildMisorderedLogTimeIndex(db *gorm.DB) {
+	const indexName = "idx_created_at_id"
+	migrator := db.Migrator()
+	if !migrator.HasIndex(&Log{}, indexName) {
+		return
+	}
+	leadColumn, ok := indexLeadColumn(db, "logs", indexName)
+	// An unreadable index is left alone: rebuilding one on the largest table in
+	// the database is not worth doing on a guess.
+	if !ok || leadColumn == "created_at" {
+		return
+	}
+	if err := migrator.DropIndex(&Log{}, indexName); err != nil {
+		common.SysLog(fmt.Sprintf("Warning: failed to drop misordered index %s: %v", indexName, err))
+		return
+	}
+	if err := migrator.CreateIndex(&Log{}, indexName); err != nil {
+		common.SysLog(fmt.Sprintf("Warning: failed to rebuild index %s: %v", indexName, err))
+		return
+	}
+	common.SysLog(fmt.Sprintf("Successfully rebuilt index %s on (created_at, id)", indexName))
+}
+
+// indexLeadColumn reads the first column of an existing index. GORM's
+// Migrator.GetIndexes reports "not support" on the SQLite driver this project
+// ships, so each dialect gets its own catalog query. The branch is on the
+// connection's own dialector rather than common.UsingMainDatabase /
+// UsingLogDatabase because the caller runs against both DB and LOG_DB, which can
+// be different engines. An unrecognized dialect reports false so the caller
+// leaves the index alone.
+func indexLeadColumn(db *gorm.DB, tableName string, indexName string) (string, bool) {
+	var query string
+	var args []any
+	switch db.Dialector.Name() {
+	case "sqlite":
+		// PRAGMA does not take bind parameters, and index names here are
+		// package-level constants rather than anything user-supplied.
+		query = fmt.Sprintf("SELECT name FROM pragma_index_info('%s') ORDER BY seqno LIMIT 1", indexName)
+	case "mysql":
+		query = "SELECT COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ? ORDER BY SEQ_IN_INDEX LIMIT 1"
+		args = []any{tableName, indexName}
+	case "postgres":
+		query = `SELECT a.attname FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] WHERE c.relname = ? LIMIT 1`
+		args = []any{indexName}
+	default:
+		return "", false
+	}
+	var column string
+	if err := db.Raw(query, args...).Scan(&column).Error; err != nil {
+		common.SysLog(fmt.Sprintf("Warning: failed to read columns of index %s: %v", indexName, err))
+		return "", false
+	}
+	if column == "" {
+		return "", false
+	}
+	return column, true
 }
 
 func migrateClickHouseLogDB() error {

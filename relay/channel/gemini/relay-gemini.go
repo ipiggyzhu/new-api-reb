@@ -297,11 +297,11 @@ func GeminiChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *
 }
 
 func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	defer service.CloseResponseBodyGracefully(resp)
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
-	service.CloseResponseBodyGracefully(resp)
 	logger.LogDebug(c, "Gemini response body: %s", responseBody)
 	var geminiResponse dto.GeminiChatResponse
 	err = common.Unmarshal(responseBody, &geminiResponse)
@@ -420,11 +420,11 @@ func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *h
 }
 
 func GeminiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	defer service.CloseResponseBodyGracefully(resp)
 	responseBody, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
 		return nil, types.NewOpenAIError(readErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
-	_ = resp.Body.Close()
 
 	var geminiResponse dto.GeminiImageResponse
 	if jsonErr := common.Unmarshal(responseBody, &geminiResponse); jsonErr != nil {
@@ -494,33 +494,38 @@ func FetchGeminiModels(baseURL, apiKey, proxyURL string) ([]string, error) {
 			url = fmt.Sprintf("%s?pageToken=%s", url, nextPageToken)
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		// Scoped per page: a function-level defer would hold every page's body and
+		// context open until the loop finished.
+		body, err := func() ([]byte, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+			if err != nil {
+				return nil, fmt.Errorf("创建请求失败: %v", err)
+			}
+
+			request.Header.Set("x-goog-api-key", apiKey)
+
+			response, err := client.Do(request)
+			if err != nil {
+				return nil, fmt.Errorf("请求失败: %v", err)
+			}
+			defer service.CloseResponseBodyGracefully(response)
+
+			if response.StatusCode != http.StatusOK {
+				errBody, _ := io.ReadAll(response.Body)
+				return nil, fmt.Errorf("服务器返回错误 %d: %s", response.StatusCode, string(errBody))
+			}
+
+			body, err := io.ReadAll(response.Body)
+			if err != nil {
+				return nil, fmt.Errorf("读取响应失败: %v", err)
+			}
+			return body, nil
+		}()
 		if err != nil {
-			cancel()
-			return nil, fmt.Errorf("创建请求失败: %v", err)
-		}
-
-		request.Header.Set("x-goog-api-key", apiKey)
-
-		response, err := client.Do(request)
-		if err != nil {
-			cancel()
-			return nil, fmt.Errorf("请求失败: %v", err)
-		}
-
-		if response.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(response.Body)
-			response.Body.Close()
-			cancel()
-			return nil, fmt.Errorf("服务器返回错误 %d: %s", response.StatusCode, string(body))
-		}
-
-		body, err := io.ReadAll(response.Body)
-		response.Body.Close()
-		cancel()
-		if err != nil {
-			return nil, fmt.Errorf("读取响应失败: %v", err)
+			return nil, err
 		}
 
 		var modelsResponse GeminiModelsResponse

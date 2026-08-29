@@ -1,6 +1,10 @@
 package operation_setting
 
-import "github.com/QuantumNous/new-api/setting/config"
+import (
+	"sync/atomic"
+
+	"github.com/QuantumNous/new-api/setting/config"
+)
 
 type ChannelAffinityKeySource struct {
 	Type string `json:"type"` // context_int, context_string, request_header, gjson
@@ -149,10 +153,35 @@ var channelAffinitySetting = ChannelAffinitySetting{
 	},
 }
 
+// publishedAffinitySetting holds the snapshot the request path reads.
+//
+// The config layer replaces Rules with reflect.Value.Set, which writes a slice
+// header (pointer, len, cap) non-atomically. Handing the request path a bare
+// *ChannelAffinitySetting let it range over that header mid-write and pick up the
+// new pointer with the stale length, indexing past the new backing array. Publish
+// an immutable snapshot through an atomic pointer instead, the same way
+// currentIndex does for tool prices.
+var publishedAffinitySetting atomic.Pointer[ChannelAffinitySetting]
+
 func init() {
 	config.GlobalConfig.Register("channel_affinity_setting", &channelAffinitySetting)
+	RepublishChannelAffinitySetting()
 }
 
+// RepublishChannelAffinitySetting snapshots the mutable config into the atomic
+// pointer. Called on init and after an admin save, never on the request path.
+func RepublishChannelAffinitySetting() {
+	snapshot := channelAffinitySetting
+	snapshot.Rules = append([]ChannelAffinityRule(nil), channelAffinitySetting.Rules...)
+	publishedAffinitySetting.Store(&snapshot)
+}
+
+// GetChannelAffinitySetting returns the current snapshot. The returned value is
+// shared and must be treated as read-only; callers that mutate a rule's
+// ParamOverrideTemplate must clone it first (see cloneStringAnyMap).
 func GetChannelAffinitySetting() *ChannelAffinitySetting {
+	if snapshot := publishedAffinitySetting.Load(); snapshot != nil {
+		return snapshot
+	}
 	return &channelAffinitySetting
 }

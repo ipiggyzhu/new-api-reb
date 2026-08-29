@@ -235,12 +235,31 @@ export type ModelSettings = {
   'monitor_setting.auto_test_channel_enabled': boolean
   'monitor_setting.auto_test_channel_minutes': number
   'monitor_setting.channel_test_mode': 'scheduled_all' | 'passive_recovery'
+  'monitor_setting.upstream_model_update_enabled': boolean
+  'monitor_setting.upstream_model_update_interval_hours': number
+  'monitor_setting.upstream_model_update_scan_all_channels': boolean
+  'monitor_setting.upstream_model_update_validate': boolean
+  'monitor_setting.upstream_model_update_remove_failed': boolean
+  'monitor_setting.upstream_model_update_retry_delay_minutes': number
+  'monitor_setting.upstream_model_update_failure_threshold': number
+  'monitor_setting.upstream_model_update_rotation_sample_size': number
+  'monitor_setting.upstream_model_update_max_validations_per_run': number
+  'monitor_setting.channel_test_prompts': string
+  'monitor_setting.channel_test_client_headers': string
   'channel_affinity_setting.enabled': boolean
   'channel_affinity_setting.switch_on_success': boolean
   'channel_affinity_setting.keep_on_channel_disabled': boolean
   'channel_affinity_setting.max_entries': number
   'channel_affinity_setting.default_ttl_seconds': number
   'channel_affinity_setting.rules': string
+  'channel_dynamic_score_setting.enabled': boolean
+  'channel_dynamic_score_setting.successes_to_promote': number
+  'channel_dynamic_score_setting.faults_to_demote': number
+  'channel_dynamic_score_setting.max_promote_tiers': number
+  'channel_dynamic_score_setting.max_demote_tiers': number
+  'channel_dynamic_score_setting.min_sample_for_weight': number
+  'channel_dynamic_score_setting.success_window_seconds': number
+  'channel_dynamic_score_setting.idle_reset_seconds': number
   'model_deployment.ionet.api_key': string
   'model_deployment.ionet.enabled': boolean
 }
@@ -348,6 +367,7 @@ export type OperationsSettings = {
   WorkerValidKey: string
   WorkerAllowHttpImageRequestEnabled: boolean
   LogConsumeEnabled: boolean
+  'general_setting.record_ip_log_for_all': boolean
   'performance_setting.disk_cache_enabled': boolean
   'performance_setting.disk_cache_threshold_mb': number
   'performance_setting.disk_cache_max_size_mb': number

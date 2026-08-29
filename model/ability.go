@@ -3,12 +3,15 @@ package model
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/pkg/channel_score"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/samber/lo"
 	"gorm.io/gorm"
@@ -23,6 +26,13 @@ type Ability struct {
 	Priority  *int64  `json:"priority" gorm:"bigint;default:0;index"`
 	Weight    uint    `json:"weight" gorm:"default:0;index"`
 	Tag       *string `json:"tag" gorm:"index"`
+	// MaxConcurrency mirrors Channel.MaxConcurrency. It is denormalized here for
+	// the same reason Priority and Weight are: the database selection path (the one
+	// production takes, with the memory cache off) builds its candidates from
+	// abilities alone, and resolving the cap per candidate would mean one channel
+	// query per candidate on every request. No index: it is never a filter, only a
+	// value the selector reads off a row it already loaded.
+	MaxConcurrency *int `json:"max_concurrency" gorm:"default:0"`
 }
 
 type AbilityWithChannel struct {
@@ -60,90 +70,305 @@ func GetAllEnableAbilities() []Ability {
 	return abilities
 }
 
-func getPriority(group string, model string, retry int) (int, error) {
+// channelWeightBaseline is the per-candidate floor added to every configured
+// weight before the weighted random draw. It keeps a weight-0 channel reachable
+// inside a tier that also holds weighted channels, and it is the single source
+// of truth for the DB path and the memory-cache path alike.
+const channelWeightBaseline = 10
 
-	var priorities []int
-	err := DB.Model(&Ability{}).
-		Select("DISTINCT(priority)").
-		Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).
-		Order("priority DESC").              // 按优先级降序排序
-		Pluck("priority", &priorities).Error // Pluck用于将查询的结果直接扫描到一个切片中
-
-	if err != nil {
-		// 处理错误
-		return 0, err
+// applyDynamicScores shifts candidates by their learned dynamic score, if the
+// feature is on. Both selection paths funnel through here — the database path
+// and the memory-cache path build candidate lists independently, and applying
+// the adjustment in only one of them would make the feature silently inert in
+// whichever configuration the deployment happens to run.
+//
+// The adjusted priorities live only for this selection. They are handed straight
+// to selectChannelCandidate and never written back to abilities or the channel
+// cache: the admin-configured priority and weight remain the baseline.
+func applyDynamicScores(group string, modelName string, candidates []channelCandidate) []channelCandidate {
+	if len(candidates) == 0 || !channel_score.Enabled() {
+		return candidates
 	}
-
-	if len(priorities) == 0 {
-		// 如果没有查询到优先级，则返回错误
-		return 0, errors.New("数据库一致性被破坏")
+	in := make([]channel_score.Candidate, len(candidates))
+	for i, candidate := range candidates {
+		in[i] = channel_score.Candidate{
+			ChannelId: candidate.channelId,
+			Priority:  candidate.priority,
+			Weight:    candidate.weight,
+		}
 	}
-
-	// 确定要使用的优先级
-	var priorityToUse int
-	if retry >= len(priorities) {
-		// 如果重试次数大于优先级数，则使用最小的优先级
-		priorityToUse = priorities[len(priorities)-1]
-	} else {
-		priorityToUse = priorities[retry]
+	out := channel_score.ApplyToCandidates(group, modelName, in)
+	if len(out) != len(candidates) {
+		// ApplyToCandidates is specified never to add or drop candidates. If that
+		// ever stops holding, fall back to the configured values rather than
+		// selecting from a set that no longer matches.
+		return candidates
 	}
-	return priorityToUse, nil
+	adjusted := make([]channelCandidate, len(candidates))
+	copy(adjusted, candidates)
+	for i := range adjusted {
+		adjusted[i].priority = out[i].Priority
+		adjusted[i].weight = out[i].Weight
+	}
+	return adjusted
 }
 
-func getChannelQuery(group string, model string, retry int) (*gorm.DB, error) {
-	maxPrioritySubQuery := DB.Model(&Ability{}).Select("MAX(priority)").Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true)
-	channelQuery := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ? and priority = (?)", group, model, true, maxPrioritySubQuery)
-	if retry != 0 {
-		priority, err := getPriority(group, model, retry)
-		if err != nil {
-			return nil, err
-		} else {
-			channelQuery = DB.Where(commonGroupCol+" = ? and model = ? and enabled = ? and priority = ?", group, model, true, priority)
+// channelCandidate is one selectable (channel, priority tier, weight) triple.
+// Both selection paths reduce their own storage to this shape, so tier ordering,
+// exclusion and weighting cannot drift apart between them.
+type channelCandidate struct {
+	channelId int
+	priority  int64
+	weight    int
+	// maxConcurrency is the channel's concurrency cap, 0 meaning unlimited. A
+	// channel already serving that many requests is skipped for the whole tier
+	// pass, which is what makes overflow cascade down to the next priority tier
+	// instead of queueing on a saturated upstream.
+	maxConcurrency int
+}
+
+// effectiveChannelWeight converts a configured weight into the share used by the
+// weighted draw. The baseline guarantees every candidate a non-zero share; the
+// clamp keeps a corrupt (overflowed) weight from producing a negative one.
+func effectiveChannelWeight(weight int) int {
+	if weight < 0 {
+		weight = 0
+	}
+	maxInt := int(^uint(0) >> 1)
+	if weight > maxInt-channelWeightBaseline {
+		return maxInt
+	}
+	return weight + channelWeightBaseline
+}
+
+// pickWeightedIndex walks the cumulative weights and returns the index owning
+// draw, which must come from [0, sum(weights)). It is a separate function so the
+// distribution can be asserted by enumerating every draw instead of sampling.
+func pickWeightedIndex(weights []int, draw int) int {
+	for index, weight := range weights {
+		draw -= weight
+		if draw < 0 {
+			return index
+		}
+	}
+	return -1
+}
+
+// selectChannelCandidate picks one channel id from candidates, walking priority
+// tiers from highest to lowest and skipping every channel in excludedChannelIds
+// (the channels already attempted for this request).
+//
+// A tier is exhausted horizontally before selection drops to the next one: as
+// long as an untried sibling remains in the current tier, the draw stays there.
+// That is what keeps a retry off the channel that just failed, which the old
+// retry-indexed tier lookup could not do — with a single distinct priority every
+// retry re-drew from the full candidate set, failed channel included.
+//
+// retry keeps its legacy meaning as the starting tier index only for callers that
+// do not track attempts (empty excludedChannelIds, e.g. the distributor's initial
+// pick). Once attempts are tracked, the excluded set alone decides when a tier is
+// spent. Reports false when every tier is exhausted.
+//
+// A channel already at its concurrency cap is skipped exactly like an excluded
+// one, so a saturated tier demotes to the next tier down. The count is read live;
+// the caller is expected to take the slot it wins (selectAndAcquireChannel) since
+// nothing here reserves it.
+func selectChannelCandidate(candidates []channelCandidate, retry int, excludedChannelIds map[int]bool) (int, bool) {
+	if len(candidates) == 0 {
+		return 0, false
+	}
+
+	tiers := make([]int64, 0, len(candidates))
+	seenTier := make(map[int64]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if _, ok := seenTier[candidate.priority]; ok {
+			continue
+		}
+		seenTier[candidate.priority] = struct{}{}
+		tiers = append(tiers, candidate.priority)
+	}
+	sort.Slice(tiers, func(i, j int) bool { return tiers[i] > tiers[j] })
+
+	startTier := 0
+	if len(excludedChannelIds) == 0 && retry > 0 {
+		startTier = retry
+		if startTier >= len(tiers) {
+			startTier = len(tiers) - 1
 		}
 	}
 
-	return channelQuery, nil
+	for _, tier := range tiers[startTier:] {
+		tierChannelIds := make([]int, 0, len(candidates))
+		tierWeights := make([]int, 0, len(candidates))
+		totalWeight := 0
+		for _, candidate := range candidates {
+			if candidate.priority != tier || excludedChannelIds[candidate.channelId] || candidate.isSaturated() {
+				continue
+			}
+			weight := effectiveChannelWeight(candidate.weight)
+			tierChannelIds = append(tierChannelIds, candidate.channelId)
+			tierWeights = append(tierWeights, weight)
+			maxInt := int(^uint(0) >> 1)
+			if totalWeight > maxInt-weight {
+				// Keep rand.Intn's upper bound positive even when several
+				// operator-supplied weights approach the machine int limit.
+				totalWeight = maxInt
+			} else {
+				totalWeight += weight
+			}
+		}
+		if len(tierChannelIds) == 0 {
+			// Every channel of this tier was already tried, saturated, or filtered
+			// out by the request path; fall back to the next tier down.
+			continue
+		}
+		index := pickWeightedIndex(tierWeights, common.GetRandomInt(totalWeight))
+		if index < 0 {
+			continue
+		}
+		return tierChannelIds[index], true
+	}
+	return 0, false
 }
 
-func GetChannel(group string, model string, retry int, requestPath string) (*Channel, error) {
-	var abilities []Ability
+// isSaturated reports whether the channel is already serving as many requests as
+// its cap allows.
+func (candidate channelCandidate) isSaturated() bool {
+	return candidate.maxConcurrency > 0 && ChannelInFlight(candidate.channelId) >= candidate.maxConcurrency
+}
 
-	var err error = nil
-	channelQuery, err := getChannelQuery(group, model, retry)
-	if err != nil {
-		return nil, err
+// ErrAllChannelsSaturated is returned when every channel that could serve the
+// request is at its concurrency cap. It is deliberately distinct from "no channel
+// found": nothing is misconfigured and no channel misbehaved, the upstreams are
+// simply all busy, so the caller must not blame, disable, or unpin any channel.
+var ErrAllChannelsSaturated = errors.New("all matching channels are at their concurrency limit")
+
+// selectAndAcquireChannel picks a channel and takes one of its concurrency slots
+// in the same step, so the winner of a race for the last slot is the only request
+// admitted. The caller owns the slot from here on and must release it via
+// service.ReleaseHeldChannelSlot when the attempt ends.
+//
+// Losing the acquire means another request took the last slot between the
+// saturation check and the acquire. The channel is dropped from this request's
+// draw and selection runs again, which lets it demote to a lower tier exactly as
+// it would have if the channel had already been full.
+func selectAndAcquireChannel(candidates []channelCandidate, retry int, excludedChannelIds map[int]bool) (int, error) {
+	attempted := excludedChannelIds
+	cloned := false
+	for {
+		channelId, ok := selectChannelCandidate(candidates, retry, attempted)
+		if !ok {
+			// Distinguish "everything is busy" from "nothing matches" so the caller
+			// can report backpressure instead of a configuration error.
+			for _, candidate := range candidates {
+				if !attempted[candidate.channelId] && candidate.isSaturated() {
+					return 0, ErrAllChannelsSaturated
+				}
+			}
+			return 0, nil
+		}
+		limit := 0
+		for _, candidate := range candidates {
+			if candidate.channelId == channelId {
+				limit = candidate.maxConcurrency
+				break
+			}
+		}
+		if AcquireChannelSlot(channelId, limit) {
+			return channelId, nil
+		}
+		if !cloned {
+			// The caller's excluded set belongs to the retry bookkeeping and must not
+			// gain entries for channels this request never actually tried.
+			attempted = make(map[int]bool, len(excludedChannelIds)+1)
+			for id := range excludedChannelIds {
+				attempted[id] = true
+			}
+			cloned = true
+		}
+		attempted[channelId] = true
 	}
-	if common.UsingMainDatabase(common.DatabaseTypeSQLite) || common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		err = channelQuery.Order("weight DESC").Find(&abilities).Error
-	} else {
-		err = channelQuery.Order("weight DESC").Find(&abilities).Error
-	}
+}
+
+// GetChannel selects a channel straight from the database (the path taken when
+// the memory cache is disabled). excludedChannelIds holds the channels already
+// attempted for this request and is removed from every tier.
+//
+// All enabled tiers for group/model are loaded in one query rather than filtering
+// to a single priority in SQL: the request-path filter can empty a tier, and
+// selection must then demote to the next tier instead of failing. If the exact
+// model has no usable abilities, the normalized model name gets the same pass.
+// This keeps tiering identical to the memory-cache path, which filters before it
+// groups.
+func GetChannel(group string, model string, retry int, requestPath string, excludedChannelIds map[int]bool) (*Channel, error) {
+	abilities, err := getEnabledAbilities(group, model)
 	if err != nil {
 		return nil, err
 	}
 	abilities = filterAbilitiesByRequestPathAndModel(abilities, requestPath, model)
-	channel := Channel{}
-	if len(abilities) > 0 {
-		// Randomly choose one
-		weightSum := uint(0)
-		for _, ability_ := range abilities {
-			weightSum += ability_.Weight + 10
-		}
-		// Randomly choose one
-		weight := common.GetRandomInt(int(weightSum))
-		for _, ability_ := range abilities {
-			weight -= int(ability_.Weight) + 10
-			//log.Printf("weight: %d, ability weight: %d", weight, *ability_.Weight)
-			if weight <= 0 {
-				channel.Id = ability_.ChannelId
-				break
+	if len(abilities) == 0 {
+		normalizedModel := ratio_setting.FormatMatchingModelName(model)
+		if normalizedModel != model {
+			abilities, err = getEnabledAbilities(group, normalizedModel)
+			if err != nil {
+				return nil, err
 			}
+			abilities = filterAbilitiesByRequestPathAndModel(abilities, requestPath, model)
 		}
-	} else {
+	}
+	if len(abilities) == 0 {
 		return nil, nil
 	}
-	err = DB.First(&channel, "id = ?", channel.Id).Error
-	return &channel, err
+
+	candidates := make([]channelCandidate, 0, len(abilities))
+	for _, ability := range abilities {
+		// A NULL priority column maps to 0, matching Channel.GetPriority so both
+		// selection paths place such a channel in the same tier.
+		priority := int64(0)
+		if ability.Priority != nil {
+			priority = *ability.Priority
+		}
+		maxConcurrency := 0
+		if ability.MaxConcurrency != nil && *ability.MaxConcurrency > 0 {
+			maxConcurrency = *ability.MaxConcurrency
+		}
+		candidates = append(candidates, channelCandidate{
+			channelId:      ability.ChannelId,
+			priority:       priority,
+			weight:         saturatingUintToInt(ability.Weight),
+			maxConcurrency: maxConcurrency,
+		})
+	}
+
+	candidates = applyDynamicScores(group, model, candidates)
+
+	channelId, err := selectAndAcquireChannel(candidates, retry, excludedChannelIds)
+	if err != nil {
+		return nil, err
+	}
+	if channelId == 0 {
+		return nil, fmt.Errorf("no channel found, group: %s, model: %s", group, model)
+	}
+	channel := Channel{}
+	if err = DB.First(&channel, "id = ?", channelId).Error; err != nil {
+		// The slot was taken before the row was read; nothing downstream will bind
+		// this channel to the request, so nothing would ever give it back.
+		ReleaseChannelSlot(channelId)
+		return nil, err
+	}
+	return &channel, nil
+}
+
+// getEnabledAbilities mirrors the memory-cache path's channel-status filter.
+// The abilities table is denormalized and can briefly lag behind a channel
+// status update; joining channels here prevents the no-cache deployment mode
+// from routing a request to a channel that has already been disabled.
+func getEnabledAbilities(group string, modelName string) ([]Ability, error) {
+	var abilities []Ability
+	err := DB.Joins("JOIN channels ON channels.id = abilities.channel_id").
+		Where("abilities."+commonGroupCol+" = ? and abilities.model = ? and abilities.enabled = ? and channels.status = ?", group, modelName, true, common.ChannelStatusEnabled).
+		Order("abilities.priority DESC").Order("abilities.weight DESC").Find(&abilities).Error
+	return abilities, err
 }
 
 // filterAbilitiesByRequestPathAndModel restricts candidates by request path and
@@ -206,13 +431,14 @@ func (channel *Channel) AddAbilities(tx *gorm.DB) error {
 			}
 			abilitySet[key] = struct{}{}
 			ability := Ability{
-				Group:     group,
-				Model:     model,
-				ChannelId: channel.Id,
-				Enabled:   channel.Status == common.ChannelStatusEnabled,
-				Priority:  channel.Priority,
-				Weight:    uint(channel.GetWeight()),
-				Tag:       channel.Tag,
+				Group:          group,
+				Model:          model,
+				ChannelId:      channel.Id,
+				Enabled:        channel.Status == common.ChannelStatusEnabled,
+				Priority:       channel.Priority,
+				Weight:         uint(channel.GetWeight()),
+				Tag:            channel.Tag,
+				MaxConcurrency: channel.MaxConcurrency,
 			}
 			abilities = append(abilities, ability)
 		}
@@ -278,13 +504,14 @@ func (channel *Channel) UpdateAbilities(tx *gorm.DB) error {
 			}
 			abilitySet[key] = struct{}{}
 			ability := Ability{
-				Group:     group,
-				Model:     model,
-				ChannelId: channel.Id,
-				Enabled:   channel.Status == common.ChannelStatusEnabled,
-				Priority:  channel.Priority,
-				Weight:    uint(channel.GetWeight()),
-				Tag:       channel.Tag,
+				Group:          group,
+				Model:          model,
+				ChannelId:      channel.Id,
+				Enabled:        channel.Status == common.ChannelStatusEnabled,
+				Priority:       channel.Priority,
+				Weight:         uint(channel.GetWeight()),
+				Tag:            channel.Tag,
+				MaxConcurrency: channel.MaxConcurrency,
 			}
 			abilities = append(abilities, ability)
 		}
@@ -318,7 +545,7 @@ func UpdateAbilityStatusByTag(tag string, status bool) error {
 	return DB.Model(&Ability{}).Where("tag = ?", tag).Select("enabled").Update("enabled", status).Error
 }
 
-func UpdateAbilityByTag(tag string, newTag *string, priority *int64, weight *uint) error {
+func UpdateAbilityByTag(tag string, newTag *string, priority *int64, weight *uint, maxConcurrency *int) error {
 	ability := Ability{}
 	if newTag != nil {
 		ability.Tag = newTag
@@ -328,6 +555,11 @@ func UpdateAbilityByTag(tag string, newTag *string, priority *int64, weight *uin
 	}
 	if weight != nil {
 		ability.Weight = *weight
+	}
+	// The denormalized copy must follow the channel, or the database selection
+	// path would keep skipping (or admitting) requests against the old cap.
+	if maxConcurrency != nil {
+		ability.MaxConcurrency = maxConcurrency
 	}
 	return DB.Model(&Ability{}).Where("tag = ?", tag).Updates(ability).Error
 }

@@ -108,6 +108,18 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
+	// WebSocket is opt-in per channel and only for /v1/responses. A refused
+	// handshake hands back the buffered body so the HTTP path runs unchanged.
+	if channel.ShouldTryResponsesWebsocket(info) {
+		attempt, err := channel.TryResponsesWebsocket(a, c, info, requestBody)
+		if err != nil {
+			return nil, err
+		}
+		if attempt.Response != nil {
+			return attempt.Response, nil
+		}
+		requestBody = attempt.FallbackBody
+	}
 	return channel.DoApiRequest(a, c, info, requestBody)
 }
 

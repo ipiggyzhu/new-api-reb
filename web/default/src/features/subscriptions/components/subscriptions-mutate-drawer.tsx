@@ -112,34 +112,47 @@ export function SubscriptionsMutateDrawer({
   })
 
   useEffect(() => {
-    if (open) {
-      if (currentRow?.plan) {
-        form.reset(planToFormValues(currentRow.plan))
-      } else {
-        form.reset(PLAN_FORM_DEFAULTS)
-      }
-      getGroups()
-        .then((res) => {
-          if (res.success) setGroupOptions(res.data || [])
-        })
-        .catch(() => {})
-      // Best-effort — empty list still lets the operator use "+ Create".
-      listWaffoPancakeSubscriptionProductOptions()
-        .then((res) => {
-          if (
-            res.message === 'success' &&
-            typeof res.data === 'object' &&
-            res.data &&
-            Array.isArray((res.data as { products?: unknown }).products)
-          ) {
-            setPancakeProducts(
-              (res.data as { products: typeof pancakeProducts }).products
-            )
-          } else {
-            setPancakeProducts([])
-          }
-        })
-        .catch(() => setPancakeProducts([]))
+    if (!open) return
+
+    // These fetches were not cancelled on close, so a response from a previous
+    // open could land after the drawer was reopened for a different plan and
+    // overwrite the option lists it had already loaded.
+    let cancelled = false
+
+    if (currentRow?.plan) {
+      form.reset(planToFormValues(currentRow.plan))
+    } else {
+      form.reset(PLAN_FORM_DEFAULTS)
+    }
+    getGroups()
+      .then((res) => {
+        if (cancelled) return
+        if (res.success) setGroupOptions(res.data || [])
+      })
+      .catch(() => {})
+    // Best-effort — empty list still lets the operator use "+ Create".
+    listWaffoPancakeSubscriptionProductOptions()
+      .then((res) => {
+        if (cancelled) return
+        if (
+          res.message === 'success' &&
+          typeof res.data === 'object' &&
+          res.data &&
+          Array.isArray((res.data as { products?: unknown }).products)
+        ) {
+          setPancakeProducts(
+            (res.data as { products: typeof pancakeProducts }).products
+          )
+        } else {
+          setPancakeProducts([])
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setPancakeProducts([])
+      })
+
+    return () => {
+      cancelled = true
     }
   }, [open, currentRow, form])
 

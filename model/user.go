@@ -486,14 +486,21 @@ func HardDeleteUserById(id int) error {
 }
 
 func inviteUser(inviterId int) (err error) {
-	user, err := GetUserById(inviterId, true)
-	if err != nil {
-		return err
+	if inviterId == 0 {
+		return errors.New("id 为空！")
 	}
-	user.AffCount++
-	user.AffQuota += common.QuotaForInviter
-	user.AffHistoryQuota += common.QuotaForInviter
-	return DB.Save(user).Error
+	result := DB.Model(&User{}).Where("id = ?", inviterId).Updates(map[string]interface{}{
+		"aff_count":   gorm.Expr("aff_count + ?", 1),
+		"aff_quota":   gorm.Expr("aff_quota + ?", common.QuotaForInviter),
+		"aff_history": gorm.Expr("aff_history + ?", common.QuotaForInviter),
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 func (user *User) TransferAffQuotaToQuota(quota int) error {
@@ -1184,6 +1191,41 @@ func decreaseUserQuota(id int, quota int) (err error) {
 	return err
 }
 
+// ErrInsufficientUserQuota reports that a conditional reservation found the
+// wallet balance below the requested amount.
+var ErrInsufficientUserQuota = errors.New("用户额度不足")
+
+// PreConsumeUserQuota reserves quota for an in-flight request. The balance
+// guard lives in the UPDATE statement, so two concurrent requests that both
+// read the same sufficient balance cannot both succeed and overdraw the wallet.
+//
+// Unlike DecreaseUserQuota this never defers to the batch updater: a reservation
+// that is only held in memory cannot be enforced against a concurrent request,
+// which is the whole point of taking it.
+func PreConsumeUserQuota(id int, quota int) error {
+	if quota < 0 {
+		return errors.New("quota 不能为负数！")
+	}
+	if quota == 0 {
+		return nil
+	}
+	result := DB.Model(&User{}).
+		Where("id = ? AND quota >= ?", id, quota).
+		Update("quota", gorm.Expr("quota - ?", quota))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrInsufficientUserQuota
+	}
+	gopool.Go(func() {
+		if err := cacheDecrUserQuota(id, int64(quota)); err != nil {
+			common.SysLog("failed to decrease user quota cache: " + err.Error())
+		}
+	})
+	return nil
+}
+
 func DeltaUpdateUserQuota(id int, delta int) (err error) {
 	if delta == 0 {
 		return nil
@@ -1238,21 +1280,21 @@ func updateUserUsedQuotaAndRequestCount(id int, quota int, count int) {
 	//}
 }
 
-func updateUserQuotaUsedQuotaAndRequestCount(id int, quota int, usedQuota int, requestCount int) {
+// updateUserQuotaUsedQuotaAndRequestCount folds the three per-user batch deltas
+// into one UPDATE. db is the flush transaction, so a failure aborts the batch
+// instead of leaving the user's three counters inconsistent with each other.
+func updateUserQuotaUsedQuotaAndRequestCount(db *gorm.DB, id int, quota int, usedQuota int, requestCount int) error {
 	if quota == 0 && usedQuota == 0 && requestCount == 0 {
-		return
+		return nil
 	}
 
-	err := DB.Model(&User{}).Where("id = ?", id).Updates(
+	return db.Model(&User{}).Where("id = ?", id).Updates(
 		map[string]interface{}{
 			"quota":         gorm.Expr("quota + ?", quota),
 			"used_quota":    gorm.Expr("used_quota + ?", usedQuota),
 			"request_count": gorm.Expr("request_count + ?", requestCount),
 		},
 	).Error
-	if err != nil {
-		common.SysLog("failed to batch update user quota, used quota and request count: " + err.Error())
-	}
 }
 
 func updateUserUsedQuota(id int, quota int) {

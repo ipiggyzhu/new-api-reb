@@ -23,10 +23,15 @@ func TopupGroupRatio2JSONString() string {
 }
 
 func UpdateTopupGroupRatioByJSONString(jsonStr string) error {
+	next := make(map[string]float64)
+	if err := Unmarshal([]byte(jsonStr), &next); err != nil {
+		return err
+	}
+
 	topupGroupRatioMutex.Lock()
 	defer topupGroupRatioMutex.Unlock()
-	topupGroupRatio = make(map[string]float64)
-	return json.Unmarshal([]byte(jsonStr), &topupGroupRatio)
+	topupGroupRatio = next
+	return nil
 }
 
 func GetTopupGroupRatio(name string) float64 {

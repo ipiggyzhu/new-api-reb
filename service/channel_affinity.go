@@ -3,6 +3,7 @@ package service
 import (
 	"fmt"
 	"hash/fnv"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/cachex"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
@@ -25,6 +28,29 @@ const (
 	ginKeyChannelAffinityMeta       = "channel_affinity_meta"
 	ginKeyChannelAffinityLogInfo    = "channel_affinity_log_info"
 	ginKeyChannelAffinitySkipRetry  = "channel_affinity_skip_retry_on_failure"
+	// ginKeyChannelAffinityRelayOK carries the relay handler's own verdict on the
+	// request. The distributor decides affinity after c.Next() returns, when a
+	// stream that failed mid-flight has already committed 200 to the wire.
+	ginKeyChannelAffinityRelayOK = "channel_affinity_relay_succeeded"
+	// ginKeyChannelAffinityBypassed marks that a healthy pinned channel was skipped
+	// only because it was at its concurrency limit, so the request served on a
+	// different channel must not repin the key to it.
+	ginKeyChannelAffinityBypassed = "channel_affinity_bypassed"
+	// ginKeyChannelAffinityPinnedChannel records which channel the pin actually
+	// resolved to, so a failure can be attributed to the pinned channel rather than
+	// to a fallback the retry loop moved on to.
+	ginKeyChannelAffinityPinnedChannel = "channel_affinity_pinned_channel"
+	// ginKeyChannelAffinityFaultChannel records the channel a genuine upstream
+	// fault was attributed to. Only a fault on the pinned channel retracts the pin;
+	// a rate limit, a client error, or a fault on some other channel must not.
+	//
+	// It holds a SET of channel ids, not a single id. The retry loop calls the
+	// marker once per failed attempt, so a single slot let a later fallback's fault
+	// overwrite the pinned channel's own: pin A faults, the retry to B faults too,
+	// and the release check then compared B against A, decided the pinned channel
+	// was fine and kept the pin forever. That is the same "every channel failed but
+	// it stays on the old one" symptom the pin was supposed to stop having.
+	ginKeyChannelAffinityFaultChannel = "channel_affinity_fault_channels"
 
 	channelAffinityCacheNamespace           = "new-api:channel_affinity:v1"
 	channelAffinityUsageCacheStatsNamespace = "new-api:channel_affinity_usage_cache_stats:v1"
@@ -38,6 +64,10 @@ var (
 	channelAffinityUsageCacheStatsCache *cachex.HybridCache[ChannelAffinityUsageCacheCounters]
 
 	channelAffinityRegexCache sync.Map // map[string]*regexp.Regexp
+
+	// channelAffinityEmptyModelRegexLogged keeps the rejection of a rule with an
+	// empty model_regex down to one line per rule name per process.
+	channelAffinityEmptyModelRegexLogged sync.Map // map[string]struct{}
 )
 
 type channelAffinityMeta struct {
@@ -336,8 +366,11 @@ func extractChannelAffinityValue(c *gin.Context, src operation_setting.ChannelAf
 
 func buildChannelAffinityCacheKeySuffix(rule operation_setting.ChannelAffinityRule, modelName string, usingGroup string, affinityValue string) string {
 	parts := make([]string, 0, 4)
-	if rule.IncludeRuleName && rule.Name != "" {
-		parts = append(parts, rule.Name)
+	// The rule name must be trimmed here exactly as GetChannelAffinityCacheStats
+	// and ClearChannelAffinityCacheByRuleName trim it, otherwise a name with
+	// surrounding whitespace produces keys that neither can attribute.
+	if ruleName := strings.TrimSpace(rule.Name); rule.IncludeRuleName && ruleName != "" {
+		parts = append(parts, ruleName)
 	}
 	if rule.IncludeModelName && modelName != "" {
 		parts = append(parts, modelName)
@@ -502,31 +535,12 @@ func appendChannelAffinityTemplateAdminInfo(c *gin.Context, meta channelAffinity
 		return
 	}
 
-	templateInfo := map[string]interface{}{
+	info := channelAffinityLogInfo(c, meta)
+	info["override_template"] = map[string]interface{}{
 		"applied":             true,
 		"rule_name":           meta.RuleName,
 		"param_override_keys": len(meta.ParamTemplate),
 	}
-	if anyInfo, ok := c.Get(ginKeyChannelAffinityLogInfo); ok {
-		if info, ok := anyInfo.(map[string]interface{}); ok {
-			info["override_template"] = templateInfo
-			c.Set(ginKeyChannelAffinityLogInfo, info)
-			return
-		}
-	}
-	c.Set(ginKeyChannelAffinityLogInfo, map[string]interface{}{
-		"reason":            meta.RuleName,
-		"rule_name":         meta.RuleName,
-		"using_group":       meta.UsingGroup,
-		"model":             meta.ModelName,
-		"request_path":      meta.RequestPath,
-		"key_source":        meta.KeySourceType,
-		"key_key":           meta.KeySourceKey,
-		"key_path":          meta.KeySourcePath,
-		"key_hint":          meta.KeyHint,
-		"key_fp":            meta.KeyFingerprint,
-		"override_template": templateInfo,
-	})
 }
 
 // ApplyChannelAffinityOverrideTemplate merges per-rule channel override templates onto the selected channel override config.
@@ -552,16 +566,31 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 	if setting == nil || !setting.Enabled {
 		return 0, false
 	}
+	if c == nil {
+		return 0, false
+	}
 	path := ""
-	if c != nil && c.Request != nil && c.Request.URL != nil {
+	if c.Request != nil && c.Request.URL != nil {
 		path = c.Request.URL.Path
 	}
 	userAgent := ""
-	if c != nil && c.Request != nil {
+	if c.Request != nil {
 		userAgent = c.Request.UserAgent()
 	}
 
 	for _, rule := range setting.Rules {
+		// model_regex is the rule's primary selector and the rule editor requires
+		// it, so an empty one can only arrive from a direct option API write.
+		// Reading it as "match everything" (the way path_regex reads an empty
+		// list) would turn a half-written rule into a gateway-wide affinity that
+		// pins every model of every request onto one channel, so the rule is
+		// rejected instead — but audibly, unlike the silent skip it used to get.
+		if len(rule.ModelRegex) == 0 {
+			if _, seen := channelAffinityEmptyModelRegexLogged.LoadOrStore(rule.Name, struct{}{}); !seen {
+				logger.LogWarn(c, fmt.Sprintf("channel affinity rule %q ignored: model_regex is empty", rule.Name))
+			}
+			continue
+		}
 		if !matchAnyRegexCached(rule.ModelRegex, modelName) {
 			continue
 		}
@@ -593,10 +622,10 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 		}
 		cacheKeySuffix := buildChannelAffinityCacheKeySuffix(rule, modelName, usingGroup, affinityValue)
 		cacheKeyFull := channelAffinityCacheNamespace + ":" + cacheKeySuffix
-		setChannelAffinityContext(c, channelAffinityMeta{
+		meta := channelAffinityMeta{
 			CacheKey:       cacheKeyFull,
 			TTLSeconds:     ttlSeconds,
-			RuleName:       rule.Name,
+			RuleName:       strings.TrimSpace(rule.Name),
 			SkipRetry:      rule.SkipRetryOnFailure,
 			ParamTemplate:  cloneStringAnyMap(rule.ParamOverrideTemplate),
 			KeySourceType:  strings.TrimSpace(usedSource.Type),
@@ -607,38 +636,104 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 			UsingGroup:     usingGroup,
 			ModelName:      modelName,
 			RequestPath:    path,
-		})
+		}
+		setChannelAffinityContext(c, meta)
+
+		// A matched rule is recorded before the lookup result is known, so a cold
+		// cache ("matched, cache miss") stays distinguishable from a rule that
+		// never matched at all (no channel_affinity entry in admin_info).
+		info := channelAffinityLogInfo(c, meta)
+		info["matched"] = true
 
 		cache := getChannelAffinityCache()
 		channelID, found, err := cache.Get(cacheKeySuffix)
 		if err != nil {
+			info["cache"] = "error"
 			common.SysError(fmt.Sprintf("channel affinity cache get failed: key=%s, err=%v", cacheKeyFull, err))
 			return 0, false
 		}
 		if found {
+			info["cache"] = "hit"
+			info["cached_channel_id"] = channelID
+			// A hit is not by itself an answer. The cache key is built from the rule,
+			// model, group and affinity value, so it does not change when an admin
+			// edits priority — without this check the pin kept serving the old channel
+			// until the TTL expired (an hour by default), which read as "raising a
+			// channel's priority does nothing".
+			//
+			// Only the admin-configured priority is compared. Dynamic scores are
+			// excluded on purpose: they move with ordinary traffic, and letting them
+			// break the pin would defeat what the pin is for.
+			switch model.ValidateChannelAffinityPin(channelID, usingGroup, modelName, path) {
+			case model.ChannelAffinityPinUnusable:
+				info["cache"] = "stale_unusable"
+				logger.LogDebug(c, "channel affinity dropped, channel no longer eligible: rule=%s, key=%s, channel=%d", meta.RuleName, cacheKeyFull, channelID)
+				dropChannelAffinityEntry(cacheKeySuffix, channelID)
+				return 0, false
+			case model.ChannelAffinityPinOutranked:
+				info["cache"] = "stale_outranked"
+				logger.LogDebug(c, "channel affinity dropped, higher priority channel configured: rule=%s, key=%s, channel=%d", meta.RuleName, cacheKeyFull, channelID)
+				dropChannelAffinityEntry(cacheKeySuffix, channelID)
+				return 0, false
+			}
+			logger.LogDebug(c, "channel affinity hit: rule=%s, key=%s, channel=%d", meta.RuleName, cacheKeyFull, channelID)
 			return channelID, true
 		}
+		info["cache"] = "miss"
+		logger.LogDebug(c, "channel affinity miss: rule=%s, key=%s", meta.RuleName, cacheKeyFull)
 		return 0, false
 	}
 	return 0, false
 }
 
+// channelAffinityLogInfo returns the request's affinity audit payload, creating
+// it from meta on first use. Callers mutate the returned map in place; it lands
+// under the consume/error log's other.admin_info.channel_affinity, which is
+// stripped from non-admin log views.
+func channelAffinityLogInfo(c *gin.Context, meta channelAffinityMeta) map[string]interface{} {
+	if anyInfo, ok := c.Get(ginKeyChannelAffinityLogInfo); ok {
+		if info, ok := anyInfo.(map[string]interface{}); ok && info != nil {
+			return info
+		}
+	}
+	info := map[string]interface{}{
+		"reason":       meta.RuleName,
+		"rule_name":    meta.RuleName,
+		"using_group":  meta.UsingGroup,
+		"model":        meta.ModelName,
+		"request_path": meta.RequestPath,
+		"key_source":   meta.KeySourceType,
+		"key_key":      meta.KeySourceKey,
+		"key_path":     meta.KeySourcePath,
+		"key_hint":     meta.KeyHint,
+		"key_fp":       meta.KeyFingerprint,
+	}
+	c.Set(ginKeyChannelAffinityLogInfo, info)
+	return info
+}
+
+// ShouldSkipRetryAfterChannelAffinityFailure reports whether the failed attempt
+// ran on a channel that affinity itself picked, which is the only case where
+// "skip_retry_on_failure" applies.
+//
+// It deliberately trusts nothing but the explicit key that MarkChannelAffinityUsed
+// writes when affinity really selected the channel (and that
+// ClearCurrentChannelAffinityCache resets when the pinned channel was unusable).
+// Falling back to the rule's SkipRetryOnFailure off the request meta used to make
+// every request that merely *matched* a rule non-retryable — cache miss, cache
+// error, or a pinned-but-disabled channel kept by keep_on_channel_disabled — even
+// though the channel actually serving it came from ordinary priority/weight
+// selection and had nothing to do with affinity.
 func ShouldSkipRetryAfterChannelAffinityFailure(c *gin.Context) bool {
 	if c == nil {
 		return false
 	}
 	v, ok := c.Get(ginKeyChannelAffinitySkipRetry)
-	if ok {
-		b, ok := v.(bool)
-		if ok {
-			return b
-		}
-	}
-	meta, ok := getChannelAffinityMeta(c)
 	if !ok {
 		return false
 	}
-	return meta.SkipRetry
+	b, _ := v.(bool)
+	return b
 }
 
 func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
@@ -682,21 +777,141 @@ func MarkChannelAffinityUsed(c *gin.Context, selectedGroup string, channelID int
 		return
 	}
 	c.Set(ginKeyChannelAffinitySkipRetry, meta.SkipRetry)
-	info := map[string]interface{}{
-		"reason":         meta.RuleName,
-		"rule_name":      meta.RuleName,
-		"using_group":    meta.UsingGroup,
-		"selected_group": selectedGroup,
-		"model":          meta.ModelName,
-		"request_path":   meta.RequestPath,
-		"channel_id":     channelID,
-		"key_source":     meta.KeySourceType,
-		"key_key":        meta.KeySourceKey,
-		"key_path":       meta.KeySourcePath,
-		"key_hint":       meta.KeyHint,
-		"key_fp":         meta.KeyFingerprint,
+	// Remembered so a later failure can tell "the pinned channel broke" from "a
+	// fallback channel broke". Only the former should retract the pin.
+	c.Set(ginKeyChannelAffinityPinnedChannel, channelID)
+	info := channelAffinityLogInfo(c, meta)
+	info["selected_group"] = selectedGroup
+	info["channel_id"] = channelID
+}
+
+// MarkChannelAffinityChannelFault records that channelID failed with an error
+// that IsChannelFaultError accepted as the channel's own fault.
+//
+// The caller classifies, not this function: rate limits, client errors and our
+// own misconfiguration reach the same call site and must not cost a channel its
+// pin. Recording the channel id (rather than a bare bool) is what lets the pin be
+// retracted only when the failure was on the pinned channel itself.
+//
+// Faults accumulate across the request's retries instead of replacing each other.
+// One request can fault on several channels, and the pinned channel is not
+// necessarily the last of them, so overwriting would hide the fault that actually
+// matters behind whichever fallback happened to fail last.
+func MarkChannelAffinityChannelFault(c *gin.Context, channelID int) {
+	if c == nil || channelID <= 0 {
+		return
 	}
-	c.Set(ginKeyChannelAffinityLogInfo, info)
+	stored, _ := c.Get(ginKeyChannelAffinityFaultChannel)
+	faulted, _ := stored.(map[int]bool)
+	if faulted == nil {
+		faulted = make(map[int]bool, 2)
+		c.Set(ginKeyChannelAffinityFaultChannel, faulted)
+	}
+	// Mutating the stored map in place keeps every attempt writing to one set; gin
+	// contexts are per-request and this only runs on the request's own goroutine.
+	faulted[channelID] = true
+}
+
+// channelAffinityChannelFaulted reports whether channelID was recorded as having
+// faulted during this request.
+func channelAffinityChannelFaulted(c *gin.Context, channelID int) bool {
+	if c == nil || channelID <= 0 {
+		return false
+	}
+	stored, ok := c.Get(ginKeyChannelAffinityFaultChannel)
+	if !ok {
+		return false
+	}
+	faulted, _ := stored.(map[int]bool)
+	return faulted[channelID]
+}
+
+// releaseChannelAffinityOnFault retracts the pin when this request's failure was
+// a genuine fault on the pinned channel.
+//
+// The delete is conditional on the entry still naming that channel. A failing
+// request and a concurrent succeeding one race here: the successful one may have
+// already repinned the key to a healthy channel, and an unconditional delete
+// would throw that away and send the next request back to cold selection.
+func releaseChannelAffinityOnFault(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	pinnedChannel := c.GetInt(ginKeyChannelAffinityPinnedChannel)
+	if pinnedChannel <= 0 {
+		// Affinity did not choose this request's channel, so there is no pin of ours
+		// to retract.
+		return
+	}
+	if !channelAffinityChannelFaulted(c, pinnedChannel) {
+		// Either no failure was classified as a channel fault, or the ones that were
+		// all happened on fallback channels. Neither says anything about the pinned
+		// channel, which may simply never have been tried.
+		return
+	}
+	if c.GetBool(ginKeyChannelAffinityBypassed) {
+		// The pinned channel was healthy and merely full; saturation is not a fault.
+		return
+	}
+	cacheKey, _, ok := getChannelAffinityContext(c)
+	if !ok || cacheKey == "" {
+		return
+	}
+	cache := getChannelAffinityCache()
+	deleted, err := cache.DeleteIfEquals(cacheKey, pinnedChannel)
+	if err != nil {
+		common.SysError(fmt.Sprintf("channel affinity fault release failed: key=%s, err=%v", cacheKey, err))
+		return
+	}
+	if deleted {
+		logger.LogDebug(c, "channel affinity released after channel fault: key=%s, channel=%d", cacheKey, pinnedChannel)
+	}
+}
+
+// dropChannelAffinityEntry removes the entry only while it still names
+// channelID. Used by the revalidation path, where the entry has been judged
+// unusable on its own terms (the channel is gone, or an admin outranked it)
+// rather than as a retraction of a specific channel's pin.
+//
+// The verdict was reached about the channel this request read out of the cache,
+// and it says nothing about any other. A concurrent request may already have
+// repinned the key to a healthy, in-rank channel between that read and this
+// delete; deleting unconditionally would discard that and send the next request
+// back to cold selection for no reason.
+func dropChannelAffinityEntry(cacheKey string, channelID int) {
+	if cacheKey == "" || channelID <= 0 {
+		return
+	}
+	cache := getChannelAffinityCache()
+	if _, err := cache.DeleteIfEquals(cacheKey, channelID); err != nil {
+		common.SysError(fmt.Sprintf("channel affinity stale entry delete failed: key=%s, err=%v", cacheKey, err))
+	}
+}
+
+// SetChannelAffinityRelayOutcome publishes the relay handler's own verdict on the
+// request so the distributor middleware can decide affinity on it.
+//
+// The middleware only regains control after c.Next() returns, by which time a
+// streamed response has long committed its 200: gin's ResponseWriter ignores
+// every WriteHeader after the first, so an upstream that dies mid-stream (or a
+// keepalive ping that was the only thing ever written) leaves c.Writer.Status()
+// reporting 200 for a request that failed. Pinning the channel on that status
+// parks the whole affinity key on the channel that just broke.
+func SetChannelAffinityRelayOutcome(c *gin.Context, succeeded bool) {
+	if c == nil {
+		return
+	}
+	c.Set(ginKeyChannelAffinityRelayOK, succeeded)
+}
+
+// SetChannelAffinityBypassed marks that the pinned channel was skipped only
+// because it was at its concurrency limit. Saturation is not a fault, so the pin
+// is kept and this request's fallback channel does not inherit it.
+func SetChannelAffinityBypassed(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set(ginKeyChannelAffinityBypassed, true)
 }
 
 func AppendChannelAffinityAdminInfo(c *gin.Context, adminInfo map[string]interface{}) {
@@ -710,15 +925,49 @@ func AppendChannelAffinityAdminInfo(c *gin.Context, adminInfo map[string]interfa
 	adminInfo["channel_affinity"] = anyInfo
 }
 
+// RecordChannelAffinity pins the channel that served a successful request, so
+// the next request carrying the same affinity key lands on it again.
+//
+// Success is taken from the relay handler's own verdict (SetChannelAffinityRelayOutcome)
+// rather than from the response status, because a stream that failed mid-flight
+// still reports the 200 it committed before the failure. Handlers that publish
+// no verdict — midjourney/suno/video task submit — never stream a partial
+// success and are still judged on the committed status code.
 func RecordChannelAffinity(c *gin.Context, channelID int) {
-	if channelID <= 0 {
+	if channelID <= 0 || c == nil {
+		return
+	}
+	if relayOK, reported := c.Get(ginKeyChannelAffinityRelayOK); reported {
+		succeeded, _ := relayOK.(bool)
+		if !succeeded {
+			// A failed request used to return here and leave the pin exactly as it
+			// was. Nothing else retracts it: the distributor only clears a pin whose
+			// channel was already unusable when selection ran, so a channel that was
+			// enabled, got picked, and then broke during the relay kept the key
+			// forever — and because a stream that has written bytes is not retried,
+			// nothing moved it either. An occasional success in between refreshed the
+			// TTL. That is the "channels are failing but it stays on the old one"
+			// case; the pin needs failure accounting, not just success accounting.
+			releaseChannelAffinityOnFault(c)
+			return
+		}
+	} else if c.Writer == nil || c.Writer.Status() >= http.StatusBadRequest {
+		releaseChannelAffinityOnFault(c)
 		return
 	}
 	setting := operation_setting.GetChannelAffinitySetting()
 	if setting == nil || !setting.Enabled {
 		return
 	}
-	if setting.SwitchOnSuccess && c != nil {
+	if c.GetBool(ginKeyChannelAffinityBypassed) {
+		// The pinned channel was healthy and simply full. Repinning to whichever
+		// channel absorbed the overflow would walk the key away from its warm
+		// upstream for as long as the load lasts, which is the opposite of what
+		// affinity is for. Leaving the pin untouched also leaves its TTL alone, so a
+		// channel that stays saturated does eventually lose the key.
+		return
+	}
+	if setting.SwitchOnSuccess {
 		if successChannelID := c.GetInt("channel_id"); successChannelID > 0 {
 			channelID = successChannelID
 		}

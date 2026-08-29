@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -364,7 +365,7 @@ func TestSMTPPlainAuthRejectsRemotePlaintextConnection(t *testing.T) {
 	SMTPFrom = "sender@example.com"
 	SMTPToken = "secret"
 
-	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", server.host, server.port))
+	conn, err := net.Dial("tcp", net.JoinHostPort(server.host, strconv.Itoa(server.port)))
 	require.NoError(t, err)
 	client, err := smtp.NewClient(conn, SMTPServer)
 	require.NoError(t, err)
@@ -391,7 +392,7 @@ func TestNewSMTPClientHonorsExplicitStartTLSWhenPortIs465(t *testing.T) {
 	SMTPStartTLSEnabled = true
 	SMTPInsecureSkipVerify = true
 
-	client, err := newSMTPClient(fmt.Sprintf("%s:%d", server.host, server.port))
+	client, err := newSMTPClient(net.JoinHostPort(server.host, strconv.Itoa(server.port)))
 	require.NoError(t, err)
 	defer client.Close()
 
@@ -414,7 +415,7 @@ func TestNewSMTPClientKeepsImplicitTLSForLegacyPort465(t *testing.T) {
 	SMTPStartTLSEnabled = false
 	SMTPInsecureSkipVerify = true
 
-	client, err := newSMTPClient(fmt.Sprintf("%s:%d", server.host, server.port))
+	client, err := newSMTPClient(net.JoinHostPort(server.host, strconv.Itoa(server.port)))
 	require.NoError(t, err)
 	defer client.Close()
 }
@@ -560,4 +561,75 @@ func TestSendEmailExplicitStartTLSRejectsUntrustedCertificateByDefault(t *testin
 	err := SendEmail("Verification", "receiver@example.com", "<p>123456</p>")
 	require.Error(t, err)
 	require.Contains(t, fmt.Sprint(err), "certificate")
+}
+
+// TestSendEmailDoesNotMutateSMTPFrom pins the reason SendEmail snapshots the
+// sender into a local: SMTPFrom is a package variable that model.updateOptionMap
+// rewrites whenever an admin saves SMTP settings, and SendEmail runs both on HTTP
+// handlers (registration and password-reset codes) and on background notify
+// goroutines. The compatibility fallback used to write SMTPFrom back, which is an
+// unsynchronised package write from a request path; the fallback must stay
+// request-local.
+func TestSendEmailDoesNotMutateSMTPFrom(t *testing.T) {
+	server := newFakeSMTPServer(t)
+	defer server.close()
+	withSMTPSettings(t)
+
+	SMTPServer = server.host
+	SMTPPort = server.port
+	SMTPSSLEnabled = false
+	SMTPStartTLSEnabled = true
+	SMTPInsecureSkipVerify = true
+	SMTPForceAuthLogin = false
+	SMTPAccount = "sender@example.com"
+	SMTPFrom = ""
+	SMTPToken = "secret"
+	SystemName = "New API"
+
+	err := SendEmail("Verification", "receiver@example.com", "<p>123456</p>")
+	require.NoError(t, err)
+
+	select {
+	case message := <-server.messages:
+		require.Contains(t, message, "From: New API <sender@example.com>",
+			"an empty SMTPFrom must fall back to SMTPAccount for this delivery")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for SMTP DATA")
+	}
+
+	assert.Equal(t, "", SMTPFrom,
+		"the fallback must stay local to the call; writing it back races every other reader of SMTPFrom")
+}
+
+// TestSendEmailMessageIDMatchesSenderDomain guards the pairing between the
+// delivered From header and the Message-ID domain. They are derived from the same
+// sender snapshot, so a configuration change landing mid-send cannot produce a
+// Message-ID whose domain contradicts the envelope sender — spam filters treat
+// that mismatch as a forgery signal.
+func TestSendEmailMessageIDMatchesSenderDomain(t *testing.T) {
+	server := newFakeSMTPServer(t)
+	defer server.close()
+	withSMTPSettings(t)
+
+	SMTPServer = server.host
+	SMTPPort = server.port
+	SMTPSSLEnabled = false
+	SMTPStartTLSEnabled = true
+	SMTPInsecureSkipVerify = true
+	SMTPForceAuthLogin = false
+	SMTPAccount = "sender@fallback.example"
+	SMTPFrom = ""
+	SMTPToken = "secret"
+	SystemName = "New API"
+
+	err := SendEmail("Verification", "receiver@example.com", "<p>123456</p>")
+	require.NoError(t, err)
+
+	select {
+	case message := <-server.messages:
+		assert.Contains(t, message, "@fallback.example>",
+			"the Message-ID domain must come from the same sender the message is delivered with")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for SMTP DATA")
+	}
 }

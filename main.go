@@ -46,12 +46,6 @@ var buildFS embed.FS
 //go:embed web/default/dist/index.html
 var indexPage []byte
 
-//go:embed web/classic/dist
-var classicBuildFS embed.FS
-
-//go:embed web/classic/dist/index.html
-var classicIndexPage []byte
-
 func main() {
 	startTime := time.Now()
 
@@ -173,6 +167,12 @@ func main() {
 
 	// Initialize HTTP server
 	server := gin.New()
+	// Only honour X-Forwarded-For / X-Real-IP from trusted proxy peers;
+	// gin's default trusts every peer, letting any client forge its IP and
+	// bypass token IP whitelists and IP-keyed rate limits.
+	if err := server.SetTrustedProxies(trustedProxyList()); err != nil {
+		common.FatalLog("failed to set trusted proxies: " + err.Error())
+	}
 	server.Use(gin.CustomRecovery(func(c *gin.Context, err any) {
 		common.SysLog(fmt.Sprintf("panic detected: %v", err))
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -206,8 +206,6 @@ func main() {
 	router.SetRouter(server, router.ThemeAssets{
 		DefaultBuildFS:   buildFS,
 		DefaultIndexPage: indexPage,
-		ClassicBuildFS:   classicBuildFS,
-		ClassicIndexPage: classicIndexPage,
 	})
 	var port = os.Getenv("PORT")
 	if port == "" {
@@ -241,11 +239,32 @@ func main() {
 	if err := srv.Shutdown(ctx); err != nil {
 		common.SysError(fmt.Sprintf("server forced to shutdown: %v", err))
 	}
+	// 批量更新器攒在内存里的额度扣减和用量计数必须先落库，否则重启会丢账
+	model.FlushBatchUpdates()
 	// 内存中的看板数据保存入库，避免重启丢失未落库数据 (issue #5679)
 	if common.DataExportEnabled {
 		model.SaveQuotaDataCache()
 	}
 	common.SysLog("server exited")
+}
+
+// trustedProxyList parses TRUSTED_PROXIES (comma-separated IPs/CIDRs) into the
+// proxy peers whose forwarding headers gin may honour. The default covers
+// loopback plus the RFC1918/ULA ranges so a same-host or containerized reverse
+// proxy (e.g. nginx reaching the container via the docker bridge gateway)
+// keeps working out of the box while public peers can no longer forge their IP.
+func trustedProxyList() []string {
+	raw := common.GetEnvOrDefaultString("TRUSTED_PROXIES",
+		"127.0.0.0/8,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7")
+	parts := strings.Split(raw, ",")
+	proxies := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			proxies = append(proxies, part)
+		}
+	}
+	return proxies
 }
 
 func InjectUmamiAnalytics() {
@@ -266,7 +285,6 @@ func InjectUmamiAnalytics() {
 	analyticsInject := []byte(analyticsInjectBuilder.String())
 	placeholder := []byte("<!--umami-->\n")
 	indexPage = bytes.ReplaceAll(indexPage, placeholder, analyticsInject)
-	classicIndexPage = bytes.ReplaceAll(classicIndexPage, placeholder, analyticsInject)
 }
 
 func InjectGoogleAnalytics() {
@@ -290,7 +308,6 @@ func InjectGoogleAnalytics() {
 	analyticsInject := []byte(analyticsInjectBuilder.String())
 	placeholder := []byte("<!--Google Analytics-->\n")
 	indexPage = bytes.ReplaceAll(indexPage, placeholder, analyticsInject)
-	classicIndexPage = bytes.ReplaceAll(classicIndexPage, placeholder, analyticsInject)
 }
 
 func InitResources() error {

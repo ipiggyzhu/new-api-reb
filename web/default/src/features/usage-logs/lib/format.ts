@@ -93,17 +93,39 @@ export function isViolationFeeLog(other: LogOtherData | null): boolean {
 }
 
 /**
+ * Cache for parseLogOther. Eight different cells in the log table each parse the
+ * same row's `other` blob during a render, so a 100-row page ran ~800 JSON.parse
+ * calls over multi-KB strings on every paint, sort and filter. Results are only
+ * ever read, never mutated, so sharing one parsed object per raw string is safe.
+ */
+const parsedLogOtherCache = new Map<string, LogOtherData | null>()
+const PARSED_LOG_OTHER_CACHE_LIMIT = 1000
+
+/**
  * Parse the 'other' field from JSON string to object
  */
 export function parseLogOther(other: string): LogOtherData | null {
   if (!other) return null
+
+  const cached = parsedLogOtherCache.get(other)
+  if (cached !== undefined) return cached
+
+  let parsed: LogOtherData | null = null
   try {
-    return JSON.parse(other) as LogOtherData
+    parsed = JSON.parse(other) as LogOtherData
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error('Failed to parse log other field:', error)
-    return null
   }
+
+  // A page of logs is at most a few hundred rows; dropping everything once the
+  // cache fills keeps this bounded without the bookkeeping of a real LRU.
+  if (parsedLogOtherCache.size >= PARSED_LOG_OTHER_CACHE_LIMIT) {
+    parsedLogOtherCache.clear()
+  }
+  parsedLogOtherCache.set(other, parsed)
+
+  return parsed
 }
 
 /**

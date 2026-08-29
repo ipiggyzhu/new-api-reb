@@ -15,6 +15,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// gin.SetMode writes a package global. These tests run in parallel, so setting
+// it per test made every -race run report a write/write race and drown out any
+// real one.
+func init() {
+	gin.SetMode(gin.TestMode)
+}
+
 func TestGetRequestURLForImageGeneration(t *testing.T) {
 	t.Parallel()
 
@@ -87,7 +94,6 @@ func TestConvertImageRequest(t *testing.T) {
 func TestDoResponseForImageGeneration(t *testing.T) {
 	t.Parallel()
 
-	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 

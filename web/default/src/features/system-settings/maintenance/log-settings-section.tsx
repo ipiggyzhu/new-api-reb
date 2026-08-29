@@ -78,14 +78,26 @@ import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
 import type { LogCleanupTask } from '../types'
 
+/**
+ * IMPORTANT: react-hook-form 7 interprets dotted `name` strings as nested
+ * paths. Declaring the schema with a literal flat key like
+ * `'general_setting.record_ip_log_for_all'` makes the switch write to the
+ * nested path while zod keeps validating the untouched flat key, so the save
+ * compares a stale value and silently does nothing. Model the form with a
+ * nested object and flatten back to server key format only when persisting.
+ */
 const logSettingsSchema = z.object({
   LogConsumeEnabled: z.boolean(),
+  general_setting: z.object({
+    record_ip_log_for_all: z.boolean(),
+  }),
 })
 
 type LogSettingsFormValues = z.infer<typeof logSettingsSchema>
 
 type LogSettingsSectionProps = {
   defaultEnabled: boolean
+  defaultRecordIpForAll: boolean
 }
 
 type ServerLogInfo = {
@@ -141,6 +153,7 @@ function isActiveLogCleanupTask(task: LogCleanupTask | null) {
 
 export function LogSettingsSection({
   defaultEnabled,
+  defaultRecordIpForAll,
 }: LogSettingsSectionProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
@@ -148,6 +161,7 @@ export function LogSettingsSection({
     resolver: zodResolver(logSettingsSchema),
     defaultValues: {
       LogConsumeEnabled: defaultEnabled,
+      general_setting: { record_ip_log_for_all: defaultRecordIpForAll },
     },
   })
 
@@ -174,8 +188,11 @@ export function LogSettingsSection({
   }, [])
 
   useEffect(() => {
-    form.reset({ LogConsumeEnabled: defaultEnabled })
-  }, [defaultEnabled, form])
+    form.reset({
+      LogConsumeEnabled: defaultEnabled,
+      general_setting: { record_ip_log_for_all: defaultRecordIpForAll },
+    })
+  }, [defaultEnabled, defaultRecordIpForAll, form])
 
   useEffect(() => {
     fetchServerLogInfo()
@@ -257,11 +274,27 @@ export function LogSettingsSection({
   }, [logCleanupActive, logCleanupTaskId, t])
 
   const onSubmit = async (values: LogSettingsFormValues) => {
-    if (values.LogConsumeEnabled === defaultEnabled) return
-    await updateOption.mutateAsync({
-      key: 'LogConsumeEnabled',
-      value: values.LogConsumeEnabled,
-    })
+    const recordIpForAll = values.general_setting.record_ip_log_for_all
+    let changed = false
+    if (values.LogConsumeEnabled !== defaultEnabled) {
+      changed = true
+      await updateOption.mutateAsync({
+        key: 'LogConsumeEnabled',
+        value: values.LogConsumeEnabled,
+      })
+    }
+    if (recordIpForAll !== defaultRecordIpForAll) {
+      changed = true
+      await updateOption.mutateAsync({
+        key: 'general_setting.record_ip_log_for_all',
+        value: recordIpForAll,
+      })
+    }
+    // Saving an untouched form used to return without a single mutation, and
+    // the success toast lives in the mutation — so the button looked broken.
+    if (!changed) {
+      toast.info(t('No changes to save'))
+    }
   }
 
   const handleRequestCleanLogs = () => {
@@ -353,6 +386,32 @@ export function LogSettingsSection({
                   <FormDescription>
                     {t(
                       'Track per-request consumption to power usage analytics. Keeping this on increases database writes.'
+                    )}
+                  </FormDescription>
+                </SettingsSwitchContent>
+                <FormControl>
+                  <Switch
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                  />
+                </FormControl>
+                <FormMessage />
+              </SettingsSwitchItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name='general_setting.record_ip_log_for_all'
+            render={({ field }) => (
+              // The dotted name is the nested path into general_setting, which
+              // is exactly how the schema above models it.
+              <SettingsSwitchItem>
+                <SettingsSwitchContent>
+                  <FormLabel>{t('Always record client IP')}</FormLabel>
+                  <FormDescription>
+                    {t(
+                      'Record the client IP on every usage and error log, overriding the per-user IP logging preference. Needed to trace abuse, since that preference is off by default.'
                     )}
                   </FormDescription>
                 </SettingsSwitchContent>

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -26,9 +27,14 @@ const (
 
 const maxLogCount = 1000000
 
-var logCount int
+// logCount and setupLogWorking are touched by every request goroutine on every
+// log line, so they are atomic rather than plain globals. The count itself does
+// not need to be exact, but an unsynchronised read/write pair here is still a
+// data race, and it fired often enough to mask every other race the detector
+// could have reported.
+var logCount atomic.Int64
 var setupLogLock sync.Mutex
-var setupLogWorking bool
+var setupLogWorking atomic.Bool
 var currentLogPath string
 var currentLogPathMu sync.RWMutex
 var currentLogFile *os.File
@@ -40,9 +46,7 @@ func GetCurrentLogPath() string {
 }
 
 func SetupLogger() {
-	defer func() {
-		setupLogWorking = false
-	}()
+	defer setupLogWorking.Store(false)
 	if *common.LogDir != "" {
 		ok := setupLogLock.TryLock()
 		if !ok {
@@ -109,10 +113,12 @@ func logHelper(ctx context.Context, level string, msg string) {
 	}
 	_, _ = fmt.Fprintf(writer, "[%s] %v | %s | %s \n", level, now.Format("2006/01/02 - 15:04:05"), id, msg)
 	common.LogWriterMu.RUnlock()
-	logCount++ // we don't need accurate count, so no lock here
-	if logCount > maxLogCount && !setupLogWorking {
-		logCount = 0
-		setupLogWorking = true
+	// The CAS makes the rotation trigger exclusive: two goroutines crossing the
+	// threshold together used to both pass the check and start a rotation, and
+	// the loser's deferred reset then cleared the flag while the winner was
+	// still swapping the log file.
+	if logCount.Add(1) > maxLogCount && setupLogWorking.CompareAndSwap(false, true) {
+		logCount.Store(0)
 		gopool.Go(func() {
 			SetupLogger()
 		})

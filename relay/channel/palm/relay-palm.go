@@ -54,21 +54,24 @@ func palmStreamHandler(c *gin.Context, resp *http.Response) (*types.NewAPIError,
 	responseText := ""
 	responseId := helper.GetResponseID(c)
 	createdTime := common.GetTimestamp()
-	dataChan := make(chan string)
-	stopChan := make(chan bool)
+	// Buffered: when the client disconnects, c.Stream returns and nobody drains
+	// these channels. With unbuffered channels the producer blocked forever on
+	// the send, leaking the goroutine and the upstream connection with it.
+	dataChan := make(chan string, 1)
+	stopChan := make(chan bool, 1)
 	go func() {
+		defer service.CloseResponseBodyGracefully(resp)
+		defer func() { stopChan <- true }()
+
 		responseBody, err := io.ReadAll(resp.Body)
 		if err != nil {
 			common.SysLog("error reading stream response: " + err.Error())
-			stopChan <- true
 			return
 		}
-		service.CloseResponseBodyGracefully(resp)
 		var palmResponse PaLMChatResponse
 		err = json.Unmarshal(responseBody, &palmResponse)
 		if err != nil {
 			common.SysLog("error unmarshalling stream response: " + err.Error())
-			stopChan <- true
 			return
 		}
 		fullTextResponse := streamResponsePaLM2OpenAI(&palmResponse)
@@ -80,11 +83,9 @@ func palmStreamHandler(c *gin.Context, resp *http.Response) (*types.NewAPIError,
 		jsonResponse, err := json.Marshal(fullTextResponse)
 		if err != nil {
 			common.SysLog("error marshalling stream response: " + err.Error())
-			stopChan <- true
 			return
 		}
 		dataChan <- string(jsonResponse)
-		stopChan <- true
 	}()
 	helper.SetEventStreamHeaders(c)
 	c.Stream(func(w io.Writer) bool {
@@ -97,16 +98,15 @@ func palmStreamHandler(c *gin.Context, resp *http.Response) (*types.NewAPIError,
 			return false
 		}
 	})
-	service.CloseResponseBodyGracefully(resp)
 	return nil, responseText
 }
 
 func palmHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	defer service.CloseResponseBodyGracefully(resp)
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
-	service.CloseResponseBodyGracefully(resp)
 	var palmResponse PaLMChatResponse
 	err = json.Unmarshal(responseBody, &palmResponse)
 	if err != nil {

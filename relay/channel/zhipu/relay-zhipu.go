@@ -2,7 +2,6 @@ package zhipu
 
 import (
 	"bufio"
-	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
@@ -156,13 +156,40 @@ func streamMetaResponseZhipu2OpenAI(zhipuResponse *ZhipuStreamMetaResponse) (*dt
 }
 
 func zhipuStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
-	var usage *dto.Usage
+	// Zhipu reports token counts in a trailing "meta:" frame, which a stream that
+	// is cut short never sends. This used to return a nil usage on that path,
+	// which the shared handlers assert to *dto.Usage and dereference — the
+	// one-value assertion succeeds on a typed nil, so it panicked, and a panic
+	// unwind skips the deferred refund in controller.Relay entirely: the
+	// pre-consumed quota was neither refunded nor settled. Text delivered before
+	// the cut is counted locally instead, so a truncated stream is still billed
+	// for what the user actually received.
+	//
+	// The close is deferred rather than called after c.Stream so a panic in the
+	// producer goroutine or the render callback cannot strand the connection.
+	defer service.CloseResponseBodyGracefully(resp)
+	usage := &dto.Usage{}
+	var responseText strings.Builder
 	scanner := helper.NewStreamScanner(resp.Body)
 	scanner.Split(bufio.ScanLines)
 	dataChan := make(chan string)
 	metaChan := make(chan string)
-	stopChan := make(chan bool)
+	stopChan := make(chan bool, 1)
 	go func() {
+		// c.Stream stops draining as soon as the client disconnects; an
+		// unconditional send would then block this goroutine for the life of the
+		// process. Every send has to lose the race to the request context.
+		defer func() { stopChan <- true }()
+		streamCtx := c.Request.Context()
+		send := func(ch chan string, value string) bool {
+			select {
+			case ch <- value:
+				return true
+			case <-streamCtx.Done():
+				return false
+			}
+		}
+
 		for scanner.Scan() {
 			data := scanner.Text()
 			lines := strings.Split(data, "\n")
@@ -171,26 +198,32 @@ func zhipuStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 					continue
 				}
 				if line[:5] == "data:" {
-					dataChan <- line[5:]
+					if !send(dataChan, line[5:]) {
+						return
+					}
 					if i != len(lines)-1 {
-						dataChan <- "\n"
+						if !send(dataChan, "\n") {
+							return
+						}
 					}
 				} else if line[:5] == "meta:" {
-					metaChan <- line[5:]
+					if !send(metaChan, line[5:]) {
+						return
+					}
 				}
 			}
 		}
 		if err := scanner.Err(); err != nil {
 			common.SysLog("error reading stream: " + err.Error())
 		}
-		stopChan <- true
 	}()
 	helper.SetEventStreamHeaders(c)
 	c.Stream(func(w io.Writer) bool {
 		select {
 		case data := <-dataChan:
+			responseText.WriteString(data)
 			response := streamResponseZhipu2OpenAI(data)
-			jsonResponse, err := json.Marshal(response)
+			jsonResponse, err := common.Marshal(response)
 			if err != nil {
 				common.SysLog("error marshalling stream response: " + err.Error())
 				return true
@@ -199,18 +232,20 @@ func zhipuStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 			return true
 		case data := <-metaChan:
 			var zhipuResponse ZhipuStreamMetaResponse
-			err := json.Unmarshal([]byte(data), &zhipuResponse)
+			err := common.Unmarshal([]byte(data), &zhipuResponse)
 			if err != nil {
 				common.SysLog("error unmarshalling stream response: " + err.Error())
 				return true
 			}
 			response, zhipuUsage := streamMetaResponseZhipu2OpenAI(&zhipuResponse)
-			jsonResponse, err := json.Marshal(response)
+			jsonResponse, err := common.Marshal(response)
 			if err != nil {
 				common.SysLog("error marshalling stream response: " + err.Error())
 				return true
 			}
-			usage = zhipuUsage
+			if zhipuUsage != nil {
+				usage = zhipuUsage
+			}
 			c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonResponse)})
 			return true
 		case <-stopChan:
@@ -218,18 +253,20 @@ func zhipuStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 			return false
 		}
 	})
-	service.CloseResponseBodyGracefully(resp)
+	if !service.ValidUsage(usage) {
+		usage = service.ResponseText2Usage(c, responseText.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
+	}
 	return usage, nil
 }
 
 func zhipuHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	var zhipuResponse ZhipuResponse
+	defer service.CloseResponseBodyGracefully(resp)
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
-	service.CloseResponseBodyGracefully(resp)
-	err = json.Unmarshal(responseBody, &zhipuResponse)
+	err = common.Unmarshal(responseBody, &zhipuResponse)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
@@ -237,10 +274,10 @@ func zhipuHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respon
 		return nil, types.WithOpenAIError(types.OpenAIError{
 			Message: zhipuResponse.Msg,
 			Code:    zhipuResponse.Code,
-		}, resp.StatusCode)
+		}, channel.UpstreamInBandErrorStatusCode(resp.StatusCode))
 	}
 	fullTextResponse := responseZhipu2OpenAI(&zhipuResponse)
-	jsonResponse, err := json.Marshal(fullTextResponse)
+	jsonResponse, err := common.Marshal(fullTextResponse)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}

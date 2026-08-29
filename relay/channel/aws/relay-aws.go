@@ -2,7 +2,6 @@ package aws
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -172,7 +171,9 @@ func doAwsClientRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor,
 
 // buildAwsRequestBody prepares the payload for AWS requests, applying passthrough rules when enabled.
 func buildAwsRequestBody(c *gin.Context, info *relaycommon.RelayInfo, awsClaudeReq any) ([]byte, error) {
-	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+	// A channel test builds its payload as a Go struct and leaves the gin body nil,
+	// so passing it through would send an empty body upstream.
+	if (model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled) && !info.IsChannelTest {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return nil, errors.Wrap(err, "get request body for pass-through fail")
@@ -321,8 +322,15 @@ func handleNovaRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) 
 		} `json:"usage"`
 	}
 
-	if err := json.Unmarshal(awsResp.Body, &novaResp); err != nil {
+	if err := common.Unmarshal(awsResp.Body, &novaResp); err != nil {
 		return types.NewError(errors.Wrap(err, "unmarshal nova response"), types.ErrorCodeBadResponseBody), nil
+	}
+
+	// This handler runs outside any StreamScannerHandler recovery, so indexing an
+	// empty content array would unwind past the deferred quota refund and charge
+	// the user for a request that never produced a response.
+	if len(novaResp.Output.Message.Content) == 0 {
+		return types.NewError(errors.New("nova response contains no content"), types.ErrorCodeBadResponseBody), nil
 	}
 
 	// 构造OpenAI格式响应

@@ -177,7 +177,7 @@ func SearchUserTokens(userId int, keyword string, token string, offset int, limi
 	}
 
 	// 先查匹配总数（用于分页，受 maxTokens 上限保护，避免全表 COUNT）
-	err = baseQuery.Limit(maxTokens).Count(&total).Error
+	err = countUpTo(baseQuery, maxTokens, &total)
 	if err != nil {
 		common.SysError("failed to count search tokens: " + err.Error())
 		return nil, 0, errors.New("搜索令牌失败")
@@ -395,11 +395,13 @@ func IncreaseTokenQuota(tokenId int, key string, quota int) (err error) {
 		addNewRecord(BatchUpdateTypeTokenQuota, tokenId, quota)
 		return nil
 	}
-	return increaseTokenQuota(tokenId, quota)
+	return increaseTokenQuota(DB, tokenId, quota)
 }
 
-func increaseTokenQuota(id int, quota int) (err error) {
-	err = DB.Model(&Token{}).Where("id = ?", id).Updates(
+// increaseTokenQuota applies the delta with db, which is the global handle on the
+// direct path and the flush transaction when called from batchUpdate.
+func increaseTokenQuota(db *gorm.DB, id int, quota int) (err error) {
+	err = db.Model(&Token{}).Where("id = ?", id).Updates(
 		map[string]interface{}{
 			"remain_quota":  gorm.Expr("remain_quota + ?", quota),
 			"used_quota":    gorm.Expr("used_quota - ?", quota),
@@ -437,6 +439,46 @@ func decreaseTokenQuota(id int, quota int) (err error) {
 		},
 	).Error
 	return err
+}
+
+// ErrInsufficientTokenQuota reports that a conditional reservation found the
+// token balance below the requested amount.
+var ErrInsufficientTokenQuota = errors.New("令牌额度不足")
+
+// PreConsumeTokenQuota reserves quota on a limited token. The balance guard is
+// part of the UPDATE, so concurrent requests sharing one token cannot each pass
+// a separate read-then-write check and drive remain_quota negative.
+//
+// Unlimited tokens must not go through here: they have no balance to guard and
+// use DecreaseTokenQuota purely for usage accounting.
+func PreConsumeTokenQuota(id int, key string, quota int) error {
+	if quota < 0 {
+		return errors.New("quota 不能为负数！")
+	}
+	if quota == 0 {
+		return nil
+	}
+	result := DB.Model(&Token{}).
+		Where("id = ? AND remain_quota >= ?", id, quota).
+		Updates(map[string]interface{}{
+			"remain_quota":  gorm.Expr("remain_quota - ?", quota),
+			"used_quota":    gorm.Expr("used_quota + ?", quota),
+			"accessed_time": common.GetTimestamp(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrInsufficientTokenQuota
+	}
+	if common.RedisEnabled {
+		gopool.Go(func() {
+			if err := cacheDecrTokenQuota(key, int64(quota)); err != nil {
+				common.SysLog("failed to decrease token quota cache: " + err.Error())
+			}
+		})
+	}
+	return nil
 }
 
 // CountUserTokens returns total number of tokens for the given user, used for pagination

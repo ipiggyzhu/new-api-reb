@@ -17,6 +17,13 @@ import (
 	"github.com/QuantumNous/new-api/types"
 )
 
+// upstreamErrorBodyReadLimit caps how much of an upstream error body is read
+// into memory. Real error payloads are a few hundred bytes of JSON; the largest
+// legitimate ones seen in practice are Cloudflare block pages at roughly 8 KB.
+// 1 MB leaves several orders of magnitude of headroom while still bounding a
+// hostile upstream.
+const upstreamErrorBodyReadLimit = 1 << 20
+
 func MidjourneyErrorWrapper(code int, desc string) *dto.MidjourneyResponse {
 	return &dto.MidjourneyResponse{
 		Code:        code,
@@ -86,11 +93,18 @@ func ClaudeErrorWrapperLocal(err error, code string, statusCode int) *dto.Claude
 func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFail bool) (newApiErr *types.NewAPIError) {
 	newApiErr = types.InitOpenAIError(types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
 
-	responseBody, err := io.ReadAll(resp.Body)
+	defer CloseResponseBodyGracefully(resp)
+	// Bounded: this is an *error* body from an upstream we do not control, and
+	// every byte of it is buffered in memory before anything else happens. A
+	// misbehaving or hostile upstream answering a 500 with a multi-gigabyte body
+	// would otherwise be able to OOM the gateway one failed request at a time.
+	// Nothing downstream needs more than the limit — the message is parsed from
+	// the first JSON object and the admin copy is capped at
+	// types.UpstreamBodyLogLimit.
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, upstreamErrorBodyReadLimit))
 	if err != nil {
 		return
 	}
-	CloseResponseBodyGracefully(resp)
 	var errResponse dto.GeneralErrorResponse
 	responseBodyText := string(responseBody)
 	responseBodyPreview := common.LocalLogPreview(responseBodyText)
@@ -103,6 +117,11 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 
 	err = common.Unmarshal(responseBody, &errResponse)
 	if err != nil {
+		// The body is not JSON at all: a Cloudflare block page, an nginx 502, a
+		// plaintext "insufficient balance". Nothing of it survives into the
+		// message, so keep a bounded copy for the admin error log — otherwise
+		// this is recorded as nothing but "bad response status code NNN".
+		newApiErr.SetUpstreamBody(responseBodyText)
 		if showBodyWhenFail {
 			newApiErr.Err = buildErrWithBody("")
 		} else {
@@ -123,7 +142,13 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 			return
 		}
 	}
-	newApiErr = types.NewOpenAIError(errors.New(errResponse.ToMessage()), types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
+	// Valid JSON, but none of the shapes ToMessage knows about. Whatever it did
+	// not recognise is only in the raw body, so keep that for the admin log too.
+	message := errResponse.ToMessage()
+	newApiErr = types.NewOpenAIError(errors.New(message), types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
+	if message == "" {
+		newApiErr.SetUpstreamBody(responseBodyText)
+	}
 	if showBodyWhenFail {
 		newApiErr.Err = buildErrWithBody(newApiErr.Error())
 	}

@@ -10,7 +10,7 @@ import (
 func GetUserUsableGroups(userGroup string) map[string]string {
 	groupsCopy := setting.GetUserUsableGroupsCopy()
 	if userGroup != "" {
-		specialSettings, b := ratio_setting.GetGroupRatioSetting().GroupSpecialUsableGroup.Get(userGroup)
+		specialSettings, b := ratio_setting.GetGroupSpecialUsableGroup(userGroup)
 		if b {
 			// 处理特殊可用分组
 			for specialGroup, desc := range specialSettings {

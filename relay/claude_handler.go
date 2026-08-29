@@ -154,7 +154,10 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 
 	var requestBody io.Reader
-	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+	// A channel test has no client request to pass through: controller/channel-test.go
+	// builds its payload as a Go struct and leaves the gin body nil, so reading it
+	// here would send an empty body upstream and make a healthy channel look broken.
+	if (model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled) && !info.IsChannelTest {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
@@ -222,6 +225,10 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		return newAPIError
 	}
 
-	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+	usageDto, newAPIError := adaptorUsage(usage)
+	if newAPIError != nil {
+		return newAPIError
+	}
+	service.PostTextConsumeQuota(c, info, usageDto, nil)
 	return nil
 }

@@ -23,6 +23,16 @@ func GeminiGenerateContentRequestToOpenAIChat(geminiRequest *dto.GeminiChatReque
 		Stream: common.GetPointer(isStream),
 	}
 
+	// OpenAI validates each tool message's tool_call_id against the previous
+	// assistant turn's tool_calls, so ids assigned to functionCall parts must be
+	// reused by the matching functionResponse parts of later turns.
+	type pendingToolCall struct {
+		id   string
+		name string
+	}
+	assignedToolCalls := 0
+	var pendingToolCalls []pendingToolCall
+
 	var messages []dto.Message
 	for _, content := range geminiRequest.Contents {
 		message := dto.Message{
@@ -59,8 +69,11 @@ func GeminiGenerateContentRequestToOpenAIChat(geminiRequest *dto.GeminiChatReque
 				}
 				mediaContents = append(mediaContents, mediaContent)
 			} else if part.FunctionCall != nil {
+				assignedToolCalls++
+				callID := fmt.Sprintf("call_%d", assignedToolCalls)
+				pendingToolCalls = append(pendingToolCalls, pendingToolCall{id: callID, name: part.FunctionCall.FunctionName})
 				toolCall := dto.ToolCallRequest{
-					ID:   fmt.Sprintf("call_%d", len(toolCalls)+1),
+					ID:   callID,
 					Type: "function",
 					Function: dto.FunctionRequest{
 						Name:      part.FunctionCall.FunctionName,
@@ -69,9 +82,24 @@ func GeminiGenerateContentRequestToOpenAIChat(geminiRequest *dto.GeminiChatReque
 				}
 				toolCalls = append(toolCalls, toolCall)
 			} else if part.FunctionResponse != nil {
+				callID := ""
+				for i, pending := range pendingToolCalls {
+					if pending.name == part.FunctionResponse.Name {
+						callID = pending.id
+						pendingToolCalls = append(pendingToolCalls[:i], pendingToolCalls[i+1:]...)
+						break
+					}
+				}
+				if callID == "" && len(pendingToolCalls) > 0 {
+					callID = pendingToolCalls[0].id
+					pendingToolCalls = pendingToolCalls[1:]
+				}
+				if callID == "" {
+					callID = "call_0"
+				}
 				toolMessage := dto.Message{
 					Role:       "tool",
-					ToolCallId: fmt.Sprintf("call_%d", len(toolCalls)),
+					ToolCallId: callID,
 				}
 				toolMessage.SetStringContent(jsonutil.ToJSONString(part.FunctionResponse.Response))
 				messages = append(messages, toolMessage)
@@ -80,7 +108,8 @@ func GeminiGenerateContentRequestToOpenAIChat(geminiRequest *dto.GeminiChatReque
 
 		if len(toolCalls) > 0 {
 			message.SetToolCalls(toolCalls)
-		} else if len(mediaContents) == 1 && mediaContents[0].Type == "text" {
+		}
+		if len(mediaContents) == 1 && mediaContents[0].Type == "text" {
 			message.Content = mediaContents[0].Text
 		} else if len(mediaContents) > 0 {
 			message.SetMediaContent(mediaContents)

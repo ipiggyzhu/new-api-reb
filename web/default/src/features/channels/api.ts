@@ -25,6 +25,7 @@ import type {
   BatchSetTagParams,
   Channel,
   ChannelBalanceResponse,
+  ChannelInFlightResponse,
   ChannelOpsResponse,
   ChannelTestResponse,
   CopyChannelParams,
@@ -110,6 +111,18 @@ export async function getChannel(id: number): Promise<GetChannelResponse> {
  */
 export async function getChannelOps(): Promise<ChannelOpsResponse> {
   const res = await api.get('/api/channel/ops', channelActionConfig())
+  return res.data
+}
+
+/**
+ * Get the live in-flight request count of every channel.
+ *
+ * Split out from the channel list because the list is polled at a human pace
+ * while this gauge is polled every few seconds: it reads an in-memory map and
+ * touches no database, so refreshing it often stays cheap.
+ */
+export async function getChannelInFlight(): Promise<ChannelInFlightResponse> {
+  const res = await api.get('/api/channel/in_flight', channelActionConfig())
   return res.data
 }
 

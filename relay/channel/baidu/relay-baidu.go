@@ -116,11 +116,25 @@ func embeddingResponseBaidu2OpenAI(response *BaiduEmbeddingResponse) *dto.OpenAI
 
 func baiduStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*types.NewAPIError, *dto.Usage) {
 	usage := &dto.Usage{}
+	var streamErr *types.NewAPIError
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 		var baiduResponse BaiduChatStreamResponse
 		if err := common.Unmarshal([]byte(data), &baiduResponse); err != nil {
 			common.SysLog("error unmarshalling stream response: " + err.Error())
 			sr.Error(err)
+			return
+		}
+		// Baidu answers a failed streaming request with HTTP 200 and an
+		// error_msg chunk. The non-stream handlers have always checked for it;
+		// this one did not, so an auth failure or a throttle was forwarded to
+		// the client as an ordinary chunk and the relay counted the request as
+		// a success — the channel was billed, kept its affinity, and accrued no
+		// fault. sr.Stop alone is not enough to undo that: it records
+		// handler_stop, which IsNormalEnd treats as a clean end, so the verdict
+		// has to be returned from the handler as well.
+		if baiduResponse.ErrorMsg != "" {
+			streamErr = inBandError(baiduResponse.ErrorCode, baiduResponse.ErrorMsg)
+			sr.Stop(streamErr)
 			return
 		}
 		if baiduResponse.Usage.TotalTokens != 0 {
@@ -135,22 +149,25 @@ func baiduStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 		}
 	})
 	service.CloseResponseBodyGracefully(resp)
+	if streamErr != nil {
+		return streamErr, usage
+	}
 	return nil, usage
 }
 
 func baiduHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*types.NewAPIError, *dto.Usage) {
 	var baiduResponse BaiduChatResponse
+	defer service.CloseResponseBodyGracefully(resp)
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
-	service.CloseResponseBodyGracefully(resp)
 	err = json.Unmarshal(responseBody, &baiduResponse)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
 	if baiduResponse.ErrorMsg != "" {
-		return types.NewError(fmt.Errorf("%s", baiduResponse.ErrorMsg), types.ErrorCodeBadResponseBody), nil
+		return inBandError(baiduResponse.ErrorCode, baiduResponse.ErrorMsg), nil
 	}
 	fullTextResponse := responseBaidu2OpenAI(&baiduResponse)
 	jsonResponse, err := json.Marshal(fullTextResponse)
@@ -165,17 +182,17 @@ func baiduHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respon
 
 func baiduEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*types.NewAPIError, *dto.Usage) {
 	var baiduResponse BaiduEmbeddingResponse
+	defer service.CloseResponseBodyGracefully(resp)
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
-	service.CloseResponseBodyGracefully(resp)
 	err = json.Unmarshal(responseBody, &baiduResponse)
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody), nil
 	}
 	if baiduResponse.ErrorMsg != "" {
-		return types.NewError(fmt.Errorf("%s", baiduResponse.ErrorMsg), types.ErrorCodeBadResponseBody), nil
+		return inBandError(baiduResponse.ErrorCode, baiduResponse.ErrorMsg), nil
 	}
 	fullTextResponse := embeddingResponseBaidu2OpenAI(&baiduResponse)
 	jsonResponse, err := json.Marshal(fullTextResponse)

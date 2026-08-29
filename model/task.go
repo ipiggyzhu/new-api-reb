@@ -466,6 +466,10 @@ type TaskQuotaUsage struct {
 	Count float64 `json:"count"`
 }
 
+// taskCountHardLimit 统计任务总数时 COUNT 的安全上限，
+// 防止对超大 tasks 表执行无界 COUNT 触发 DoS。
+const taskCountHardLimit = 10000
+
 // TaskCountAllTasks returns total tasks that match the given query params (admin usage)
 func TaskCountAllTasks(queryParams SyncTaskQueryParams) int64 {
 	var total int64
@@ -497,7 +501,7 @@ func TaskCountAllTasks(queryParams SyncTaskQueryParams) int64 {
 	if queryParams.EndTimestamp != 0 {
 		query = query.Where("submit_time <= ?", queryParams.EndTimestamp)
 	}
-	_ = query.Count(&total).Error
+	_ = countUpTo(query, taskCountHardLimit, &total)
 	return total
 }
 
@@ -523,7 +527,7 @@ func TaskCountAllUserTask(userId int, queryParams SyncTaskQueryParams) int64 {
 	if queryParams.EndTimestamp != 0 {
 		query = query.Where("submit_time <= ?", queryParams.EndTimestamp)
 	}
-	_ = query.Count(&total).Error
+	_ = countUpTo(query, taskCountHardLimit, &total)
 	return total
 }
 func (t *Task) ToOpenAIVideo() *dto.OpenAIVideo {

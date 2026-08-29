@@ -36,12 +36,13 @@ func validUserInfo(username string, role int) bool {
 
 func authHelper(c *gin.Context, minRole int) {
 	session := sessions.Default(c)
-	username := session.Get("username")
-	role := session.Get("role")
-	id := session.Get("id")
-	status := session.Get("status")
+	var username string
+	var role int
+	var id int
+	var status int
+	var group string
 	useAccessToken := false
-	if username == nil {
+	if session.Get("username") == nil {
 		// Check access token
 		accessToken := c.Request.Header.Get("Authorization")
 		if accessToken == "" {
@@ -83,6 +84,7 @@ func authHelper(c *gin.Context, minRole int) {
 			role = user.Role
 			id = user.Id
 			status = user.Status
+			group = user.Group
 			useAccessToken = true
 		} else {
 			c.JSON(http.StatusOK, gin.H{
@@ -92,6 +94,40 @@ func authHelper(c *gin.Context, minRole int) {
 			c.Abort()
 			return
 		}
+	} else {
+		// cookie session 存在客户端、最长 30 天且服务端无法吊销，只能作为身份凭证；
+		// 角色/状态/分组必须取当前数据库值，否则封禁、降权要等 cookie 过期才生效。
+		sessionId, ok := session.Get("id").(int)
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"success": false,
+				"message": common.TranslateMessage(c, i18n.MsgAuthNotLoggedIn),
+			})
+			c.Abort()
+			return
+		}
+		user, userErr := model.GetUserById(sessionId, false)
+		if userErr != nil {
+			if errors.Is(userErr, gorm.ErrRecordNotFound) {
+				c.JSON(http.StatusUnauthorized, gin.H{
+					"success": false,
+					"message": common.TranslateMessage(c, i18n.MsgAuthNotLoggedIn),
+				})
+			} else {
+				common.SysLog("authHelper GetUserById database error: " + userErr.Error())
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"success": false,
+					"message": common.TranslateMessage(c, i18n.MsgDatabaseError),
+				})
+			}
+			c.Abort()
+			return
+		}
+		username = user.Username
+		role = user.Role
+		id = user.Id
+		status = user.Status
+		group = user.Group
 	}
 	// get header New-Api-User
 	apiUserIdStr := c.Request.Header.Get("New-Api-User")
@@ -121,7 +157,7 @@ func authHelper(c *gin.Context, minRole int) {
 		c.Abort()
 		return
 	}
-	if status.(int) == common.UserStatusDisabled {
+	if status == common.UserStatusDisabled {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": common.TranslateMessage(c, i18n.MsgAuthUserBanned),
@@ -129,7 +165,7 @@ func authHelper(c *gin.Context, minRole int) {
 		c.Abort()
 		return
 	}
-	if role.(int) < minRole {
+	if role < minRole {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": common.TranslateMessage(c, i18n.MsgAuthInsufficientPrivilege),
@@ -137,7 +173,7 @@ func authHelper(c *gin.Context, minRole int) {
 		c.Abort()
 		return
 	}
-	if !validUserInfo(username.(string), role.(int)) {
+	if !validUserInfo(username, role) {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": common.TranslateMessage(c, i18n.MsgAuthUserInfoInvalid),
@@ -150,8 +186,8 @@ func authHelper(c *gin.Context, minRole int) {
 	c.Set("username", username)
 	c.Set("role", role)
 	c.Set("id", id)
-	c.Set("group", session.Get("group"))
-	c.Set("user_group", session.Get("group"))
+	c.Set("group", group)
+	c.Set("user_group", group)
 	c.Set("use_access_token", useAccessToken)
 
 	// 管理/root 写操作审计兜底：内聚在鉴权链路里，保证任何经过 AdminAuth/RootAuth
@@ -220,10 +256,12 @@ func WssAuth(c *gin.Context) {
 // Used for endpoints that need to be accessible from both the dashboard and API clients.
 func TokenOrUserAuth() func(c *gin.Context) {
 	return func(c *gin.Context) {
-		// Try session auth first (dashboard users)
+		// Try session auth first (dashboard users). The session only proves
+		// identity; status must be checked against current data so bans apply
+		// immediately instead of when the cookie expires.
 		session := sessions.Default(c)
-		if id := session.Get("id"); id != nil {
-			if status, ok := session.Get("status").(int); ok && status == common.UserStatusEnabled {
+		if id, ok := session.Get("id").(int); ok {
+			if userCache, err := model.GetUserCache(id); err == nil && userCache.Status == common.UserStatusEnabled {
 				c.Set("id", id)
 				c.Next()
 				return
@@ -338,7 +376,7 @@ func TokenAuth() func(c *gin.Context) {
 		// gemini api 从query中获取key
 		if strings.HasPrefix(c.Request.URL.Path, "/v1beta/models") ||
 			strings.HasPrefix(c.Request.URL.Path, "/v1beta/openai/models") ||
-			strings.HasPrefix(c.Request.URL.Path, "/v1/models/") {
+			strings.HasPrefix(c.Request.URL.Path, "/v1/models") {
 			skKey := c.Query("key")
 			if skKey != "" {
 				c.Request.Header.Set("Authorization", "Bearer "+skKey)

@@ -51,12 +51,26 @@ func init() {
 	config.GlobalConfig.Register("group_ratio_setting", &groupRatioSetting)
 }
 
+// GetGroupRatioSetting 获取分组倍率配置
+//
+// This is a pure read. Lazily allocating GroupSpecialUsableGroup here would be
+// an unsynchronised pointer write on the request path (service/group.go), racing
+// both the other readers and the admin save that can set the field to nil. Two
+// concurrent callers would each allocate and store, so one caller's AddAll would
+// populate a map nobody can reach and the special-usable-group config would be
+// silently lost. The nil case is handled by GetGroupSpecialUsableGroup instead.
 func GetGroupRatioSetting() *GroupRatioSetting {
-	if groupRatioSetting.GroupSpecialUsableGroup == nil {
-		groupRatioSetting.GroupSpecialUsableGroup = types.NewRWMap[string, map[string]string]()
-		groupRatioSetting.GroupSpecialUsableGroup.AddAll(defaultGroupSpecialUsableGroup)
-	}
 	return &groupRatioSetting
+}
+
+// GetGroupSpecialUsableGroup returns the configured special usable groups for a
+// user group. It tolerates a nil map, which an admin save of "null" produces.
+func GetGroupSpecialUsableGroup(userGroup string) (map[string]string, bool) {
+	specialGroups := groupRatioSetting.GroupSpecialUsableGroup
+	if specialGroups == nil {
+		return nil, false
+	}
+	return specialGroups.Get(userGroup)
 }
 
 func GetGroupRatioCopy() map[string]float64 {

@@ -277,24 +277,40 @@ func updateSunoTasks(ctx context.Context, channelId int, taskIds []string, taskM
 			continue
 		}
 
+		preStatus := task.Status
 		task.Status = lo.If(model.TaskStatus(responseItem.Status) != "", model.TaskStatus(responseItem.Status)).Else(task.Status)
 		task.FailReason = lo.If(responseItem.FailReason != "", responseItem.FailReason).Else(task.FailReason)
 		task.SubmitTime = lo.If(responseItem.SubmitTime != 0, responseItem.SubmitTime).Else(task.SubmitTime)
 		task.StartTime = lo.If(responseItem.StartTime != 0, responseItem.StartTime).Else(task.StartTime)
 		task.FinishTime = lo.If(responseItem.FinishTime != 0, responseItem.FinishTime).Else(task.FinishTime)
+		shouldRefund := false
 		if responseItem.FailReason != "" || task.Status == model.TaskStatusFailure {
 			logger.LogInfo(ctx, task.TaskID+" 构建失败，"+task.FailReason)
+			task.Status = model.TaskStatusFailure
 			task.Progress = "100%"
-			RefundTaskQuota(ctx, task, task.FailReason)
+			if task.Quota != 0 {
+				shouldRefund = true
+			}
 		}
 		if responseItem.Status == model.TaskStatusSuccess {
 			task.Progress = "100%"
 		}
 		task.Data = responseItem.Data
 
-		err = task.Update()
+		// 退款必须发生在赢得状态 CAS 之后：若写库失败或被并发进程抢先，
+		// 任务仍处于未完成状态，下个轮询周期会重试整个转移；
+		// 先退款会导致每次重试都重复退款。
+		won, err := task.UpdateWithStatus(preStatus)
 		if err != nil {
 			common.SysLog("UpdateSunoTask task error: " + err.Error())
+			continue
+		}
+		if !won {
+			logger.LogWarn(ctx, fmt.Sprintf("Suno task %s already transitioned by another process, skip billing", task.TaskID))
+			continue
+		}
+		if shouldRefund {
+			RefundTaskQuota(ctx, task, task.FailReason)
 		}
 	}
 	return nil

@@ -56,6 +56,13 @@ export const channelSchema = z.object({
   model_mapping: z.string().nullish(),
   status_code_mapping: z.string().nullish(),
   priority: z.number().nullish(),
+  max_concurrency: z.number().nullish(),
+  /**
+   * Requests this channel is serving right now. Not a stored column: the list
+   * endpoint sends it as a separate id-keyed gauge and the table folds it onto
+   * the row, so it is absent everywhere else a Channel is parsed.
+   */
+  in_flight: z.number().nullish(),
   auto_ban: z.number().nullish(),
   other_info: z.string().default(''),
   tag: z.string().nullish(),
@@ -84,8 +91,19 @@ export interface ChannelSettings {
   thinking_to_content?: boolean
   proxy?: string
   pass_through_body_enabled?: boolean
+  /** @deprecated superseded by synthetic_client_headers_profile; kept in sync by the backend */
+  synthetic_client_headers?: boolean
+  /** '' off, 'auto' to follow the channel type, or a client family name */
+  synthetic_client_headers_profile?: string
   system_prompt?: string
   system_prompt_override?: boolean
+  /**
+   * Opt this channel's /v1/responses traffic onto the Responses API WebSocket
+   * transport. Records intent only: when a handshake proves the upstream refuses
+   * the upgrade, other_settings.websocket_unsupported is set and wins over this,
+   * so the switch can read on while traffic runs on SSE.
+   */
+  websocket_transport?: boolean
 }
 
 export interface ChannelOtherSettings {
@@ -106,6 +124,13 @@ export interface ChannelOtherSettings {
   upstream_model_update_ignored_models?: string[]
   upstream_model_update_last_check_time?: number
   upstream_model_update_last_detected_models?: string[]
+  /**
+   * Written by the backend after a handshake proved the upstream refuses the
+   * WebSocket upgrade. Read-only in the UI: surface it as a downgrade notice next
+   * to the websocket_transport switch, and clear it on save so re-saving the
+   * channel is what retries.
+   */
+  websocket_unsupported?: boolean
   advanced_custom?: AdvancedCustomConfig
 }
 
@@ -151,6 +176,12 @@ export interface GetChannelsResponse {
     total: number
     page: number
     page_size: number
+    /**
+     * Live in-flight request count per channel id, sent next to the rows because
+     * it is server process state rather than a stored column. Absent ids are
+     * idle.
+     */
+    in_flight?: Record<string, number>
     type_counts?: Record<string, number>
   }
 }
@@ -161,6 +192,7 @@ export interface SearchChannelsResponse {
   data?: {
     items: Channel[]
     total: number
+    in_flight?: Record<string, number>
     type_counts?: Record<string, number>
   }
 }
@@ -169,6 +201,18 @@ export interface GetChannelResponse {
   success: boolean
   message?: string
   data?: Channel
+}
+
+/**
+ * Response of the standalone in-flight gauge endpoint, polled far more often
+ * than the channel list itself.
+ */
+export interface ChannelInFlightResponse {
+  success: boolean
+  message?: string
+  data?: {
+    in_flight?: Record<string, number>
+  }
 }
 
 export interface ChannelOpsResponse {

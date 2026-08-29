@@ -59,6 +59,11 @@ const (
 	ErrorCodeChannelAwsClientError        ErrorCode = "channel:aws_client_error"
 	ErrorCodeChannelInvalidKey            ErrorCode = "channel:invalid_key"
 	ErrorCodeChannelResponseTimeExceeded  ErrorCode = "channel:response_time_exceeded"
+	// ErrorCodeChannelsSaturated says every channel that could serve the request
+	// is at its configured concurrency limit. It is deliberately not a
+	// model_not_found: the deployment is correct and no channel misbehaved, the
+	// upstreams are simply all busy, so a client can retry the identical request.
+	ErrorCodeChannelsSaturated ErrorCode = "channel:all_saturated"
 
 	// client request error
 	ErrorCodeReadRequestBodyFailed ErrorCode = "read_request_body_failed"
@@ -96,6 +101,43 @@ type NewAPIError struct {
 	errorCode      ErrorCode
 	StatusCode     int
 	Metadata       json.RawMessage
+	// upstreamBody keeps a bounded copy of an upstream error body that could not
+	// be folded into the message — a Cloudflare block page, an nginx 502, a
+	// plaintext "insufficient balance". It never reaches the caller; it is
+	// surfaced under the error log's admin_info so an operator can tell those
+	// apart instead of seeing a bare "bad response status code 403".
+	upstreamBody string
+}
+
+// UpstreamBodyLogLimit bounds the stored upstream error body. Block pages are
+// full HTML documents, and this lands in every error log row.
+const UpstreamBodyLogLimit = 1024
+
+// SetUpstreamBody records a bounded, admin-only copy of the raw upstream error
+// body. Empty input clears nothing and is ignored.
+func (e *NewAPIError) SetUpstreamBody(body string) {
+	if e == nil {
+		return
+	}
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return
+	}
+	if len(body) > UpstreamBodyLogLimit {
+		// Block pages are UTF-8, so cut on a rune boundary rather than leaving a
+		// half-encoded character behind.
+		body = strings.ToValidUTF8(body[:UpstreamBodyLogLimit], "") +
+			fmt.Sprintf("... [truncated, original_length=%d]", len(body))
+	}
+	e.upstreamBody = body
+}
+
+// GetUpstreamBody returns the stored upstream error body, if any.
+func (e *NewAPIError) GetUpstreamBody() string {
+	if e == nil {
+		return ""
+	}
+	return e.upstreamBody
 }
 
 // Unwrap enables errors.Is / errors.As to work with NewAPIError by exposing the underlying error.

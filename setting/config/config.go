@@ -261,7 +261,21 @@ func updateConfigFromMap(config interface{}, configMap map[string]string) error 
 				continue
 			}
 			field.Set(fresh.Elem())
-		case reflect.Slice, reflect.Struct:
+		case reflect.Slice:
+			// json.Unmarshal merges into existing slices element-wise: a shorter
+			// incoming array reuses the old elements, so fields absent from the
+			// new JSON inherit the old element's value at the same index. Config
+			// slices are registered with compile-time defaults, so decoding in
+			// place would mix stored entries with default ones. Allocate a fresh
+			// slice so the stored value is the only source of truth.
+			fresh := reflect.New(field.Type())
+			if err := common.Unmarshal([]byte(strValue), fresh.Interface()); err != nil {
+				continue
+			}
+			field.Set(fresh.Elem())
+		case reflect.Struct:
+			// Structs are intentionally decoded in place: absent fields keep
+			// their current value instead of being reset to the zero value.
 			err := json.Unmarshal([]byte(strValue), field.Addr().Interface())
 			if err != nil {
 				continue

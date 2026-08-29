@@ -106,6 +106,10 @@ func getContentTypeByFormat(format string) string {
 }
 
 func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
+	// Registered before the read: a ReadAll that fails midway returned without
+	// ever reaching a deferred Close, so the connection was never released.
+	defer service.CloseResponseBodyGracefully(resp)
+
 	body, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
 		return nil, types.NewErrorWithStatusCode(
@@ -114,7 +118,6 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 			http.StatusInternalServerError,
 		)
 	}
-	defer resp.Body.Close()
 
 	// Parse response
 	var minimaxResp MiniMaxTTSResponse
@@ -173,6 +176,10 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 }
 
 func handleChatCompletionResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
+	// Registered before the read: a ReadAll that fails midway returned without
+	// ever reaching a deferred Close, so the connection was never released.
+	defer service.CloseResponseBodyGracefully(resp)
+
 	body, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
 		return nil, types.NewErrorWithStatusCode(
@@ -181,7 +188,6 @@ func handleChatCompletionResponse(c *gin.Context, resp *http.Response, info *rel
 			http.StatusInternalServerError,
 		)
 	}
-	defer resp.Body.Close()
 
 	// Set response headers
 	for key, values := range resp.Header {

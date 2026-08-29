@@ -74,6 +74,7 @@ function ChannelCardComponent({
   const actionsCell = renderCell('actions')
   const priorityCell = renderCell('priority')
   const weightCell = renderCell('weight')
+  const concurrencyCell = renderCell('max_concurrency')
   const balanceCell = renderCell('balance')
   const responseCell = renderCell('response_time')
   const testCell = renderCell('test_time')
@@ -133,25 +134,30 @@ function ChannelCardComponent({
             </div>
           </div>
 
-          {/* Right column (sits on the right, content left-aligned). A single
-            grid with content-sized columns keeps Priority/Weight and
-            Response/Last Tested aligned without wasting horizontal space. */}
-          <div className='grid shrink-0 grid-cols-[auto_auto] items-center gap-x-3 gap-y-1'>
-            <span className={labelClass}>{t('Priority')}</span>
-            <span className={labelClass}>{t('Weight')}</span>
-            <div className='flex justify-start'>{priorityCell}</div>
-            <div className='flex justify-start'>{weightCell}</div>
-            <span className={cn('mt-2', labelClass)}>
-              {fieldLabels.response_time}
-            </span>
-            <span className={cn('mt-2', labelClass)}>
-              {fieldLabels.test_time}
-            </span>
-            <div className='overflow-hidden text-sm'>
-              {responseCell ?? <span className='text-muted-foreground'>-</span>}
+          {/* Right column (sits on the right, content left-aligned). The
+            routing knobs share one grid and the timings another, so that
+            adding the concurrency cap does not push Response/Last Tested out
+            of alignment. */}
+          <div className='flex shrink-0 flex-col gap-2'>
+            <div className='grid grid-cols-[auto_auto_auto] items-center gap-x-3 gap-y-1'>
+              <span className={labelClass}>{t('Priority')}</span>
+              <span className={labelClass}>{t('Weight')}</span>
+              <span className={labelClass}>{t('Concurrency')}</span>
+              <div className='flex justify-start'>{priorityCell}</div>
+              <div className='flex justify-start'>{weightCell}</div>
+              <div className='flex justify-start'>{concurrencyCell}</div>
             </div>
-            <div className='overflow-hidden text-sm'>
-              {testCell ?? <span className='text-muted-foreground'>-</span>}
+            <div className='grid grid-cols-[auto_auto] items-center gap-x-3 gap-y-1'>
+              <span className={labelClass}>{fieldLabels.response_time}</span>
+              <span className={labelClass}>{fieldLabels.test_time}</span>
+              <div className='overflow-hidden text-sm'>
+                {responseCell ?? (
+                  <span className='text-muted-foreground'>-</span>
+                )}
+              </div>
+              <div className='overflow-hidden text-sm'>
+                {testCell ?? <span className='text-muted-foreground'>-</span>}
+              </div>
             </div>
           </div>
         </div>

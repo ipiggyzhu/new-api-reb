@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/gemini"
 	"github.com/QuantumNous/new-api/relay/channel/ollama"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
@@ -25,6 +26,8 @@ import (
 const (
 	channelUpstreamModelUpdateTaskDefaultIntervalMinutes  = 30
 	channelUpstreamModelUpdateTaskBatchSize               = 100
+	channelUpstreamModelUpdateTaskDefaultConcurrency      = 8
+	channelUpstreamModelUpdateFetchTimeoutSeconds         = 15
 	channelUpstreamModelUpdateMinCheckIntervalSeconds     = 300
 	channelUpstreamModelUpdateNotifySuppressWindowSeconds = 86400
 	channelUpstreamModelUpdateNotifyMaxChannelDetails     = 8
@@ -50,6 +53,20 @@ var channelUpstreamModelUpdateSelectFields = []string{
 	"tag",
 	"channel_info",
 	"header_override",
+	// The columns below are not needed to diff model lists, but model validation
+	// issues a real request through testChannel and must reproduce the channel's
+	// runtime behavior. Without param_override / status_code_mapping a channel
+	// that only works with an override would be misjudged as broken.
+	"test_model",
+	"param_override",
+	"status_code_mapping",
+	"auto_ban",
+	// GORM derives this column from the Go field name OpenAIOrganization, not from
+	// the json tag, so the column is open_ai_organization. Using the json name here
+	// made every scan query fail with "no such column" and silently check nothing.
+	// channelUpstreamModelUpdateSelectFields is verified against the migrated
+	// schema in TestChannelUpstreamModelUpdateSelectFieldsMatchSchema.
+	"open_ai_organization",
 }
 
 var channelUpstreamModelUpdateNotifyState = struct {
@@ -255,6 +272,35 @@ func getUpstreamModelUpdateMinCheckIntervalSeconds() int64 {
 	return interval
 }
 
+// getUpstreamModelUpdateTaskConcurrency bounds how many channels one scheduled
+// scan works on at the same time. Fetch and validation are network-bound and
+// each channel talks to a different upstream, so a small worker pool collapses
+// the serial tail of unreachable upstreams without bursting any single one.
+func getUpstreamModelUpdateTaskConcurrency() int {
+	concurrency := common.GetEnvOrDefault(
+		"CHANNEL_UPSTREAM_MODEL_UPDATE_CONCURRENCY",
+		channelUpstreamModelUpdateTaskDefaultConcurrency,
+	)
+	if concurrency < 1 {
+		return 1
+	}
+	if concurrency > 32 {
+		return 32
+	}
+	return concurrency
+}
+
+func getUpstreamModelUpdateFetchTimeout() time.Duration {
+	seconds := common.GetEnvOrDefault(
+		"CHANNEL_UPSTREAM_MODEL_UPDATE_FETCH_TIMEOUT_SECONDS",
+		channelUpstreamModelUpdateFetchTimeoutSeconds,
+	)
+	if seconds < 1 {
+		seconds = channelUpstreamModelUpdateFetchTimeoutSeconds
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {
 	baseURL := constant.ChannelBaseURLs[channel.Type]
 	if channel.GetBaseURL() != "" {
@@ -322,7 +368,22 @@ func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {
 		return nil, err
 	}
 
-	body, err := GetResponseBody(http.MethodGet, url, channel, headers)
+	// A dead upstream must cost seconds, not the OS TCP stack's patience: the
+	// model list is a small GET, so anything slower than this is effectively down.
+	fetchCtx, cancel := context.WithTimeout(context.Background(), getUpstreamModelUpdateFetchTimeout())
+	defer cancel()
+	body, err := GetResponseBody(fetchCtx, http.MethodGet, url, channel, headers)
+	if err != nil {
+		// 上游对请求形状的口味互相矛盾，一套头无法同时满足：agentrouter 只放行
+		// 真实客户端 UA（裸 UA 401 "unauthorized client detected"），ioll.pp.ua
+		// 的 WAF 反过来专拦 SDK UA（403），个别 Anthropic 型网关见到 x-api-key
+		// 头直接 panic 500，而 new-api 系网关只认 Bearer。首选完整装扮（认证
+		// 双头 + 客户端画像），被拒后退回最朴素的 Bearer 裸头重试，两种形状
+		// 合起来覆盖已知的全部上游脾气。
+		retryCtx, retryCancel := context.WithTimeout(context.Background(), getUpstreamModelUpdateFetchTimeout())
+		defer retryCancel()
+		body, err = GetResponseBody(retryCtx, http.MethodGet, url, channel, GetAuthHeader(key))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -342,6 +403,12 @@ func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {
 	return normalizeModelNames(ids), nil
 }
 
+// channelUpstreamModelPersistMu serializes the task's channel writes. The scan
+// runs channels concurrently, but SQLite allows only one writer at a time, so
+// letting workers flush settings simultaneously would trade progress for
+// busy-wait errors.
+var channelUpstreamModelPersistMu sync.Mutex
+
 func updateChannelUpstreamModelSettings(channel *model.Channel, settings dto.ChannelOtherSettings, updateModels bool) error {
 	channel.SetOtherSettings(settings)
 	updates := map[string]interface{}{
@@ -350,7 +417,367 @@ func updateChannelUpstreamModelSettings(channel *model.Channel, settings dto.Cha
 	if updateModels {
 		updates["models"] = channel.Models
 	}
+	channelUpstreamModelPersistMu.Lock()
+	defer channelUpstreamModelPersistMu.Unlock()
 	return model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(updates).Error
+}
+
+// upstreamModelUpdateRunContext carries the per-run state of a scheduled
+// auto-update scan. It exists only when monitor_setting has the upstream model
+// auto-update switch on, so a nil pointer means "legacy detect-only behavior":
+// stage the diff for manual review, never validate and never apply.
+type upstreamModelUpdateRunContext struct {
+	ctx        context.Context
+	monitor    *operation_setting.MonitorSetting
+	testUserID int
+
+	// mu guards every counter below: the task scans channels concurrently and
+	// all workers draw from the same shared validation budget.
+	mu sync.Mutex
+	// validationBudget is the number of real requests left for the whole run. It
+	// is shared across channels so one channel with hundreds of new upstream
+	// models cannot spend the entire budget of the next ones by itself.
+	validationBudget int
+
+	validatedModels     int
+	rejectedModels      int
+	removedFailedModels int
+}
+
+func (r *upstreamModelUpdateRunContext) remainingValidationBudget() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.validationBudget
+}
+
+// consumeValidationBudget reserves one validation request from the shared
+// budget, reporting false once the run is out of budget.
+func (r *upstreamModelUpdateRunContext) consumeValidationBudget() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.validationBudget <= 0 {
+		return false
+	}
+	r.validationBudget--
+	r.validatedModels++
+	return true
+}
+
+// validationEnabled reports whether this run should confirm models with a real
+// request before adding them and before removing them.
+func (r *upstreamModelUpdateRunContext) validationEnabled() bool {
+	return r != nil && r.monitor.UpstreamModelUpdateValidate && r.testUserID > 0
+}
+
+const (
+	// channelUpstreamModelUpdateMaxHealthEntries bounds the per-channel health map
+	// so a channel whose upstream fails wholesale cannot grow the settings column
+	// without limit.
+	channelUpstreamModelUpdateMaxHealthEntries = 200
+	// channelUpstreamModelUpdateMaxHealthErrorLength truncates the recorded error;
+	// the full text is already in the system log.
+	channelUpstreamModelUpdateMaxHealthErrorLength = 200
+)
+
+// selectModelsForUpstreamValidation decides which models this run should confirm
+// with a real request. Validating every model on every channel would be far too
+// expensive, so coverage is split three ways:
+//
+//   - every newly detected upstream candidate, because an unvalidated add is how
+//     zombie models enter the channel in the first place;
+//   - models that already failed and whose retry delay has elapsed, which is what
+//     turns a single failure into a confirmed removal;
+//   - a rotating sample of the models already serving traffic, so a model that
+//     silently dies is eventually noticed even if upstream still lists it.
+//
+// The returned cursor is persisted so the rotation advances across runs instead
+// of re-checking the same head of the list forever.
+func selectModelsForUpstreamValidation(
+	existingModels []string,
+	candidateModels []string,
+	health map[string]dto.ModelHealthState,
+	retryDelaySeconds int64,
+	rotationSampleSize int,
+	cursor int,
+	now int64,
+	budget int,
+) (selected []string, nextCursor int) {
+	nextCursor = cursor
+	if budget <= 0 {
+		return nil, nextCursor
+	}
+
+	seen := make(map[string]struct{}, len(candidateModels)+rotationSampleSize)
+	appendModel := func(modelName string) bool {
+		if len(selected) >= budget {
+			return false
+		}
+		if _, ok := seen[modelName]; ok {
+			return true
+		}
+		seen[modelName] = struct{}{}
+		selected = append(selected, modelName)
+		return true
+	}
+
+	for _, modelName := range normalizeModelNames(candidateModels) {
+		if !appendModel(modelName) {
+			return selected, nextCursor
+		}
+	}
+
+	existingModels = normalizeModelNames(existingModels)
+	for _, modelName := range existingModels {
+		state, ok := health[modelName]
+		if !ok {
+			continue
+		}
+		if state.LastFailureTime > 0 && now-state.LastFailureTime < retryDelaySeconds {
+			continue // still cooling down; re-testing now would just burn quota
+		}
+		if !appendModel(modelName) {
+			return selected, nextCursor
+		}
+	}
+
+	if rotationSampleSize <= 0 || len(existingModels) == 0 {
+		return selected, nextCursor
+	}
+	if cursor < 0 || cursor >= len(existingModels) {
+		cursor = 0
+	}
+	sampleSize := min(rotationSampleSize, len(existingModels))
+	for i := 0; i < sampleSize; i++ {
+		if !appendModel(existingModels[(cursor+i)%len(existingModels)]) {
+			break
+		}
+	}
+	nextCursor = (cursor + sampleSize) % len(existingModels)
+
+	return selected, nextCursor
+}
+
+// limitUpstreamModelRemovals bounds how much damage one automated run can do.
+// Upstream-wide outages, an expired key, or a proxy failure make every model on
+// a channel look broken at the same time; without a bound the run would empty
+// the channel and wipe its abilities, taking the channel out of service for
+// every user until an admin noticed. Losing a few stale model names for one more
+// day is strictly cheaper than that.
+func limitUpstreamModelRemovals(existingModels []string, removeModels []string) []string {
+	existingModels = normalizeModelNames(existingModels)
+	removeModels = intersectModelNames(removeModels, existingModels)
+	if len(removeModels) == 0 {
+		return nil
+	}
+	if len(removeModels) >= len(existingModels) {
+		return nil // never leave a channel with no models at all
+	}
+	if len(removeModels) > len(existingModels)/2 {
+		return nil // more than half failing looks like an outage, not model churn
+	}
+	return removeModels
+}
+
+// validateChannelModels issues one real request per selected model and turns the
+// results into add/remove decisions. Only errors that service.IsChannelFaultError
+// classifies as genuine channel faults count against a model: a rate limit or a
+// transient hiccup leaves the model exactly as it was, which is what keeps a
+// throttled channel from being stripped of its models.
+func (r *upstreamModelUpdateRunContext) validateChannelModels(
+	channel *model.Channel,
+	settings *dto.ChannelOtherSettings,
+	candidateModels []string,
+) (approvedAddModels []string, removeModels []string) {
+	existingModels := normalizeModelNames(channel.GetModels())
+	health := settings.UpstreamModelUpdateModelHealth
+	if health == nil {
+		health = make(map[string]dto.ModelHealthState)
+	}
+
+	now := common.GetTimestamp()
+	retryDelaySeconds := int64(r.monitor.GetUpstreamModelUpdateRetryDelayMinutes()) * 60
+	selected, nextCursor := selectModelsForUpstreamValidation(
+		existingModels,
+		candidateModels,
+		health,
+		retryDelaySeconds,
+		r.monitor.GetUpstreamModelUpdateRotationSampleSize(),
+		settings.UpstreamModelUpdateRotationCursor,
+		now,
+		r.remainingValidationBudget(),
+	)
+	settings.UpstreamModelUpdateRotationCursor = nextCursor
+
+	candidateSet := make(map[string]struct{}, len(candidateModels))
+	for _, modelName := range normalizeModelNames(candidateModels) {
+		candidateSet[modelName] = struct{}{}
+	}
+	existingSet := make(map[string]struct{}, len(existingModels))
+	for _, modelName := range existingModels {
+		existingSet[modelName] = struct{}{}
+	}
+
+	failureThreshold := r.monitor.GetUpstreamModelUpdateFailureThreshold()
+	isStream := shouldUseStreamForAutomaticChannelTest(channel)
+
+	for index, modelName := range selected {
+		if r.ctx != nil && r.ctx.Err() != nil {
+			break
+		}
+		if r.remainingValidationBudget() <= 0 {
+			break
+		}
+		// Pace every request, not just the ones that failed: validation hits the
+		// same upstream endpoints as live traffic and a burst is what triggers
+		// rate limiting in the first place.
+		if index > 0 && common.RequestInterval > 0 {
+			if r.ctx == nil {
+				time.Sleep(common.RequestInterval)
+			} else {
+				select {
+				case <-r.ctx.Done():
+					return approvedAddModels, nil
+				case <-time.After(common.RequestInterval):
+				}
+			}
+		}
+		if !r.consumeValidationBudget() {
+			break
+		}
+
+		result := testChannel(r.ctx, channel, r.testUserID, modelName, "", isStream)
+		_, isCandidate := candidateSet[modelName]
+		_, isExisting := existingSet[modelName]
+
+		approveAdd, remove := r.classifyModelValidationResult(
+			channel.Id, modelName, result, isCandidate, isExisting, health, now, failureThreshold,
+		)
+		if approveAdd {
+			approvedAddModels = append(approvedAddModels, modelName)
+		}
+		if remove {
+			removeModels = append(removeModels, modelName)
+		}
+	}
+
+	removeModels = limitUpstreamModelRemovals(existingModels, removeModels)
+	if len(removeModels) > 0 {
+		r.mu.Lock()
+		r.removedFailedModels += len(removeModels)
+		r.mu.Unlock()
+	}
+
+	pruneChannelModelHealth(health, mergeModelNames(existingModels, approvedAddModels))
+	if len(health) == 0 {
+		settings.UpstreamModelUpdateModelHealth = nil
+	} else {
+		settings.UpstreamModelUpdateModelHealth = health
+	}
+
+	return approvedAddModels, removeModels
+}
+
+// classifyModelValidationResult turns one validation result into add/remove
+// decisions and records the model's health. It is the single place where the
+// removal policy lives:
+//
+//   - success clears any recorded failure, and approves a staged candidate;
+//   - an error that service.IsChannelFaultError does not consider a channel fault
+//     (a rate limit, a transient upstream hiccup) changes nothing at all, so a
+//     throttled channel keeps serving every model it has;
+//   - a confirmed fault on a model the channel already serves counts one failure
+//     and only asks for removal once the configured threshold is reached, which
+//     is what forces a second run — one retry delay later — before a model goes.
+func (r *upstreamModelUpdateRunContext) classifyModelValidationResult(
+	channelID int,
+	modelName string,
+	result testResult,
+	isCandidate bool,
+	isExisting bool,
+	health map[string]dto.ModelHealthState,
+	now int64,
+	failureThreshold int,
+) (approveAdd bool, remove bool) {
+	if result.newAPIError == nil && result.localErr == nil {
+		delete(health, modelName)
+		return isCandidate, false
+	}
+
+	if !service.IsChannelFaultError(result.newAPIError) {
+		// Rate limited or otherwise transient: leave the model untouched. A new
+		// candidate simply stays staged and is retried next run.
+		if isCandidate {
+			r.mu.Lock()
+			r.rejectedModels++
+			r.mu.Unlock()
+		}
+		common.SysLog(fmt.Sprintf(
+			"upstream model validation inconclusive (not a channel fault): channel_id=%d model=%s err=%v",
+			channelID, modelName, result.newAPIError,
+		))
+		return false, false
+	}
+
+	if isCandidate {
+		r.mu.Lock()
+		r.rejectedModels++
+		r.mu.Unlock()
+	}
+	if !isExisting {
+		// A brand new model that failed is just not added; tracking health for a
+		// model the channel does not serve would grow the map for nothing.
+		common.SysLog(fmt.Sprintf(
+			"upstream model candidate rejected: channel_id=%d model=%s err=%v",
+			channelID, modelName, result.newAPIError,
+		))
+		return false, false
+	}
+
+	state := health[modelName]
+	state.Failures++
+	state.LastFailureTime = now
+	if result.newAPIError != nil {
+		state.LastError = common.LocalLogPreview(result.newAPIError.Error())
+		if len(state.LastError) > channelUpstreamModelUpdateMaxHealthErrorLength {
+			state.LastError = state.LastError[:channelUpstreamModelUpdateMaxHealthErrorLength]
+		}
+	}
+	health[modelName] = state
+
+	common.SysLog(fmt.Sprintf(
+		"upstream model validation failed: channel_id=%d model=%s failures=%d threshold=%d err=%v",
+		channelID, modelName, state.Failures, failureThreshold, result.newAPIError,
+	))
+
+	return false, r.monitor.UpstreamModelUpdateRemoveFailed && state.Failures >= failureThreshold
+}
+
+// pruneChannelModelHealth drops health entries for models the channel no longer
+// serves and caps the map size, keeping the most recent failures.
+func pruneChannelModelHealth(health map[string]dto.ModelHealthState, knownModels []string) {
+	if len(health) == 0 {
+		return
+	}
+	known := make(map[string]struct{}, len(knownModels))
+	for _, modelName := range normalizeModelNames(knownModels) {
+		known[modelName] = struct{}{}
+	}
+	for modelName := range health {
+		if _, ok := known[modelName]; !ok {
+			delete(health, modelName)
+		}
+	}
+	if len(health) <= channelUpstreamModelUpdateMaxHealthEntries {
+		return
+	}
+	names := lo.Keys(health)
+	slices.SortFunc(names, func(a, b string) int {
+		// Newest failure first, so the oldest entries are the ones dropped.
+		return int(health[b].LastFailureTime - health[a].LastFailureTime)
+	})
+	for _, modelName := range names[channelUpstreamModelUpdateMaxHealthEntries:] {
+		delete(health, modelName)
+	}
 }
 
 func checkAndPersistChannelUpstreamModelUpdates(
@@ -358,13 +785,14 @@ func checkAndPersistChannelUpstreamModelUpdates(
 	settings *dto.ChannelOtherSettings,
 	force bool,
 	allowAutoApply bool,
-) (modelsChanged bool, autoAdded int, err error) {
+	run *upstreamModelUpdateRunContext,
+) (modelsChanged bool, autoAdded int, autoRemoved int, err error) {
 	now := common.GetTimestamp()
 	if !force {
 		minInterval := getUpstreamModelUpdateMinCheckIntervalSeconds()
 		if settings.UpstreamModelUpdateLastCheckTime > 0 &&
 			now-settings.UpstreamModelUpdateLastCheckTime < minInterval {
-			return false, 0, nil
+			return false, 0, 0, nil
 		}
 	}
 
@@ -372,17 +800,34 @@ func checkAndPersistChannelUpstreamModelUpdates(
 	settings.UpstreamModelUpdateLastCheckTime = now
 	if fetchErr != nil {
 		if err = updateChannelUpstreamModelSettings(channel, *settings, false); err != nil {
-			return false, 0, err
+			return false, 0, 0, err
 		}
-		return false, 0, fetchErr
+		return false, 0, 0, fetchErr
 	}
 
-	if allowAutoApply && settings.UpstreamModelUpdateAutoSyncEnabled && len(pendingAddModels) > 0 {
+	// A scheduled auto-update run applies to every channel it scans; the
+	// per-channel auto-sync flag stays honored so the legacy env-driven path keeps
+	// working unchanged for deployments that never enable the global switch.
+	autoSyncEnabled := settings.UpstreamModelUpdateAutoSyncEnabled || run != nil
+	var failedModels []string
+	if allowAutoApply && run.validationEnabled() {
+		pendingAddModels, failedModels = run.validateChannelModels(channel, settings, pendingAddModels)
+	}
+
+	if allowAutoApply && autoSyncEnabled && (len(pendingAddModels) > 0 || len(failedModels) > 0) {
 		originModels := normalizeModelNames(channel.GetModels())
-		mergedModels := mergeModelNames(originModels, pendingAddModels)
-		if len(mergedModels) > len(originModels) {
-			channel.Models = strings.Join(mergedModels, ",")
-			autoAdded = len(mergedModels) - len(originModels)
+		targetModels := originModels
+		if len(pendingAddModels) > 0 {
+			targetModels = mergeModelNames(targetModels, pendingAddModels)
+		}
+		autoAdded = len(targetModels) - len(originModels)
+		if len(failedModels) > 0 {
+			beforeRemoval := len(targetModels)
+			targetModels = subtractModelNames(targetModels, failedModels)
+			autoRemoved = beforeRemoval - len(targetModels)
+		}
+		if !slices.Equal(targetModels, originModels) {
+			channel.Models = strings.Join(targetModels, ",")
 			modelsChanged = true
 		}
 		settings.UpstreamModelUpdateLastDetectedModels = []string{}
@@ -392,14 +837,17 @@ func checkAndPersistChannelUpstreamModelUpdates(
 	settings.UpstreamModelUpdateLastRemovedModels = pendingRemoveModels
 
 	if err = updateChannelUpstreamModelSettings(channel, *settings, modelsChanged); err != nil {
-		return false, autoAdded, err
+		return modelsChanged, autoAdded, autoRemoved, err
 	}
 	if modelsChanged {
-		if err = channel.UpdateAbilities(nil); err != nil {
-			return true, autoAdded, err
+		channelUpstreamModelPersistMu.Lock()
+		err = channel.UpdateAbilities(nil)
+		channelUpstreamModelPersistMu.Unlock()
+		if err != nil {
+			return true, autoAdded, autoRemoved, err
 		}
 	}
-	return modelsChanged, autoAdded, nil
+	return modelsChanged, autoAdded, autoRemoved, nil
 }
 
 func refreshChannelRuntimeCache() {
@@ -522,16 +970,33 @@ type upstreamModelUpdateSummary struct {
 	DetectedRemoveModels int `json:"detected_remove_models"`
 	FailedChannels       int `json:"failed_channels"`
 	AutoAddedModels      int `json:"auto_added_models"`
+	// Validation counters are zero unless the run performed real-request
+	// validation, which makes it visible in the task history whether models were
+	// adopted on trust or actually confirmed.
+	ValidatedModels     int `json:"validated_models"`
+	RejectedModels      int `json:"rejected_models"`
+	RemovedFailedModels int `json:"removed_failed_models"`
+	// ScanError is set when the channel scan query itself failed. Without it a
+	// broken query looks identical in task history to "nothing needed checking":
+	// the run reported succeeded with every counter at zero, which is how a
+	// column-name mistake stayed invisible for a day of scheduled runs.
+	ScanError string `json:"scan_error,omitempty"`
 }
 
 // runChannelUpstreamModelUpdateTaskOnce runs one synchronous upstream model
 // detection cycle and returns a summary for system task history. It honors ctx
 // cancellation between batches so a runner that loses its lease stops promptly.
 // force bypasses the per-channel minimum check interval and allowAutoApply lets
-// channels with auto-sync enabled adopt detected models automatically. The
-// scheduled job calls (force=false, allowAutoApply=true); the manual "detect
-// all" trigger calls (force=true, allowAutoApply=false) so it always re-checks
-// and only stages changes for explicit review.
+// channels adopt detected models automatically. The scheduled job calls
+// (force=false, allowAutoApply=true); the manual "detect all" trigger calls
+// (force=true, allowAutoApply=false) so it always re-checks and only stages
+// changes for explicit review.
+//
+// When monitor_setting has the upstream model auto-update switch on and the run
+// is allowed to apply, each candidate model is confirmed with a real request
+// before being added and failing models are removed once they exceed the
+// configured failure threshold. With the switch off the behavior is unchanged:
+// diff only, applied per the channel's own auto-sync flag.
 func runChannelUpstreamModelUpdateTaskOnce(ctx context.Context, force bool, allowAutoApply bool, report func(processed, total int)) upstreamModelUpdateSummary {
 	checkedChannels := 0
 	failedChannels := 0
@@ -544,6 +1009,32 @@ func runChannelUpstreamModelUpdateTaskOnce(ctx context.Context, force bool, allo
 	addModelSamples := make([]string, 0)
 	removeModelSamples := make([]string, 0)
 	refreshNeeded := false
+	scanErr := ""
+
+	// Snapshot the settings once per run so every worker and every channel in
+	// this scan applies one consistent policy even if an admin saves changes
+	// mid-run.
+	monitor := *operation_setting.GetMonitorSetting()
+	scanAllChannels := monitor.UpstreamModelUpdateEnabled && monitor.UpstreamModelUpdateScanAllChannels
+	var run *upstreamModelUpdateRunContext
+	if monitor.UpstreamModelUpdateEnabled {
+		run = &upstreamModelUpdateRunContext{
+			ctx:              ctx,
+			monitor:          &monitor,
+			validationBudget: monitor.GetUpstreamModelUpdateMaxValidationsPerRun(),
+		}
+		if monitor.UpstreamModelUpdateValidate {
+			// Validation issues billable requests, so it needs a user to bill. If
+			// no root user can be resolved the run degrades to detect-only rather
+			// than adopting models on trust.
+			testUserID, err := resolveChannelTestUserID(nil)
+			if err != nil {
+				common.SysLog(fmt.Sprintf("upstream model validation disabled for this run: %v", err))
+			} else {
+				run.testUserID = testUserID
+			}
+		}
+	}
 
 	// Count the enabled channels up front so progress can be reported as a
 	// percentage; a count error is non-fatal (progress just won't show a %).
@@ -553,8 +1044,17 @@ func runChannelUpstreamModelUpdateTaskOnce(ctx context.Context, force bool, allo
 	}
 	processed := 0
 
+	// Channels talk to independent upstreams, so a bounded worker pool is safe;
+	// a configured REQUEST_INTERVAL promises serial pacing across every upstream
+	// call the task makes, which only holds with a single worker.
+	concurrency := getUpstreamModelUpdateTaskConcurrency()
+	if common.RequestInterval > 0 {
+		concurrency = 1
+	}
+	// mu guards the summary accumulators shared by the workers.
+	var mu sync.Mutex
+
 	lastID := 0
-scanLoop:
 	for {
 		if ctx != nil && ctx.Err() != nil {
 			break
@@ -570,6 +1070,7 @@ scanLoop:
 		}
 		err := query.Find(&channels).Error
 		if err != nil {
+			scanErr = err.Error()
 			common.SysLog(fmt.Sprintf("upstream model update task query failed: %v", err))
 			break
 		}
@@ -578,12 +1079,14 @@ scanLoop:
 		}
 		lastID = channels[len(channels)-1].Id
 
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, concurrency)
 		for _, channel := range channels {
 			if channel == nil {
 				continue
 			}
 			if ctx != nil && ctx.Err() != nil {
-				break scanLoop
+				break
 			}
 
 			processed++
@@ -591,53 +1094,76 @@ scanLoop:
 				report(processed, int(totalChannels))
 			}
 
-			settings := channel.GetOtherSettings()
-			if !settings.UpstreamModelUpdateCheckEnabled {
-				continue
-			}
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(channel *model.Channel) {
+				defer wg.Done()
+				// The semaphore slot is released only after the trailing
+				// REQUEST_INTERVAL sleep so that single-worker pacing matches the
+				// old serial loop exactly.
+				defer func() { <-sem }()
 
-			checkedChannels++
-			modelsChanged, autoAdded, err := checkAndPersistChannelUpstreamModelUpdates(channel, &settings, force, allowAutoApply)
-			if err != nil {
-				failedChannels++
-				failedChannelIDs = append(failedChannelIDs, channel.Id)
-				common.SysLog(fmt.Sprintf("upstream model update check failed: channel_id=%d channel_name=%s err=%v", channel.Id, channel.Name, err))
-				continue
-			}
-			currentAddModels := normalizeModelNames(settings.UpstreamModelUpdateLastDetectedModels)
-			currentRemoveModels := normalizeModelNames(settings.UpstreamModelUpdateLastRemovedModels)
-			currentAddCount := len(currentAddModels) + autoAdded
-			currentRemoveCount := len(currentRemoveModels)
-			detectedAddModels += currentAddCount
-			detectedRemoveModels += currentRemoveCount
-			if currentAddCount > 0 || currentRemoveCount > 0 {
-				changedChannels++
-				channelSummaries = append(channelSummaries, upstreamModelUpdateChannelSummary{
-					ChannelName: channel.Name,
-					AddCount:    currentAddCount,
-					RemoveCount: currentRemoveCount,
-				})
-			}
-			addModelSamples = mergeModelNames(addModelSamples, currentAddModels)
-			removeModelSamples = mergeModelNames(removeModelSamples, currentRemoveModels)
-			if modelsChanged {
-				refreshNeeded = true
-			}
-			autoAddedModels += autoAdded
+				if ctx != nil && ctx.Err() != nil {
+					return
+				}
 
-			if common.RequestInterval > 0 {
-				if ctx == nil {
-					time.Sleep(common.RequestInterval)
+				settings := channel.GetOtherSettings()
+				if !settings.UpstreamModelUpdateCheckEnabled && !scanAllChannels {
+					return
+				}
+
+				mu.Lock()
+				checkedChannels++
+				mu.Unlock()
+
+				modelsChanged, autoAdded, autoRemoved, err := checkAndPersistChannelUpstreamModelUpdates(channel, &settings, force, allowAutoApply, run)
+
+				mu.Lock()
+				if err != nil {
+					failedChannels++
+					failedChannelIDs = append(failedChannelIDs, channel.Id)
+					common.SysLog(fmt.Sprintf("upstream model update check failed: channel_id=%d channel_name=%s err=%v", channel.Id, channel.Name, err))
 				} else {
-					select {
-					case <-ctx.Done():
-						break scanLoop
-					case <-time.After(common.RequestInterval):
+					currentAddModels := normalizeModelNames(settings.UpstreamModelUpdateLastDetectedModels)
+					currentRemoveModels := normalizeModelNames(settings.UpstreamModelUpdateLastRemovedModels)
+					currentAddCount := len(currentAddModels) + autoAdded
+					currentRemoveCount := len(currentRemoveModels) + autoRemoved
+					detectedAddModels += currentAddCount
+					detectedRemoveModels += currentRemoveCount
+					if currentAddCount > 0 || currentRemoveCount > 0 {
+						changedChannels++
+						channelSummaries = append(channelSummaries, upstreamModelUpdateChannelSummary{
+							ChannelName: channel.Name,
+							AddCount:    currentAddCount,
+							RemoveCount: currentRemoveCount,
+						})
+					}
+					addModelSamples = mergeModelNames(addModelSamples, currentAddModels)
+					removeModelSamples = mergeModelNames(removeModelSamples, currentRemoveModels)
+					if modelsChanged {
+						refreshNeeded = true
+					}
+					autoAddedModels += autoAdded
+				}
+				mu.Unlock()
+
+				if common.RequestInterval > 0 {
+					if ctx == nil {
+						time.Sleep(common.RequestInterval)
+					} else {
+						select {
+						case <-ctx.Done():
+						case <-time.After(common.RequestInterval):
+						}
 					}
 				}
-			}
+			}(channel)
 		}
+		wg.Wait()
 
+		if ctx != nil && ctx.Err() != nil {
+			break
+		}
 		if len(channels) < channelUpstreamModelUpdateTaskBatchSize {
 			break
 		}
@@ -658,17 +1184,26 @@ scanLoop:
 		DetectedRemoveModels: detectedRemoveModels,
 		FailedChannels:       failedChannels,
 		AutoAddedModels:      autoAddedModels,
+		ScanError:            scanErr,
+	}
+	if run != nil {
+		summary.ValidatedModels = run.validatedModels
+		summary.RejectedModels = run.rejectedModels
+		summary.RemovedFailedModels = run.removedFailedModels
 	}
 
 	if checkedChannels > 0 || common.DebugEnabled {
 		common.SysLog(fmt.Sprintf(
-			"upstream model update task done: checked_channels=%d changed_channels=%d detected_add_models=%d detected_remove_models=%d failed_channels=%d auto_added_models=%d",
+			"upstream model update task done: checked_channels=%d changed_channels=%d detected_add_models=%d detected_remove_models=%d failed_channels=%d auto_added_models=%d validated_models=%d rejected_models=%d removed_failed_models=%d",
 			checkedChannels,
 			changedChannels,
 			detectedAddModels,
 			detectedRemoveModels,
 			failedChannels,
 			autoAddedModels,
+			summary.ValidatedModels,
+			summary.RejectedModels,
+			summary.RemovedFailedModels,
 		))
 	}
 	if changedChannels > 0 || failedChannels > 0 {
@@ -776,7 +1311,7 @@ func DetectChannelUpstreamModelUpdates(c *gin.Context) {
 	}
 
 	settings := channel.GetOtherSettings()
-	modelsChanged, autoAdded, err := checkAndPersistChannelUpstreamModelUpdates(channel, &settings, true, false)
+	modelsChanged, autoAdded, _, err := checkAndPersistChannelUpstreamModelUpdates(channel, &settings, true, false, nil)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -956,8 +1491,25 @@ func ApplyAllChannelUpstreamModelUpdates(c *gin.Context) {
 // history as the scheduled scan. If any model_update task is already active, the
 // manual run is rejected so the caller does not mistake a scheduled run for this
 // manual one.
+//
+// An optional {"auto_apply": true} body turns this into "run the scheduled
+// auto-update now": validate candidates with real requests and apply the result
+// instead of only staging it. The body is optional so existing callers that send
+// nothing keep the detect-only behavior.
 func DetectAllChannelUpstreamModelUpdates(c *gin.Context) {
-	task, created, err := service.EnqueueSystemTask(model.SystemTaskTypeModelUpdate, modelUpdateTaskPayload{Manual: true})
+	var req struct {
+		AutoApply bool `json:"auto_apply"`
+	}
+	if c.Request != nil && c.Request.Body != nil {
+		// A missing or malformed body is not an error here: detect-only is the
+		// documented default and the legacy channels page sends no body at all.
+		_ = c.ShouldBindJSON(&req)
+	}
+
+	task, created, err := service.EnqueueSystemTask(model.SystemTaskTypeModelUpdate, modelUpdateTaskPayload{
+		Manual:    true,
+		AutoApply: req.AutoApply,
+	})
 	if err != nil {
 		common.ApiError(c, err)
 		return

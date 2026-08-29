@@ -19,6 +19,10 @@ type ClaudeResponseInfo struct {
 	ResponseText strings.Builder
 	Usage        *dto.Usage
 	Done         bool
+	// Claude content_block indexes count every block type (text/thinking/tool_use),
+	// while OpenAI tool_call indexes must be zero-based over tool calls only, so
+	// FormatClaudeResponseInfo remaps them via this per-stream table.
+	toolCallIndexByBlock map[int]int
 }
 
 func StopReasonClaudeToOpenAI(reason string) string {
@@ -109,10 +113,9 @@ func ResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.OpenAITextRe
 		Object:  "chat.completion",
 		Created: common.GetTimestamp(),
 	}
-	var responseText string
+	var responseTextBuilder strings.Builder
 	var responseThinking string
 	if len(claudeResponse.Content) > 0 {
-		responseText = claudeResponse.Content[0].GetText()
 		if claudeResponse.Content[0].Thinking != nil {
 			responseThinking = *claudeResponse.Content[0].Thinking
 		}
@@ -138,7 +141,7 @@ func ResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.OpenAITextRe
 				thinkingContent = *message.Thinking
 			}
 		case "text":
-			responseText = message.GetText()
+			responseTextBuilder.WriteString(message.GetText())
 		}
 	}
 	choice := dto.OpenAITextResponseChoice{
@@ -148,7 +151,7 @@ func ResponseClaude2OpenAI(claudeResponse *dto.ClaudeResponse) *dto.OpenAITextRe
 		},
 		FinishReason: StopReasonClaudeToOpenAI(claudeResponse.StopReason),
 	}
-	choice.SetStringContent(responseText)
+	choice.SetStringContent(responseTextBuilder.String())
 	if len(responseThinking) > 0 {
 		choice.ReasoningContent = &responseThinking
 	}
@@ -395,6 +398,24 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 		oaiResponse.Id = claudeInfo.ResponseId
 		oaiResponse.Created = claudeInfo.Created
 		oaiResponse.Model = claudeInfo.Model
+		for i := range oaiResponse.Choices {
+			toolCalls := oaiResponse.Choices[i].Delta.ToolCalls
+			for j := range toolCalls {
+				if toolCalls[j].Index == nil {
+					continue
+				}
+				blockIndex := *toolCalls[j].Index
+				if claudeInfo.toolCallIndexByBlock == nil {
+					claudeInfo.toolCallIndexByBlock = make(map[int]int)
+				}
+				mapped, seen := claudeInfo.toolCallIndexByBlock[blockIndex]
+				if !seen {
+					mapped = len(claudeInfo.toolCallIndexByBlock)
+					claudeInfo.toolCallIndexByBlock[blockIndex] = mapped
+				}
+				toolCalls[j].SetIndex(mapped)
+			}
+		}
 	}
 	return true
 }

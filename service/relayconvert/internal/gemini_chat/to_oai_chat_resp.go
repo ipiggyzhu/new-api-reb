@@ -212,7 +212,7 @@ func StreamResponseGeminiChat2OpenAI(geminiResponse *dto.GeminiChatResponse) (*d
 			appended++
 		}
 		isTools := false
-		isThought := false
+		var thoughtTexts []string
 		if candidate.FinishReason != nil {
 			switch *candidate.FinishReason {
 			case "STOP":
@@ -242,9 +242,7 @@ func StreamResponseGeminiChat2OpenAI(geminiResponse *dto.GeminiChatResponse) (*d
 					choice.Delta.ToolCalls = append(choice.Delta.ToolCalls, *call)
 				}
 			} else if part.Thought {
-				isThought = true
-				writeSep()
-				content.WriteString(part.Text)
+				thoughtTexts = append(thoughtTexts, part.Text)
 			} else {
 				if part.ExecutableCode != nil {
 					writeSep()
@@ -264,8 +262,11 @@ func StreamResponseGeminiChat2OpenAI(geminiResponse *dto.GeminiChatResponse) (*d
 				}
 			}
 		}
-		if isThought {
-			choice.Delta.SetReasoningContent(content.String())
+		if len(thoughtTexts) > 0 {
+			choice.Delta.SetReasoningContent(strings.Join(thoughtTexts, "\n"))
+			if appended > 0 {
+				choice.Delta.SetContentString(content.String())
+			}
 		} else {
 			choice.Delta.SetContentString(content.String())
 		}

@@ -324,6 +324,7 @@ docker run --name new-api -d --restart always \
 | `MAX_REQUEST_BODY_MB` | リクエストボディ最大サイズ（MB、**解凍後**に計測。巨大リクエスト/zip bomb によるメモリ枯渇を防止）。超過時は `413` | `32` |
 | `AZURE_DEFAULT_API_VERSION` | Azure APIバージョン | `2025-04-01-preview` |
 | `ERROR_LOG_ENABLED` | エラーログスイッチ | `false` |
+| `TRUSTED_PROXIES` | `X-Forwarded-For` / `X-Real-IP` ヘッダーを信頼するリバースプロキシの IP/CIDR（カンマ区切り）。このリストに含まれないピアはクライアント IP を偽装できません。既定のプライベート範囲が実際の構成より広い場合は、プロキシのアドレス（例: `172.17.0.1/32`）に絞ってください。不正な値を指定すると起動が中止されます | `127.0.0.0/8,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7` |
 | `PYROSCOPE_URL` | Pyroscopeサーバーのアドレス | - |
 | `PYROSCOPE_APP_NAME` | Pyroscopeアプリ名 | `new-api` |
 | `PYROSCOPE_BASIC_AUTH_USER` | Pyroscope Basic Authユーザー | - |

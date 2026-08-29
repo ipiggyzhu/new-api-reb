@@ -1,9 +1,7 @@
 package controller
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -27,14 +25,10 @@ func SubscriptionRequestCreemPay(c *gin.Context) {
 
 	var req SubscriptionCreemPayRequest
 
-	// Keep body for debugging consistency (like RequestCreemPay)
-	bodyBytes, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		logger.LogError(c.Request.Context(), fmt.Sprintf("Creem 订阅支付请求读取失败 error=%q", err.Error()))
-		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "read query error"})
-		return
-	}
-	c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	// This route is not behind AnonymousRequestBodyLimit or the relay group's
+	// DecompressRequestMiddleware, so bound the body here. The payload is a
+	// single plan id; the previous io.ReadAll buffered whatever was sent.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4<<10)
 
 	if err := c.ShouldBindJSON(&req); err != nil || req.PlanId <= 0 {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "参数错误"})

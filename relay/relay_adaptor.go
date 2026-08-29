@@ -1,9 +1,12 @@
 package relay
 
 import (
+	"fmt"
+	"net/http"
 	"strconv"
 
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/advancedcustom"
 	"github.com/QuantumNous/new-api/relay/channel/ali"
@@ -48,6 +51,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/xunfei"
 	"github.com/QuantumNous/new-api/relay/channel/zhipu"
 	"github.com/QuantumNous/new-api/relay/channel/zhipu_4v"
+	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 )
 
@@ -125,6 +129,30 @@ func GetAdaptor(apiType int) channel.Adaptor {
 		return &advancedcustom.Adaptor{}
 	}
 	return nil
+}
+
+// adaptorUsage narrows the `any` that Adaptor.DoResponse returns for its usage
+// to the *dto.Usage every billing path needs.
+//
+// DoResponse declares usage as `any`, so an adaptor that returns a nil
+// *dto.Usage hands back a non-nil interface holding a typed nil. Every caller
+// used to write usage.(*dto.Usage) and dereference the result: the one-value
+// assertion succeeds on a typed nil, so the field access panicked. That panic is
+// worse than it looks, because it unwinds past controller.Relay's deferred
+// refund, which only refunds when its error variable is non-nil — during an
+// unwind it is nil, so the pre-consumed quota was neither refunded nor settled
+// and the user was silently charged the estimate with no consume log. Failing
+// the relay instead keeps that refund on the normal path.
+func adaptorUsage(usage any) (*dto.Usage, *types.NewAPIError) {
+	usageDto, ok := usage.(*dto.Usage)
+	if !ok || usageDto == nil {
+		return nil, types.NewErrorWithStatusCode(
+			fmt.Errorf("adaptor returned no usage (%T)", usage),
+			types.ErrorCodeEmptyResponse,
+			http.StatusInternalServerError,
+		)
+	}
+	return usageDto, nil
 }
 
 func GetTaskPlatform(c *gin.Context) constant.TaskPlatform {

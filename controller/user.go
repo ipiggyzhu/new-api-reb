@@ -1142,6 +1142,11 @@ func ManageUser(c *gin.Context) {
 				common.ApiError(c, err)
 				return
 			}
+			// 直接覆盖绕过了增减额度的缓存同步路径，必须失效缓存，
+			// 否则 Redis 部署下旧额度会一直供到 TTL 过期。
+			if err := model.InvalidateUserCache(user.Id); err != nil {
+				common.SysLog(fmt.Sprintf("failed to invalidate user cache for user %d: %s", user.Id, err.Error()))
+			}
 			recordManageAuditFor(c, user.Id, "user.quota_override", map[string]interface{}{
 				"from": logger.LogQuota(oldQuota),
 				"to":   logger.LogQuota(req.Value),
@@ -1229,9 +1234,16 @@ func EmailBind(c *gin.Context) {
 		return
 	}
 	session := sessions.Default(c)
-	id := session.Get("id")
+	id, ok := session.Get("id").(int)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"success": false,
+			"message": common.TranslateMessage(c, i18n.MsgAuthNotLoggedIn),
+		})
+		return
+	}
 	user := model.User{
-		Id: id.(int),
+		Id: id,
 	}
 	err := user.FillUserById()
 	if err != nil {

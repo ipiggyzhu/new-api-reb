@@ -17,6 +17,87 @@ type ChannelSettings struct {
 	PassThroughBodyEnabled bool   `json:"pass_through_body_enabled,omitempty"`
 	SystemPrompt           string `json:"system_prompt,omitempty"`
 	SystemPromptOverride   bool   `json:"system_prompt_override,omitempty"`
+	// send_original_request ("透传原始请求") used to live here. It forwarded the
+	// caller's headers wholesale, relying on a deny-list to withhold credentials;
+	// a capture showed 11 caller headers — five of them credentials — reaching
+	// upstream, so the setting was removed outright (2026-08-03). Rows that still
+	// carry the key in their settings JSON simply have it ignored; the body-half
+	// they relied on was materialized as an explicit pass_through_body_enabled on
+	// every such row before removal. SyntheticClientHeadersProfile below is the
+	// replacement for the upstreams that gate on a client shape.
+
+	// SyntheticClientHeaders is the pre-profile form of the setting below: a
+	// plain on/off that always meant "follow the channel type". Kept for channels
+	// saved before the profile could be chosen, and kept in sync by Normalize so
+	// anything still reading the bool sees the truth.
+	//
+	// Deprecated: read SyntheticClientHeadersProfile.
+	SyntheticClientHeaders bool `json:"synthetic_client_headers,omitempty"`
+	// SyntheticClientHeadersProfile replaces header passthrough with a generated
+	// client profile: instead of forwarding whatever the caller sent, upstream
+	// receives the headers a real client of that family would send.
+	//
+	// Header passthrough strips credentials via a fixed deny-list
+	// (shouldSkipPassthroughHeader), which by construction only knows the header
+	// names someone thought of. A capture against a passthrough channel showed 11
+	// caller headers reaching upstream, including five credentials the list does
+	// not name (anthropic-api-key, openai-api-key, x-auth-token, x-access-token,
+	// x-session-token), the caller's real IP (x-forwarded-for, x-real-ip,
+	// cf-connecting-ip), and their user-agent/referer.
+	//
+	// This flips that to an allow-list: nothing from the caller is forwarded, and
+	// upstream sees only the synthesized profile. It still satisfies the reason
+	// passthrough existed — upstreams that gate on looking like a real client.
+	//
+	// Values: "" (off), SyntheticClientHeadersProfileAuto to follow the channel's
+	// own API type, or a constant.ClientHeaderFamily* value to force one. Auto is
+	// what an operator normally wants, since an Anthropic channel should look
+	// like Claude Code rather than the Python SDK. Forcing a family covers what
+	// the channel type cannot express — an OpenAI-compatible endpoint that is
+	// really a Claude relay and gates on claude-cli's user-agent.
+	SyntheticClientHeadersProfile string `json:"synthetic_client_headers_profile,omitempty"`
+
+	// WebsocketTransport opts this channel's /v1/responses traffic onto the
+	// Responses API WebSocket transport instead of HTTP+SSE.
+	//
+	// Off by default and never inferred: it only works against an upstream that
+	// implements WebSocket mode (official OpenAI/ChatGPT, or a proxy that
+	// reimplements it). Pointing the channel's base URL at a relay that speaks
+	// only HTTP — another new-api, one-api — makes the handshake fail, so the
+	// admin has to assert that the upstream supports it.
+	//
+	// This records intent, not capability. When a handshake proves the upstream
+	// refuses the upgrade, ChannelOtherSettings.WebsocketUnsupported is set and
+	// wins over this flag; the switch stays on so the admin can see what they
+	// asked for. Read the pair through relay/channel, never this field alone.
+	WebsocketTransport bool `json:"websocket_transport,omitempty"`
+}
+
+// SyntheticClientHeadersProfileAuto derives the profile from the channel's API
+// type at request time. It is not a family name: resolving it needs the
+// APIType -> family mapping, which lives in relay/channel.
+const SyntheticClientHeadersProfileAuto = "auto"
+
+// Normalize derives implied flags so every copy of ChannelSettings is
+// self-consistent regardless of where it is read from. Call this at the source
+// (Channel.GetSetting) so both the context-stored copy and the RelayInfo copy
+// agree.
+func (s *ChannelSettings) Normalize() {
+	// The profile setting used to be a bool that always meant "auto". Channels
+	// saved then must not lose their protection on the next read.
+	if s.SyntheticClientHeadersProfile == "" && s.SyntheticClientHeaders {
+		s.SyntheticClientHeadersProfile = SyntheticClientHeadersProfileAuto
+	}
+	// An unrecognized family would fall through to the generic profile, which
+	// looks like it worked. Fall back to auto instead: the failure mode of a typo
+	// should be "wrong user-agent", never "caller headers reach upstream again".
+	if profile := s.SyntheticClientHeadersProfile; profile != "" &&
+		profile != SyntheticClientHeadersProfileAuto &&
+		!constant.IsClientHeaderFamily(profile) {
+		s.SyntheticClientHeadersProfile = SyntheticClientHeadersProfileAuto
+	}
+	// Keep the deprecated bool in step so a reader of either field agrees.
+	s.SyntheticClientHeaders = s.SyntheticClientHeadersProfile != ""
 }
 
 type VertexKeyType string
@@ -34,25 +115,47 @@ const (
 )
 
 type ChannelOtherSettings struct {
-	AzureResponsesVersion                 string                `json:"azure_responses_version,omitempty"`
-	VertexKeyType                         VertexKeyType         `json:"vertex_key_type,omitempty"` // "json" or "api_key"
-	OpenRouterEnterprise                  *bool                 `json:"openrouter_enterprise,omitempty"`
-	ClaudeBetaQuery                       bool                  `json:"claude_beta_query,omitempty"`          // Claude 渠道是否强制追加 ?beta=true
-	AllowServiceTier                      bool                  `json:"allow_service_tier,omitempty"`         // 是否允许 service_tier 透传（默认过滤以避免额外计费）
-	AllowInferenceGeo                     bool                  `json:"allow_inference_geo,omitempty"`        // 是否允许 inference_geo 透传（仅 Claude，默认过滤以满足数据驻留合规
-	AllowSpeed                            bool                  `json:"allow_speed,omitempty"`                // 是否允许 speed 透传（仅 Claude，默认过滤以避免意外切换推理速度模式）
-	AllowSafetyIdentifier                 bool                  `json:"allow_safety_identifier,omitempty"`    // 是否允许 safety_identifier 透传（默认过滤以保护用户隐私）
-	DisableStore                          bool                  `json:"disable_store,omitempty"`              // 是否禁用 store 透传（默认允许透传，禁用后可能导致 Codex 无法使用）
-	AllowIncludeObfuscation               bool                  `json:"allow_include_obfuscation,omitempty"`  // 是否允许 stream_options.include_obfuscation 透传（默认过滤以避免关闭流混淆保护）
-	DisableTaskPollingSleep               bool                  `json:"disable_task_polling_sleep,omitempty"` // 是否跳过异步任务轮询间隔
-	AwsKeyType                            AwsKeyType            `json:"aws_key_type,omitempty"`
-	UpstreamModelUpdateCheckEnabled       bool                  `json:"upstream_model_update_check_enabled,omitempty"`        // 是否检测上游模型更新
-	UpstreamModelUpdateAutoSyncEnabled    bool                  `json:"upstream_model_update_auto_sync_enabled,omitempty"`    // 是否自动同步上游模型更新
-	UpstreamModelUpdateLastCheckTime      int64                 `json:"upstream_model_update_last_check_time,omitempty"`      // 上次检测时间
-	UpstreamModelUpdateLastDetectedModels []string              `json:"upstream_model_update_last_detected_models,omitempty"` // 上次检测到的可加入模型
-	UpstreamModelUpdateLastRemovedModels  []string              `json:"upstream_model_update_last_removed_models,omitempty"`  // 上次检测到的可删除模型
-	UpstreamModelUpdateIgnoredModels      []string              `json:"upstream_model_update_ignored_models,omitempty"`       // 手动忽略的模型
-	AdvancedCustom                        *AdvancedCustomConfig `json:"advanced_custom,omitempty"`
+	AzureResponsesVersion                 string        `json:"azure_responses_version,omitempty"`
+	VertexKeyType                         VertexKeyType `json:"vertex_key_type,omitempty"` // "json" or "api_key"
+	OpenRouterEnterprise                  *bool         `json:"openrouter_enterprise,omitempty"`
+	ClaudeBetaQuery                       bool          `json:"claude_beta_query,omitempty"`          // Claude 渠道是否强制追加 ?beta=true
+	AllowServiceTier                      bool          `json:"allow_service_tier,omitempty"`         // 是否允许 service_tier 透传（默认过滤以避免额外计费）
+	AllowInferenceGeo                     bool          `json:"allow_inference_geo,omitempty"`        // 是否允许 inference_geo 透传（仅 Claude，默认过滤以满足数据驻留合规
+	AllowSpeed                            bool          `json:"allow_speed,omitempty"`                // 是否允许 speed 透传（仅 Claude，默认过滤以避免意外切换推理速度模式）
+	AllowSafetyIdentifier                 bool          `json:"allow_safety_identifier,omitempty"`    // 是否允许 safety_identifier 透传（默认过滤以保护用户隐私）
+	DisableStore                          bool          `json:"disable_store,omitempty"`              // 是否禁用 store 透传（默认允许透传，禁用后可能导致 Codex 无法使用）
+	AllowIncludeObfuscation               bool          `json:"allow_include_obfuscation,omitempty"`  // 是否允许 stream_options.include_obfuscation 透传（默认过滤以避免关闭流混淆保护）
+	DisableTaskPollingSleep               bool          `json:"disable_task_polling_sleep,omitempty"` // 是否跳过异步任务轮询间隔
+	AwsKeyType                            AwsKeyType    `json:"aws_key_type,omitempty"`
+	UpstreamModelUpdateCheckEnabled       bool          `json:"upstream_model_update_check_enabled,omitempty"`        // 是否检测上游模型更新
+	UpstreamModelUpdateAutoSyncEnabled    bool          `json:"upstream_model_update_auto_sync_enabled,omitempty"`    // 是否自动同步上游模型更新
+	UpstreamModelUpdateLastCheckTime      int64         `json:"upstream_model_update_last_check_time,omitempty"`      // 上次检测时间
+	UpstreamModelUpdateLastDetectedModels []string      `json:"upstream_model_update_last_detected_models,omitempty"` // 上次检测到的可加入模型
+	UpstreamModelUpdateLastRemovedModels  []string      `json:"upstream_model_update_last_removed_models,omitempty"`  // 上次检测到的可删除模型
+	UpstreamModelUpdateIgnoredModels      []string      `json:"upstream_model_update_ignored_models,omitempty"`       // 手动忽略的模型
+	// 模型验证健康度。仅记录当前处于失败状态的模型，验证成功即删除条目，
+	// 所以正常情况下为空，不会撑大 settings 列。
+	UpstreamModelUpdateModelHealth map[string]ModelHealthState `json:"upstream_model_update_model_health,omitempty"`
+	// 已有模型轮换抽查的游标，跨轮持久化推进以覆盖全部模型
+	UpstreamModelUpdateRotationCursor int `json:"upstream_model_update_rotation_cursor,omitempty"`
+	// WebsocketUnsupported 记录上游在握手阶段明确拒绝了 WebSocket 升级，
+	// 之后不再尝试，直接走 HTTP+SSE。与管理员配置的
+	// ChannelSettings.WebsocketTransport 分开存放：这一项是探测结果，由程序写入。
+	//
+	// 只有确定性的拒绝才置位（426 / 404 / 501）。超时、5xx、429、401/403 一律
+	// 只降级当次请求：置位会一直生效到管理员重新保存渠道，误判等于把一次网络
+	// 抖动变成永久回退。保存渠道会清零本项，这就是"手动重新开启"的动作。
+	WebsocketUnsupported bool                  `json:"websocket_unsupported,omitempty"`
+	AdvancedCustom       *AdvancedCustomConfig `json:"advanced_custom,omitempty"`
+}
+
+// ModelHealthState 记录一个模型连续验证失败的情况。只有被判定为渠道故障
+// （service.IsChannelFaultError）的失败才会累计 Failures：限流和临时抖动
+// 不应导致模型被删除。
+type ModelHealthState struct {
+	Failures        int    `json:"failures,omitempty"`
+	LastFailureTime int64  `json:"last_failure_time,omitempty"`
+	LastError       string `json:"last_error,omitempty"`
 }
 
 func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {

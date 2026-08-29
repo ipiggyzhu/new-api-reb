@@ -54,7 +54,15 @@ export const channelsQueryKeys = {
     [...channelsQueryKeys.lists(), params] as const,
   details: () => [...channelsQueryKeys.all, 'detail'] as const,
   detail: (id: number) => [...channelsQueryKeys.details(), id] as const,
+  inFlight: () => [...channelsQueryKeys.all, 'in-flight'] as const,
 }
+
+/**
+ * How often the channel list refreshes the live in-flight gauge. Short enough
+ * that a running request is visible while it runs, and cheap because the
+ * endpoint only reads an in-memory counter map.
+ */
+export const CHANNEL_IN_FLIGHT_POLL_MS = 3000
 
 function getChannelTestResponseTime(
   response: ChannelTestResponse
@@ -236,7 +244,7 @@ export async function handleUpdateChannelField(
  */
 export async function handleUpdateTagField(
   tag: string,
-  fieldName: 'priority' | 'weight',
+  fieldName: 'priority' | 'weight' | 'max_concurrency',
   value: number,
   queryClient?: QueryClient,
   onSuccess?: () => void

@@ -99,16 +99,24 @@ func cohereStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		return 0, nil, nil
 	})
 	dataChan := make(chan string)
-	stopChan := make(chan bool)
+	stopChan := make(chan bool, 1)
 	go func() {
+		// Without these the producer blocks forever on an undrained send once the
+		// client disconnects and c.Stream returns, pinning this goroutine and the
+		// upstream connection for the life of the process.
+		defer service.CloseResponseBodyGracefully(resp)
+		defer func() { stopChan <- true }()
+
 		for scanner.Scan() {
-			data := scanner.Text()
-			dataChan <- data
+			select {
+			case dataChan <- scanner.Text():
+			case <-c.Request.Context().Done():
+				return
+			}
 		}
 		if err := scanner.Err(); err != nil {
 			common.SysLog("error reading stream: " + err.Error())
 		}
-		stopChan <- true
 	}()
 	helper.SetEventStreamHeaders(c)
 	isFirst := true
@@ -176,11 +184,11 @@ func cohereStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 
 func cohereHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	createdTime := common.GetTimestamp()
+	defer service.CloseResponseBodyGracefully(resp)
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
-	service.CloseResponseBodyGracefully(resp)
 	var cohereResp CohereResponseResult
 	err = json.Unmarshal(responseBody, &cohereResp)
 	if err != nil {
@@ -217,11 +225,11 @@ func cohereHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 }
 
 func cohereRerankHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
+	defer service.CloseResponseBodyGracefully(resp)
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
-	service.CloseResponseBodyGracefully(resp)
 	var cohereResp CohereRerankResponseResult
 	err = json.Unmarshal(responseBody, &cohereResp)
 	if err != nil {

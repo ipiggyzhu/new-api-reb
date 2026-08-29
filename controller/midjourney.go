@@ -109,47 +109,45 @@ func runMidjourneyTaskUpdateOnce(ctx context.Context, report func(processed, tot
 			logger.LogError(ctx, fmt.Sprintf("Get Task marshal body error: %v", err))
 			continue
 		}
-		timeout := time.Second * 15
-		requestCtx, cancel := context.WithTimeout(ctx, timeout)
-		req, err := http.NewRequestWithContext(requestCtx, "POST", requestUrl, bytes.NewBuffer(body))
-		if err != nil {
-			cancel()
-			logger.LogError(ctx, fmt.Sprintf("Get Task error: %v", err))
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("mj-api-secret", midjourneyChannel.Key)
-		resp, err := service.GetHttpClient().Do(req)
-		if err != nil {
-			logger.LogError(ctx, fmt.Sprintf("Get Task Do req error: %v", err))
-			cancel()
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			logger.LogError(ctx, fmt.Sprintf("Get Task status code: %d", resp.StatusCode))
-			resp.Body.Close()
-			cancel()
-			continue
-		}
-		responseBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			logger.LogError(ctx, fmt.Sprintf("Get Mjp Task parse body error: %v", err))
-			resp.Body.Close()
-			cancel()
-			continue
-		}
-		var responseItems []dto.MidjourneyDto
-		err = common.Unmarshal(responseBody, &responseItems)
-		if err != nil {
-			logger.LogError(ctx, fmt.Sprintf("Get Mjp Task parse body error2: %v, body: %s", err, string(responseBody)))
-			resp.Body.Close()
-			cancel()
-			continue
-		}
-		resp.Body.Close()
-		req.Body.Close()
-		cancel()
+		// Scoped per channel: a function-level defer would hold every channel's
+		// body and context open until the whole scan finished.
+		responseItems, ok := func() ([]dto.MidjourneyDto, bool) {
+			requestCtx, cancel := context.WithTimeout(ctx, time.Second*15)
+			defer cancel()
 
+			req, err := http.NewRequestWithContext(requestCtx, "POST", requestUrl, bytes.NewBuffer(body))
+			if err != nil {
+				logger.LogError(ctx, fmt.Sprintf("Get Task error: %v", err))
+				return nil, false
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("mj-api-secret", midjourneyChannel.Key)
+			resp, err := service.GetHttpClient().Do(req)
+			if err != nil {
+				logger.LogError(ctx, fmt.Sprintf("Get Task Do req error: %v", err))
+				return nil, false
+			}
+			defer service.CloseResponseBodyGracefully(resp)
+
+			if resp.StatusCode != http.StatusOK {
+				logger.LogError(ctx, fmt.Sprintf("Get Task status code: %d", resp.StatusCode))
+				return nil, false
+			}
+			responseBody, err := io.ReadAll(resp.Body)
+			if err != nil {
+				logger.LogError(ctx, fmt.Sprintf("Get Mjp Task parse body error: %v", err))
+				return nil, false
+			}
+			var responseItems []dto.MidjourneyDto
+			if err = common.Unmarshal(responseBody, &responseItems); err != nil {
+				logger.LogError(ctx, fmt.Sprintf("Get Mjp Task parse body error2: %v, body: %s", err, string(responseBody)))
+				return nil, false
+			}
+			return responseItems, true
+		}()
+		if !ok {
+			continue
+		}
 		for _, responseItem := range responseItems {
 			task := taskM[responseItem.MjId]
 			if task == nil {

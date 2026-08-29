@@ -53,6 +53,26 @@ func ValidateSSRFProtectedFetchURL(urlStr string) error {
 	return validateURLWithCurrentFetchSetting(urlStr, true)
 }
 
+// relayDialer bounds connection setup. RELAY_TIMEOUT defaults to 0 (no overall
+// client timeout) so that long-running streams are not cut off, which means an
+// unreachable upstream would otherwise hang on connect for the OS TCP timeout
+// while holding a request goroutine.
+var relayDialer = &net.Dialer{
+	Timeout:   time.Duration(common.GetEnvOrDefault("RELAY_DIAL_TIMEOUT", 10)) * time.Second,
+	KeepAlive: 30 * time.Second,
+}
+
+// applyRelayTransportTimeouts sets the connection-establishment bounds shared by
+// the default and proxy transports. Deliberately no ResponseHeaderTimeout:
+// reasoning models can legitimately take minutes before the first byte.
+func applyRelayTransportTimeouts(transport *http.Transport) {
+	if transport.DialContext == nil {
+		transport.DialContext = relayDialer.DialContext
+	}
+	transport.TLSHandshakeTimeout = time.Duration(common.GetEnvOrDefault("RELAY_TLS_HANDSHAKE_TIMEOUT", 10)) * time.Second
+	transport.ExpectContinueTimeout = 1 * time.Second
+}
+
 func InitHttpClient() {
 	transport := &http.Transport{
 		MaxIdleConns:        common.RelayMaxIdleConns,
@@ -61,6 +81,7 @@ func InitHttpClient() {
 		ForceAttemptHTTP2:   true,
 		Proxy:               http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY env vars
 	}
+	applyRelayTransportTimeouts(transport)
 	if common.TLSInsecureSkipVerify {
 		transport.TLSClientConfig = common.InsecureTLSConfig
 	}
@@ -150,6 +171,7 @@ func NewProxyHttpClient(proxyURL string) (*http.Client, error) {
 			ForceAttemptHTTP2:   true,
 			Proxy:               http.ProxyURL(parsedURL),
 		}
+		applyRelayTransportTimeouts(transport)
 		if common.TLSInsecureSkipVerify {
 			transport.TLSClientConfig = common.InsecureTLSConfig
 		}
@@ -192,6 +214,7 @@ func NewProxyHttpClient(proxyURL string) (*http.Client, error) {
 				return dialer.Dial(network, addr)
 			},
 		}
+		applyRelayTransportTimeouts(transport)
 		if common.TLSInsecureSkipVerify {
 			transport.TLSClientConfig = common.InsecureTLSConfig
 		}

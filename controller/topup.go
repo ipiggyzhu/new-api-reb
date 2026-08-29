@@ -19,6 +19,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
 	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
 )
 
 func GetTopUpInfo(c *gin.Context) {
@@ -152,7 +153,9 @@ func getPayMoney(amount int64, group string) float64 {
 	// - USD/CNY: 前端传 amount 为金额单位；TOKENS: 前端传 tokens，需要换成 USD 金额
 	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
 		dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
-		dAmount = dAmount.Div(dQuotaPerUnit)
+		// 回调入账只按整数单位（TopUp.Amount * QuotaPerUnit）计费，
+		// 因此定价也必须按截断后的整数单位，保证支付与入账一致
+		dAmount = dAmount.Div(dQuotaPerUnit).Truncate(0)
 	}
 
 	topupGroupRatio := common.GetTopupGroupRatio(group)
@@ -181,7 +184,10 @@ func getMinTopup() int64 {
 	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
 		dMinTopup := decimal.NewFromInt(int64(minTopup))
 		dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
-		minTopup = int(dMinTopup.Mul(dQuotaPerUnit).IntPart())
+		// This threshold is compared against a quota amount, so it goes through the
+		// shared quota conversion: a bare IntPart() could wrap a misconfigured
+		// minimum into a negative number and let any top-up through.
+		minTopup = common.QuotaFromDecimal(dMinTopup.Mul(dQuotaPerUnit))
 	}
 	return int64(minTopup)
 }
@@ -291,20 +297,75 @@ func LockOrder(tradeNo string) {
 }
 
 // UnlockOrder 释放给定订单号的锁
+//
+// The refcount is decremented before mu.Unlock so an unmatched UnlockOrder — a
+// caller that never held this lock — is rejected rather than stealing the unlock
+// from the goroutine that does hold it. Unlocking a mutex you do not hold is a
+// `sync: unlock of unlocked mutex` fatal error, which recover cannot catch, and
+// the stray decrement would delete a map entry that is still in use.
 func UnlockOrder(tradeNo string) {
 	v, ok := orderLocks.Load(tradeNo)
 	if !ok {
 		return
 	}
 	rcm := v.(*refCountedMutex)
-	rcm.mu.Unlock()
 
 	createLock.Lock()
+	if rcm.refCount <= 0 {
+		createLock.Unlock()
+		common.SysError("UnlockOrder called without a matching LockOrder for trade_no=" + tradeNo)
+		return
+	}
 	rcm.refCount--
 	if rcm.refCount == 0 {
 		orderLocks.Delete(tradeNo)
 	}
 	createLock.Unlock()
+
+	rcm.mu.Unlock()
+}
+
+// settleEpayOrder 在同一事务内将待支付订单置为成功并给用户入账（两者要么都发生要么都不发生）：
+// 入账失败时订单保持 pending，仍可通过管理员补单修复。
+// 返回入账额度；订单已被并发回调完成时返回 0。
+func settleEpayOrder(topUp *model.TopUp) (int, error) {
+	quotaToAdd, clamp := common.QuotaFromDecimalChecked(decimal.NewFromInt(topUp.Amount).Mul(decimal.NewFromFloat(common.QuotaPerUnit)))
+	if clamp != nil {
+		return 0, clamp
+	}
+	if quotaToAdd <= 0 {
+		return 0, fmt.Errorf("无效的充值额度: %d", quotaToAdd)
+	}
+
+	credited := false
+	err := model.DB.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&model.TopUp{}).
+			Where("id = ? AND status = ?", topUp.Id, common.TopUpStatusPending).
+			Updates(map[string]interface{}{
+				"status":         common.TopUpStatusSuccess,
+				"payment_method": topUp.PaymentMethod,
+				"complete_time":  common.GetTimestamp(),
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return nil
+		}
+		if err := tx.Model(&model.User{}).Where("id = ?", topUp.UserId).
+			Update("quota", gorm.Expr("quota + ?", quotaToAdd)).Error; err != nil {
+			return err
+		}
+		credited = true
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	if !credited {
+		return 0, nil
+	}
+	return quotaToAdd, nil
 }
 
 func EpayNotify(c *gin.Context) {
@@ -387,21 +448,17 @@ func EpayNotify(c *gin.Context) {
 				logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 实际支付方式与订单不同 trade_no=%s order_payment_method=%s actual_type=%s client_ip=%s", verifyInfo.ServiceTradeNo, topUp.PaymentMethod, verifyInfo.Type, c.ClientIP()))
 				topUp.PaymentMethod = verifyInfo.Type
 			}
-			topUp.Status = common.TopUpStatusSuccess
-			err := topUp.Update()
+			quotaToAdd, err := settleEpayOrder(topUp)
 			if err != nil {
-				logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 更新充值订单失败 trade_no=%s user_id=%d client_ip=%s error=%q topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), err.Error(), common.GetJsonString(topUp)))
+				logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 充值入账失败 trade_no=%s user_id=%d client_ip=%s error=%q topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), err.Error(), common.GetJsonString(topUp)))
 				return
 			}
-			//user, _ := model.GetUserById(topUp.UserId, false)
-			//user.Quota += topUp.Amount * 500000
-			dAmount := decimal.NewFromInt(int64(topUp.Amount))
-			dQuotaPerUnit := decimal.NewFromFloat(common.QuotaPerUnit)
-			quotaToAdd := int(dAmount.Mul(dQuotaPerUnit).IntPart())
-			err = model.IncreaseUserQuota(topUp.UserId, quotaToAdd, true)
-			if err != nil {
-				logger.LogError(c.Request.Context(), fmt.Sprintf("易支付 更新用户额度失败 trade_no=%s user_id=%d client_ip=%s quota_to_add=%d error=%q topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), quotaToAdd, err.Error(), common.GetJsonString(topUp)))
+			if quotaToAdd == 0 {
+				logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 订单已由其他回调完成 trade_no=%s user_id=%d client_ip=%s", topUp.TradeNo, topUp.UserId, c.ClientIP()))
 				return
+			}
+			if err := model.InvalidateUserCache(topUp.UserId); err != nil {
+				logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 清理用户缓存失败 user_id=%d error=%q", topUp.UserId, err.Error()))
 			}
 			logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 充值成功 trade_no=%s user_id=%d client_ip=%s quota_to_add=%d money=%.2f topup=%q", topUp.TradeNo, topUp.UserId, c.ClientIP(), quotaToAdd, topUp.Money, common.GetJsonString(topUp)))
 			model.RecordTopupLog(topUp.UserId, fmt.Sprintf("使用在线充值成功，充值金额: %v，支付金额：%f", logger.LogQuota(quotaToAdd), topUp.Money), c.ClientIP(), topUp.PaymentMethod, "epay")

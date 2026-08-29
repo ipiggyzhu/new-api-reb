@@ -20,6 +20,9 @@ type GeneralSetting struct {
 	CustomCurrencySymbol string `json:"custom_currency_symbol"`
 	// 自定义货币与美元汇率（1 USD = X Custom）
 	CustomCurrencyExchangeRate float64 `json:"custom_currency_exchange_rate"`
+	// 站点级强制记录请求 IP。用户设置里的 record_ip_log 由用户自己控制且默认关闭，
+	// 管理员无法据此排查滥用，此开关对所有用户的消费日志和错误日志强制记录 IP。
+	RecordIpLogForAll bool `json:"record_ip_log_for_all"`
 }
 
 // 默认配置
@@ -30,6 +33,13 @@ var generalSetting = GeneralSetting{
 	QuotaDisplayType:           QuotaDisplayTypeUSD,
 	CustomCurrencySymbol:       "¤",
 	CustomCurrencyExchangeRate: 1.0,
+	RecordIpLogForAll:          false,
+}
+
+// ShouldRecordIpForAllUsers reports whether the site forces IP recording on
+// every log row regardless of the per-user setting.
+func ShouldRecordIpForAllUsers() bool {
+	return generalSetting.RecordIpLogForAll
 }
 
 func init() {

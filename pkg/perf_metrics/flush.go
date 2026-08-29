@@ -2,6 +2,7 @@ package perfmetrics
 
 import (
 	"fmt"
+	"runtime/debug"
 	"strconv"
 	"time"
 
@@ -14,13 +15,28 @@ func flushLoop() {
 	for {
 		interval := perf_metrics_setting.GetFlushIntervalMinutes()
 		time.Sleep(time.Duration(interval) * time.Minute)
-		setting := perf_metrics_setting.GetSetting()
-		if !setting.Enabled {
-			continue
-		}
-		flushCompletedBuckets()
-		cleanupExpiredMetrics(setting.RetentionDays)
+		flushPass()
 	}
+}
+
+// flushPass runs one flush cycle with its own recover. Without it a panic ends
+// flushLoop for good: Init starts the goroutine once from main and there is no
+// watchdog, so nothing would ever drain hotBuckets again. That is not just lost
+// metrics — Record keeps calling LoadOrStore on every relay, and with no flush
+// to Delete the keys the map grows without bound for the life of the process.
+func flushPass() {
+	defer func() {
+		if r := recover(); r != nil {
+			common.SysError(fmt.Sprintf("perf metrics flush pass panic recovered: panic=%v\n%s", r, debug.Stack()))
+		}
+	}()
+
+	setting := perf_metrics_setting.GetSetting()
+	if !setting.Enabled {
+		return
+	}
+	flushCompletedBuckets()
+	cleanupExpiredMetrics(setting.RetentionDays)
 }
 
 func flushCompletedBuckets() {

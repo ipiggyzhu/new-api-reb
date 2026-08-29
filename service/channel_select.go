@@ -12,12 +12,27 @@ import (
 )
 
 type RetryParam struct {
-	Ctx          *gin.Context
-	TokenGroup   string
-	ModelName    string
-	RequestPath  string
-	Retry        *int
-	resetNextTry bool
+	Ctx         *gin.Context
+	TokenGroup  string
+	ModelName   string
+	RequestPath string
+	Retry       *int
+	// ExcludedChannelIds accumulates the channels already attempted for this
+	// request. It rides on RetryParam because RetryParam is the only state the
+	// relay retry loop already threads through every selection, and the selector
+	// needs the attempts of *this* request only — c.GetStringSlice("use_channel")
+	// is a log-facing string slice that never reaches the selector, and gin
+	// context keys would leak the set into unrelated helpers.
+	ExcludedChannelIds map[int]bool
+	resetNextTry       bool
+}
+
+// ExcludeChannel marks a channel as attempted so later retries skip it.
+func (p *RetryParam) ExcludeChannel(channelId int) {
+	if p.ExcludedChannelIds == nil {
+		p.ExcludedChannelIds = make(map[int]bool)
+	}
+	p.ExcludedChannelIds[channelId] = true
 }
 
 func (p *RetryParam) GetRetry() int {
@@ -93,6 +108,12 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 		}
 		autoGroups := GetUserAutoGroup(userGroup)
 
+		// anyGroupSaturated remembers that at least one group had channels for this
+		// model and every one of them was at its concurrency limit. Without it the
+		// loop would end with a nil channel and no error, and the caller would report
+		// the model as unavailable in this group when it is only busy.
+		anyGroupSaturated := false
+
 		// startGroupIndex: the group index to start searching from
 		// startGroupIndex: 开始搜索的分组索引
 		startGroupIndex := 0
@@ -116,7 +137,15 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			}
 			logger.LogDebug(param.Ctx, "Auto selecting group: %s, priorityRetry: %d", autoGroup, priorityRetry)
 
-			channel, _ = model.GetRandomSatisfiedChannel(autoGroup, param.ModelName, priorityRetry, param.RequestPath)
+			var groupErr error
+			channel, groupErr = model.GetRandomSatisfiedChannel(autoGroup, param.ModelName, priorityRetry, param.RequestPath, param.ExcludedChannelIds)
+			if errors.Is(groupErr, model.ErrAllChannelsSaturated) {
+				// This group's channels are all busy rather than missing. Later groups
+				// are still worth trying (that is what auto-group overflow is for), but
+				// the reason is remembered so that exhausting every group reports
+				// backpressure instead of a nonexistent model.
+				anyGroupSaturated = true
+			}
 			if channel == nil {
 				// Current group has no available channel for this model, try next group
 				// 当前分组没有该模型的可用渠道，尝试下一个分组
@@ -153,8 +182,11 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			}
 			break
 		}
+		if channel == nil && anyGroupSaturated {
+			return nil, selectGroup, model.ErrAllChannelsSaturated
+		}
 	} else {
-		channel, err = model.GetRandomSatisfiedChannel(param.TokenGroup, param.ModelName, param.GetRetry(), param.RequestPath)
+		channel, err = model.GetRandomSatisfiedChannel(param.TokenGroup, param.ModelName, param.GetRetry(), param.RequestPath, param.ExcludedChannelIds)
 		if err != nil {
 			return nil, param.TokenGroup, err
 		}

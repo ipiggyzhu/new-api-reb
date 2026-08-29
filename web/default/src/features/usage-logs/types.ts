@@ -114,6 +114,9 @@ export interface LogOtherData {
     local_count_tokens?: boolean
     usage_billing_path?: UsageBillingPath | string
     channel_affinity?: ChannelAffinityInfo
+    // Bounded copy of a non-JSON upstream error body (CF block page, nginx
+    // 502); recorded by the relay error handler, admin only.
+    upstream_body?: string
     // Top-up audit fields (type=1, admin only)
     payment_method?: string
     callback_payment_method?: string

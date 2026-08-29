@@ -4,7 +4,9 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func seedFlowQuotaData(t *testing.T, quotaData QuotaData) {
@@ -190,4 +192,208 @@ func TestLogQuotaDataSplitsRowsByUseGroupTokenChannelAndNode(t *testing.T) {
 	require.Equal(t, 60, rows[0].TokenUsed)
 	require.Equal(t, "default", rows[1].UseGroup)
 	require.Equal(t, 25, rows[1].Quota)
+}
+
+func resetQuotaDataCache(t *testing.T) {
+	t.Helper()
+	CacheQuotaDataLock.Lock()
+	CacheQuotaData = make(map[string]*QuotaData)
+	CacheQuotaDataLock.Unlock()
+}
+
+func flowLogParams(useGroup string, quota int, tokenUsed int) QuotaDataLogParams {
+	return QuotaDataLogParams{
+		UserID:    1,
+		Username:  "alice",
+		ModelName: "gpt-a",
+		CreatedAt: 3600,
+		UseGroup:  useGroup,
+		TokenID:   11,
+		ChannelID: 1,
+		NodeName:  "node-a",
+		Quota:     quota,
+		TokenUsed: tokenUsed,
+	}
+}
+
+// A second flush for the same hour bucket must add onto the row the first flush
+// wrote instead of inserting a duplicate. The flush decides between UPDATE and
+// INSERT from the UPDATE's RowsAffected now that the probing SELECT is gone, so
+// this pins the branch that replaced it.
+func TestSaveQuotaDataCacheUpsertsRepeatedFlushesIntoOneRow(t *testing.T) {
+	cases := []struct {
+		name          string
+		flushes       [][]QuotaDataLogParams
+		wantRows      int
+		wantCount     int
+		wantQuota     int
+		wantTokenUsed int
+	}{
+		{
+			name:          "first flush inserts the bucket",
+			flushes:       [][]QuotaDataLogParams{{flowLogParams("vip", 100, 40)}},
+			wantRows:      1,
+			wantCount:     1,
+			wantQuota:     100,
+			wantTokenUsed: 40,
+		},
+		{
+			name: "second flush updates the same bucket",
+			flushes: [][]QuotaDataLogParams{
+				{flowLogParams("vip", 100, 40)},
+				{flowLogParams("vip", 25, 10)},
+			},
+			wantRows:      1,
+			wantCount:     2,
+			wantQuota:     125,
+			wantTokenUsed: 50,
+		},
+		{
+			name: "three flushes keep accumulating onto one row",
+			flushes: [][]QuotaDataLogParams{
+				{flowLogParams("vip", 100, 40)},
+				{flowLogParams("vip", 25, 10)},
+				{flowLogParams("vip", 5, 2)},
+			},
+			wantRows:      1,
+			wantCount:     3,
+			wantQuota:     130,
+			wantTokenUsed: 52,
+		},
+		{
+			name: "entries batched inside one flush collapse before the write",
+			flushes: [][]QuotaDataLogParams{
+				{flowLogParams("vip", 100, 40), flowLogParams("vip", 25, 10)},
+			},
+			wantRows:      1,
+			wantCount:     2,
+			wantQuota:     125,
+			wantTokenUsed: 50,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			truncateTables(t)
+			resetQuotaDataCache(t)
+
+			for _, flush := range tc.flushes {
+				for _, params := range flush {
+					LogQuotaData(params)
+				}
+				SaveQuotaDataCache()
+			}
+
+			var rows []QuotaData
+			require.NoError(t, DB.Find(&rows).Error)
+			require.Len(t, rows, tc.wantRows)
+			assert.Equal(t, tc.wantCount, rows[0].Count)
+			assert.Equal(t, tc.wantQuota, rows[0].Quota)
+			assert.Equal(t, tc.wantTokenUsed, rows[0].TokenUsed)
+		})
+	}
+}
+
+// The flush must not still hold CacheQuotaDataLock once it starts talking to the
+// database. LogQuotaData takes that same mutex for every billed request, so a
+// flush that held it across its round trips stalled the request path for the
+// whole flush, every DataExportInterval minutes.
+func TestSaveQuotaDataCacheReleasesLockBeforeDatabaseWork(t *testing.T) {
+	cases := []struct {
+		name string
+		seed bool
+	}{
+		{name: "insert path", seed: false},
+		{name: "update path", seed: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			truncateTables(t)
+			resetQuotaDataCache(t)
+
+			if tc.seed {
+				LogQuotaData(flowLogParams("vip", 10, 5))
+				SaveQuotaDataCache()
+			}
+
+			// TryLock from inside the flush's own database callback. sync.Mutex is
+			// not reentrant, so a flush still holding the lock fails this probe on
+			// the very goroutine that holds it.
+			probes := 0
+			lockHeld := false
+			probe := func(tx *gorm.DB) {
+				if tx.Statement.Table != "quota_data" {
+					return
+				}
+				probes++
+				if CacheQuotaDataLock.TryLock() {
+					CacheQuotaDataLock.Unlock()
+					return
+				}
+				lockHeld = true
+			}
+			require.NoError(t, DB.Callback().Update().Before("gorm:update").Register("test:quota_lock_probe", probe))
+			require.NoError(t, DB.Callback().Create().Before("gorm:create").Register("test:quota_lock_probe", probe))
+			t.Cleanup(func() {
+				DB.Callback().Update().Remove("test:quota_lock_probe")
+				DB.Callback().Create().Remove("test:quota_lock_probe")
+			})
+
+			LogQuotaData(flowLogParams("vip", 100, 40))
+			SaveQuotaDataCache()
+
+			require.Positive(t, probes, "flush did no quota_data write, probe proved nothing")
+			assert.False(t, lockHeld, "CacheQuotaDataLock was still held during the flush's database work")
+		})
+	}
+}
+
+// A request that lands mid-flush must not have its delta swallowed: the flush
+// detaches the pending map, so the new entry belongs to the next snapshot.
+func TestSaveQuotaDataCacheKeepsDeltasLoggedDuringFlush(t *testing.T) {
+	truncateTables(t)
+	resetQuotaDataCache(t)
+
+	logged := false
+	lockHeld := false
+	require.NoError(t, DB.Callback().Create().Before("gorm:create").Register("test:quota_concurrent_log", func(tx *gorm.DB) {
+		if logged || tx.Statement.Table != "quota_data" {
+			return
+		}
+		// TryLock rather than LogQuotaData directly: a flush that still held the
+		// lock would deadlock this goroutine on the non-reentrant mutex instead
+		// of reporting a failure, so probe first and record the miss.
+		if !CacheQuotaDataLock.TryLock() {
+			lockHeld = true
+			return
+		}
+		CacheQuotaDataLock.Unlock()
+		logged = true
+		LogQuotaData(flowLogParams("vip", 7, 3))
+	}))
+	t.Cleanup(func() {
+		DB.Callback().Create().Remove("test:quota_concurrent_log")
+	})
+
+	LogQuotaData(flowLogParams("vip", 100, 40))
+	SaveQuotaDataCache()
+	require.False(t, lockHeld, "CacheQuotaDataLock was still held during the flush's database work")
+	require.True(t, logged, "probe never ran, the concurrent write was not exercised")
+
+	var afterFirst []QuotaData
+	require.NoError(t, DB.Find(&afterFirst).Error)
+	require.Len(t, afterFirst, 1)
+	assert.Equal(t, 100, afterFirst[0].Quota)
+
+	// The delta logged during the flush is still pending, and the next flush
+	// folds it onto the same row rather than dropping it or duplicating the row.
+	SaveQuotaDataCache()
+
+	var afterSecond []QuotaData
+	require.NoError(t, DB.Find(&afterSecond).Error)
+	require.Len(t, afterSecond, 1)
+	assert.Equal(t, 107, afterSecond[0].Quota)
+	assert.Equal(t, 43, afterSecond[0].TokenUsed)
+	assert.Equal(t, 2, afterSecond[0].Count)
 }

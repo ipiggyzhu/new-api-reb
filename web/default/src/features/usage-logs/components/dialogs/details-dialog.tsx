@@ -1233,6 +1233,37 @@ export function DetailsDialog(props: DetailsDialogProps) {
             </div>
           </div>
         )}
+
+        {/* Raw upstream error body (admin only). This is the bounded copy the
+            backend keeps when an upstream error is not parseable JSON — a
+            Cloudflare block page, an nginx 502 — i.e. exactly the errors whose
+            content would otherwise be visible nowhere in the UI. */}
+        {props.isAdmin && adminInfo?.upstream_body && (
+          <div className='space-y-1.5'>
+            <Label className='text-xs font-semibold'>
+              {t('Upstream Response Body')}
+            </Label>
+            <div className='bg-muted/30 relative min-w-0 overflow-hidden rounded-md border p-2.5'>
+              <Button
+                variant='ghost'
+                size='sm'
+                className='absolute top-1.5 right-1.5 h-5 w-5 p-0'
+                onClick={() => copyToClipboard(adminInfo.upstream_body ?? '')}
+                title={t('Copy to clipboard')}
+                aria-label={t('Copy to clipboard')}
+              >
+                {copiedText === adminInfo.upstream_body ? (
+                  <Check className='size-3 text-green-600' />
+                ) : (
+                  <Copy className='size-3' />
+                )}
+              </Button>
+              <pre className='max-h-48 min-w-0 overflow-y-auto pr-6 font-mono text-[11px] leading-relaxed break-all whitespace-pre-wrap sm:wrap-break-word'>
+                {adminInfo.upstream_body}
+              </pre>
+            </div>
+          </div>
+        )}
       </div>
     </Dialog>
   )

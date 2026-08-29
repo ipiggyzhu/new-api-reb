@@ -46,7 +46,12 @@ import { useMediaQuery } from '@/hooks'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
 import { getLobeIcon } from '@/lib/lobe-icon'
 
-import { getChannels, searchChannels, getGroups } from '../api'
+import {
+  getChannels,
+  searchChannels,
+  getGroups,
+  getChannelInFlight,
+} from '../api'
 import {
   DEFAULT_PAGE_SIZE,
   CHANNEL_STATUS,
@@ -54,6 +59,7 @@ import {
 } from '../constants'
 import {
   channelsQueryKeys,
+  CHANNEL_IN_FLIGHT_POLL_MS,
   aggregateChannelsByTag,
   isTagAggregateRow,
   getChannelTypeIcon,
@@ -79,6 +85,19 @@ const CHANNEL_SORTABLE_COLUMNS = new Set<ChannelSortBy>([
   'response_time',
   'test_time',
 ])
+
+// Keep every channel column aligned as one visual grid. Headers and cells need
+// separate descendant rules because sortable headers, badges, spinners, and row
+// actions render their own flex containers and some carry start-margin offsets.
+// Defined at module scope so the reference stays stable and rows keep memoizing.
+function getChannelColumnClassName(
+  _columnId: string,
+  kind: 'header' | 'cell'
+): string {
+  return kind === 'header'
+    ? 'text-center [&>div]:justify-center [&>div>button]:ms-0'
+    : 'text-center [&>div]:mx-auto [&>div]:justify-center [&>span]:ml-0'
+}
 
 function isDisabledChannelRow(channel: Channel) {
   return (
@@ -289,16 +308,39 @@ export function ChannelsTable() {
     placeholderData: (previousData) => previousData,
   })
 
+  // The in-flight gauge is polled on its own instead of riding the list refresh:
+  // the list is an expensive paginated query and re-running it every few seconds
+  // would also fight with inline cell editing, while this endpoint only reads an
+  // in-memory counter map. React Query pauses the interval while the tab is
+  // hidden, so an idle background tab costs nothing.
+  const { data: inFlightData } = useQuery({
+    queryKey: channelsQueryKeys.inFlight(),
+    queryFn: getChannelInFlight,
+    refetchInterval: CHANNEL_IN_FLIGHT_POLL_MS,
+    placeholderData: (previousData) => previousData,
+  })
+
   // Apply tag aggregation if tag mode is enabled
   const channels = useMemo(() => {
     const rawChannels = data?.data?.items || []
+    // in_flight is a live gauge keyed by channel id rather than a column on the
+    // row; folding it onto the row here keeps the concurrency cell a plain
+    // function of its channel. The polled value wins over the one that came with
+    // the list, which is already stale by the time the rows render.
+    const inFlight = inFlightData?.data?.in_flight ?? data?.data?.in_flight
+    const withInFlight = inFlight
+      ? rawChannels.map((channel) => ({
+          ...channel,
+          in_flight: inFlight[String(channel.id)] ?? 0,
+        }))
+      : rawChannels
 
-    if (enableTagMode && rawChannels.length > 0) {
-      return aggregateChannelsByTag(rawChannels)
+    if (enableTagMode && withInFlight.length > 0) {
+      return aggregateChannelsByTag(withInFlight)
     }
 
-    return rawChannels
-  }, [data, enableTagMode])
+    return withInFlight
+  }, [data, inFlightData, enableTagMode])
 
   const totalCount = data?.data?.total || 0
   const typeCounts = data?.data?.type_counts
@@ -423,6 +465,7 @@ export function ChannelsTable() {
       )}
       cardGridClassName='grid grid-cols-1 gap-3 sm:gap-4 lg:grid-cols-3'
       applyHeaderSize
+      getColumnClassName={getChannelColumnClassName}
       toolbarProps={{
         searchPlaceholder: t('Filter by name, ID, or key...'),
         searchDebounceMs: 500,

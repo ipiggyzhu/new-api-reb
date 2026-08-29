@@ -38,7 +38,7 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 			}
 			claudeTool.InputSchema = make(map[string]interface{})
 			if params["type"] != nil {
-				claudeTool.InputSchema["type"] = params["type"].(string)
+				claudeTool.InputSchema["type"] = params["type"]
 			}
 			claudeTool.InputSchema["properties"] = params["properties"]
 			claudeTool.InputSchema["required"] = params["required"]
@@ -175,22 +175,31 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 	}
 
 	if textRequest.ReasoningEffort != "" {
+		var effortBudgetTokens int
 		switch textRequest.ReasoningEffort {
 		case "low":
-			claudeRequest.Thinking = &dto.Thinking{
-				Type:         "enabled",
-				BudgetTokens: common.GetPointer[int](1280),
-			}
+			effortBudgetTokens = 1280
 		case "medium":
-			claudeRequest.Thinking = &dto.Thinking{
-				Type:         "enabled",
-				BudgetTokens: common.GetPointer[int](2048),
-			}
+			effortBudgetTokens = 2048
 		case "high":
+			effortBudgetTokens = 4096
+		}
+		if effortBudgetTokens > 0 {
+			// Anthropic requires budget_tokens >= 1024 and strictly below max_tokens,
+			// and rejects temperature/top_p/top_k overrides while thinking is enabled.
+			if claudeRequest.MaxTokens == nil || *claudeRequest.MaxTokens < 1280 {
+				claudeRequest.MaxTokens = common.GetPointer[uint](1280)
+			}
+			if maxTokens := int(*claudeRequest.MaxTokens); effortBudgetTokens >= maxTokens {
+				effortBudgetTokens = int(float64(maxTokens) * model_setting.GetClaudeSettings().ThinkingAdapterBudgetTokensPercentage)
+			}
 			claudeRequest.Thinking = &dto.Thinking{
 				Type:         "enabled",
-				BudgetTokens: common.GetPointer[int](4096),
+				BudgetTokens: &effortBudgetTokens,
 			}
+			claudeRequest.Temperature = nil
+			claudeRequest.TopP = nil
+			claudeRequest.TopK = nil
 		}
 	}
 
@@ -216,7 +225,9 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 		case []interface{}:
 			stopSequences := make([]string, 0)
 			for _, item := range stop {
-				stopSequences = append(stopSequences, item.(string))
+				if sequence, ok := item.(string); ok {
+					stopSequences = append(stopSequences, sequence)
+				}
 			}
 			claudeRequest.StopSequences = stopSequences
 		}
@@ -242,7 +253,7 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 		}
 		if lastMessage.Role == message.Role && lastMessage.Role != "tool" {
 			if lastMessage.IsStringContent() && message.IsStringContent() {
-				fmtMessage.SetStringContent(strings.Trim(fmt.Sprintf("%s %s", lastMessage.StringContent(), message.StringContent()), "\""))
+				fmtMessage.SetStringContent(lastMessage.StringContent() + " " + message.StringContent())
 				formatMessages = formatMessages[:len(formatMessages)-1]
 			}
 		}

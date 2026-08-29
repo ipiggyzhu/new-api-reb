@@ -95,6 +95,27 @@ func ClaudeMessagesRequestToOpenAIChat(claudeRequest dto.ClaudeRequest, info *re
 	}
 	openAIRequest.Tools = openAITools
 
+	if claudeRequest.ToolChoice != nil {
+		if claudeToolChoice, err := common.Any2Type[dto.ClaudeToolChoice](claudeRequest.ToolChoice); err == nil {
+			switch claudeToolChoice.Type {
+			case "auto":
+				openAIRequest.ToolChoice = "auto"
+			case "any":
+				openAIRequest.ToolChoice = "required"
+			case "none":
+				openAIRequest.ToolChoice = "none"
+			case "tool":
+				openAIRequest.ToolChoice = map[string]any{
+					"type":     "function",
+					"function": map[string]any{"name": claudeToolChoice.Name},
+				}
+			}
+			if claudeToolChoice.DisableParallelToolUse && claudeToolChoice.Type != "none" {
+				openAIRequest.ParallelTooCalls = common.GetPointer(false)
+			}
+		}
+	}
+
 	openAIMessages := make([]dto.Message, 0)
 	if claudeRequest.System != nil {
 		if claudeRequest.IsStringSystem() && claudeRequest.GetStringSystem() != "" {
@@ -199,7 +220,7 @@ func ClaudeMessagesRequestToOpenAIChat(claudeRequest dto.ClaudeRequest, info *re
 			if len(toolCalls) > 0 {
 				openAIMessage.SetToolCalls(toolCalls)
 			}
-			if len(mediaMessages) > 0 && len(toolCalls) == 0 {
+			if len(mediaMessages) > 0 {
 				openAIMessage.SetMediaContent(mediaMessages)
 			}
 		}

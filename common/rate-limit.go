@@ -8,21 +8,23 @@ import (
 type InMemoryRateLimiter struct {
 	store              map[string]*[]int64
 	mutex              sync.Mutex
+	once               sync.Once
 	expirationDuration time.Duration
 }
 
+// Init is called per request by the rate limit middlewares, so it must stay a
+// no-op after the first call: only the first expirationDuration is kept, and
+// sync.Once replaces the unsynchronized double-checked read of store.
 func (l *InMemoryRateLimiter) Init(expirationDuration time.Duration) {
-	if l.store == nil {
+	l.once.Do(func() {
 		l.mutex.Lock()
-		if l.store == nil {
-			l.store = make(map[string]*[]int64)
-			l.expirationDuration = expirationDuration
-			if expirationDuration > 0 {
-				go l.clearExpiredItems()
-			}
+		defer l.mutex.Unlock()
+		l.store = make(map[string]*[]int64)
+		l.expirationDuration = expirationDuration
+		if expirationDuration > 0 {
+			go l.clearExpiredItems()
 		}
-		l.mutex.Unlock()
-	}
+	})
 }
 
 func (l *InMemoryRateLimiter) clearExpiredItems() {

@@ -2,6 +2,7 @@ package relay
 
 import (
 	"fmt"
+	"net/http"
 
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -41,6 +42,19 @@ func WssHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 		return newAPIError
 	}
-	service.PostWssConsumeQuota(c, info, info.UpstreamModelName, usage.(*dto.RealtimeUsage), "")
+	// Same typed-nil hazard as adaptorUsage guards for the text paths: DoResponse
+	// hands usage back as `any`, so a nil *dto.RealtimeUsage arrives as a non-nil
+	// interface and PostWssConsumeQuota would deref it. A panic here unwinds past
+	// controller.Relay's deferred refund, which only refunds when its error is
+	// non-nil, so the pre-consumed quota would be silently kept.
+	realtimeUsage, ok := usage.(*dto.RealtimeUsage)
+	if !ok || realtimeUsage == nil {
+		return types.NewErrorWithStatusCode(
+			fmt.Errorf("realtime adaptor returned no usage (%T)", usage),
+			types.ErrorCodeEmptyResponse,
+			http.StatusInternalServerError,
+		)
+	}
+	service.PostWssConsumeQuota(c, info, info.UpstreamModelName, realtimeUsage, "")
 	return nil
 }

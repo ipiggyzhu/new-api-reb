@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -136,8 +137,8 @@ func GetClaudeAuthHeader(token string) http.Header {
 	return h
 }
 
-func GetResponseBody(method, url string, channel *model.Channel, headers http.Header) ([]byte, error) {
-	req, err := http.NewRequest(method, url, nil)
+func GetResponseBody(ctx context.Context, method, url string, channel *model.Channel, headers http.Header) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +169,7 @@ func GetResponseBody(method, url string, channel *model.Channel, headers http.He
 
 func updateChannelCloseAIBalance(channel *model.Channel) (float64, error) {
 	url := fmt.Sprintf("%s/dashboard/billing/credit_grants", channel.GetBaseURL())
-	body, err := GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
+	body, err := GetResponseBody(context.Background(), "GET", url, channel, GetAuthHeader(channel.Key))
 
 	if err != nil {
 		return 0, err
@@ -184,7 +185,7 @@ func updateChannelCloseAIBalance(channel *model.Channel) (float64, error) {
 
 func updateChannelOpenAISBBalance(channel *model.Channel) (float64, error) {
 	url := fmt.Sprintf("https://api.openai-sb.com/sb-api/user/status?api_key=%s", channel.Key)
-	body, err := GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
+	body, err := GetResponseBody(context.Background(), "GET", url, channel, GetAuthHeader(channel.Key))
 	if err != nil {
 		return 0, err
 	}
@@ -208,7 +209,7 @@ func updateChannelAIProxyBalance(channel *model.Channel) (float64, error) {
 	url := "https://aiproxy.io/api/report/getUserOverview"
 	headers := http.Header{}
 	headers.Add("Api-Key", channel.Key)
-	body, err := GetResponseBody("GET", url, channel, headers)
+	body, err := GetResponseBody(context.Background(), "GET", url, channel, headers)
 	if err != nil {
 		return 0, err
 	}
@@ -226,7 +227,7 @@ func updateChannelAIProxyBalance(channel *model.Channel) (float64, error) {
 
 func updateChannelAPI2GPTBalance(channel *model.Channel) (float64, error) {
 	url := "https://api.api2gpt.com/dashboard/billing/credit_grants"
-	body, err := GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
+	body, err := GetResponseBody(context.Background(), "GET", url, channel, GetAuthHeader(channel.Key))
 
 	if err != nil {
 		return 0, err
@@ -242,7 +243,7 @@ func updateChannelAPI2GPTBalance(channel *model.Channel) (float64, error) {
 
 func updateChannelSiliconFlowBalance(channel *model.Channel) (float64, error) {
 	url := "https://api.siliconflow.cn/v1/user/info"
-	body, err := GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
+	body, err := GetResponseBody(context.Background(), "GET", url, channel, GetAuthHeader(channel.Key))
 	if err != nil {
 		return 0, err
 	}
@@ -264,7 +265,7 @@ func updateChannelSiliconFlowBalance(channel *model.Channel) (float64, error) {
 
 func updateChannelDeepSeekBalance(channel *model.Channel) (float64, error) {
 	url := "https://api.deepseek.com/user/balance"
-	body, err := GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
+	body, err := GetResponseBody(context.Background(), "GET", url, channel, GetAuthHeader(channel.Key))
 	if err != nil {
 		return 0, err
 	}
@@ -293,7 +294,7 @@ func updateChannelDeepSeekBalance(channel *model.Channel) (float64, error) {
 
 func updateChannelAIGC2DBalance(channel *model.Channel) (float64, error) {
 	url := "https://api.aigc2d.com/dashboard/billing/credit_grants"
-	body, err := GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
+	body, err := GetResponseBody(context.Background(), "GET", url, channel, GetAuthHeader(channel.Key))
 	if err != nil {
 		return 0, err
 	}
@@ -308,7 +309,7 @@ func updateChannelAIGC2DBalance(channel *model.Channel) (float64, error) {
 
 func updateChannelOpenRouterBalance(channel *model.Channel) (float64, error) {
 	url := "https://openrouter.ai/api/v1/credits"
-	body, err := GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
+	body, err := GetResponseBody(context.Background(), "GET", url, channel, GetAuthHeader(channel.Key))
 	if err != nil {
 		return 0, err
 	}
@@ -324,7 +325,7 @@ func updateChannelOpenRouterBalance(channel *model.Channel) (float64, error) {
 
 func updateChannelMoonshotBalance(channel *model.Channel) (float64, error) {
 	url := "https://api.moonshot.cn/v1/users/me/balance"
-	body, err := GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
+	body, err := GetResponseBody(context.Background(), "GET", url, channel, GetAuthHeader(channel.Key))
 	if err != nil {
 		return 0, err
 	}
@@ -391,7 +392,7 @@ func updateChannelBalance(channel *model.Channel) (float64, error) {
 	}
 	url := fmt.Sprintf("%s/v1/dashboard/billing/subscription", baseURL)
 
-	body, err := GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
+	body, err := GetResponseBody(context.Background(), "GET", url, channel, GetAuthHeader(channel.Key))
 	if err != nil {
 		return 0, err
 	}
@@ -407,7 +408,7 @@ func updateChannelBalance(channel *model.Channel) (float64, error) {
 		startDate = now.AddDate(0, 0, -100).Format("2006-01-02")
 	}
 	url = fmt.Sprintf("%s/v1/dashboard/billing/usage?start_date=%s&end_date=%s", baseURL, startDate, endDate)
-	body, err = GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
+	body, err = GetResponseBody(context.Background(), "GET", url, channel, GetAuthHeader(channel.Key))
 	if err != nil {
 		return 0, err
 	}
@@ -495,7 +496,16 @@ func UpdateAllChannelsBalance(c *gin.Context) {
 	return
 }
 
+// AutomaticallyUpdateChannels polls every channel's upstream balance on a fixed
+// interval. A non-positive frequency disables it: main.go only rejects a
+// CHANNEL_UPDATE_FREQUENCY that fails to parse, so 0 reaches here and
+// time.Sleep(0) would turn this into a continuous HTTP balance sweep across every
+// channel.
 func AutomaticallyUpdateChannels(frequency int) {
+	if frequency <= 0 {
+		common.SysLog("automatic channel balance update disabled: CHANNEL_UPDATE_FREQUENCY is not positive")
+		return
+	}
 	for {
 		time.Sleep(time.Duration(frequency) * time.Minute)
 		common.SysLog("updating all channels")

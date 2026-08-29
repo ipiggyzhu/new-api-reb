@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { ChannelAffinitySection } from '../general/channel-affinity'
+import { ChannelDynamicScoreSection } from '../general/channel-dynamic-score'
 import { IoNetDeploymentSettingsSection } from '../integrations/ionet-deployment-settings-section'
 import type { ModelSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
@@ -60,6 +61,44 @@ const MODELS_SECTIONS = [
               settings['general_setting.ping_interval_enabled'],
             ping_interval_seconds:
               settings['general_setting.ping_interval_seconds'],
+          },
+          monitor_setting: {
+            upstream_model_update_enabled:
+              settings['monitor_setting.upstream_model_update_enabled'],
+            upstream_model_update_interval_hours:
+              settings['monitor_setting.upstream_model_update_interval_hours'],
+            upstream_model_update_scan_all_channels:
+              settings[
+                'monitor_setting.upstream_model_update_scan_all_channels'
+              ],
+            upstream_model_update_validate:
+              settings['monitor_setting.upstream_model_update_validate'],
+            upstream_model_update_remove_failed:
+              settings['monitor_setting.upstream_model_update_remove_failed'],
+            upstream_model_update_retry_delay_minutes:
+              settings[
+                'monitor_setting.upstream_model_update_retry_delay_minutes'
+              ],
+            upstream_model_update_failure_threshold:
+              settings[
+                'monitor_setting.upstream_model_update_failure_threshold'
+              ],
+            upstream_model_update_rotation_sample_size:
+              settings[
+                'monitor_setting.upstream_model_update_rotation_sample_size'
+              ],
+            upstream_model_update_max_validations_per_run:
+              settings[
+                'monitor_setting.upstream_model_update_max_validations_per_run'
+              ],
+            channel_test_prompts: formatJsonForEditor(
+              settings['monitor_setting.channel_test_prompts'],
+              '[]'
+            ),
+            channel_test_client_headers: formatJsonForEditor(
+              settings['monitor_setting.channel_test_client_headers'],
+              '{}'
+            ),
           },
         }}
       />
@@ -163,6 +202,32 @@ const MODELS_SECTIONS = [
             settings['channel_affinity_setting.default_ttl_seconds'],
           'channel_affinity_setting.rules':
             settings['channel_affinity_setting.rules'],
+        }}
+      />
+    ),
+  },
+  {
+    id: 'channel-dynamic-score',
+    titleKey: 'Dynamic Channel Priority',
+    build: (settings: ModelSettings) => (
+      <ChannelDynamicScoreSection
+        defaultValues={{
+          'channel_dynamic_score_setting.enabled':
+            settings['channel_dynamic_score_setting.enabled'],
+          'channel_dynamic_score_setting.successes_to_promote':
+            settings['channel_dynamic_score_setting.successes_to_promote'],
+          'channel_dynamic_score_setting.faults_to_demote':
+            settings['channel_dynamic_score_setting.faults_to_demote'],
+          'channel_dynamic_score_setting.max_promote_tiers':
+            settings['channel_dynamic_score_setting.max_promote_tiers'],
+          'channel_dynamic_score_setting.max_demote_tiers':
+            settings['channel_dynamic_score_setting.max_demote_tiers'],
+          'channel_dynamic_score_setting.min_sample_for_weight':
+            settings['channel_dynamic_score_setting.min_sample_for_weight'],
+          'channel_dynamic_score_setting.success_window_seconds':
+            settings['channel_dynamic_score_setting.success_window_seconds'],
+          'channel_dynamic_score_setting.idle_reset_seconds':
+            settings['channel_dynamic_score_setting.idle_reset_seconds'],
         }}
       />
     ),

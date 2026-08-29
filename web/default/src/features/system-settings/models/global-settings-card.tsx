@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -36,9 +36,18 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { api } from '@/lib/api'
 
 import {
   SettingsForm,
@@ -76,6 +85,17 @@ const chatToResponsesPolicyAllChannelsExample = JSON.stringify(
   2
 )
 
+const channelTestPromptsExample = JSON.stringify(
+  [
+    '用 HTML 和 JavaScript 写一个贪吃蛇小游戏，要求支持键盘控制和计分。',
+    '液态玻璃（Liquid Glass）效果在 CSS 里怎么实现？给出关键属性和一个最小示例。',
+    'Implement a least-recently-used (LRU) cache in TypeScript with O(1) get and put.',
+    '解释一下数据库索引为什么能加快查询，什么情况下反而会变慢。',
+  ],
+  null,
+  2
+)
+
 const jsonString = z.string().refine((value) => {
   const trimmed = value.trim()
   if (!trimmed) return true
@@ -97,6 +117,19 @@ const schema = z.object({
     ping_interval_enabled: z.boolean(),
     ping_interval_seconds: z.coerce.number().min(1),
   }),
+  monitor_setting: z.object({
+    upstream_model_update_enabled: z.boolean(),
+    upstream_model_update_interval_hours: z.coerce.number().min(1),
+    upstream_model_update_scan_all_channels: z.boolean(),
+    upstream_model_update_validate: z.boolean(),
+    upstream_model_update_remove_failed: z.boolean(),
+    upstream_model_update_retry_delay_minutes: z.coerce.number().min(1),
+    upstream_model_update_failure_threshold: z.coerce.number().min(1),
+    upstream_model_update_rotation_sample_size: z.coerce.number().min(0),
+    upstream_model_update_max_validations_per_run: z.coerce.number().min(1),
+    channel_test_prompts: jsonString,
+    channel_test_client_headers: jsonString,
+  }),
 })
 
 type GlobalModelSettingsFormValues = z.output<typeof schema>
@@ -108,6 +141,17 @@ type FlatGlobalModelSettings = {
   'global.chat_completions_to_responses_policy': string
   'general_setting.ping_interval_enabled': boolean
   'general_setting.ping_interval_seconds': number
+  'monitor_setting.upstream_model_update_enabled': boolean
+  'monitor_setting.upstream_model_update_interval_hours': number
+  'monitor_setting.upstream_model_update_scan_all_channels': boolean
+  'monitor_setting.upstream_model_update_validate': boolean
+  'monitor_setting.upstream_model_update_remove_failed': boolean
+  'monitor_setting.upstream_model_update_retry_delay_minutes': number
+  'monitor_setting.upstream_model_update_failure_threshold': number
+  'monitor_setting.upstream_model_update_rotation_sample_size': number
+  'monitor_setting.upstream_model_update_max_validations_per_run': number
+  'monitor_setting.channel_test_prompts': string
+  'monitor_setting.channel_test_client_headers': string
 }
 
 const flattenGlobalValues = (
@@ -127,12 +171,56 @@ const flattenGlobalValues = (
     values.general_setting.ping_interval_enabled,
   'general_setting.ping_interval_seconds':
     values.general_setting.ping_interval_seconds,
+  'monitor_setting.upstream_model_update_enabled':
+    values.monitor_setting.upstream_model_update_enabled,
+  'monitor_setting.upstream_model_update_interval_hours':
+    values.monitor_setting.upstream_model_update_interval_hours,
+  'monitor_setting.upstream_model_update_scan_all_channels':
+    values.monitor_setting.upstream_model_update_scan_all_channels,
+  'monitor_setting.upstream_model_update_validate':
+    values.monitor_setting.upstream_model_update_validate,
+  'monitor_setting.upstream_model_update_remove_failed':
+    values.monitor_setting.upstream_model_update_remove_failed,
+  'monitor_setting.upstream_model_update_retry_delay_minutes':
+    values.monitor_setting.upstream_model_update_retry_delay_minutes,
+  'monitor_setting.upstream_model_update_failure_threshold':
+    values.monitor_setting.upstream_model_update_failure_threshold,
+  'monitor_setting.upstream_model_update_rotation_sample_size':
+    values.monitor_setting.upstream_model_update_rotation_sample_size,
+  'monitor_setting.upstream_model_update_max_validations_per_run':
+    values.monitor_setting.upstream_model_update_max_validations_per_run,
+  'monitor_setting.channel_test_prompts': normalizeJsonText(
+    values.monitor_setting.channel_test_prompts,
+    '[]'
+  ),
+  'monitor_setting.channel_test_client_headers': normalizeJsonText(
+    values.monitor_setting.channel_test_client_headers,
+    '{}'
+  ),
 })
 
 function normalizeJsonText(value: string, fallback: string) {
   const trimmed = (value ?? '').toString().trim()
   return trimmed ? trimmed : fallback
 }
+
+// Mirrors controller.clientHeaderPreset on the backend.
+type ClientHeaderPreset = {
+  id: string
+  label: string
+  family: string
+  endpoint: string
+  headers: Record<string, string>
+}
+
+const channelTestClientHeadersExample = JSON.stringify(
+  {
+    claude: { 'user-agent': 'claude-cli/2.1.220 (external, cli)' },
+    openai: { 'user-agent': 'OpenAI/Python 2.52.0' },
+  },
+  null,
+  2
+)
 
 type GlobalSettingsCardProps = {
   defaultValues: GlobalModelSettingsFormValues
@@ -141,6 +229,66 @@ type GlobalSettingsCardProps = {
 export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
+  const [runningUpdate, setRunningUpdate] = useState(false)
+  const [headerPresets, setHeaderPresets] = useState<ClientHeaderPreset[]>([])
+  const [selectedPreset, setSelectedPreset] = useState('')
+
+  // The preset list comes from the backend rather than being duplicated here:
+  // two hardcoded copies drift, and a preset that does not match what the
+  // gateway actually sends is worse than no preset at all.
+  useEffect(() => {
+    let cancelled = false
+    api
+      .get('/api/option/channel_test_client_header_presets')
+      .then((res) => {
+        if (cancelled) return
+        if (res.data?.success && Array.isArray(res.data.data)) {
+          setHeaderPresets(res.data.data as ClientHeaderPreset[])
+        }
+      })
+      .catch(() => {
+        // A missing preset list must not break the settings page: the textarea
+        // below still works, the dropdown is just empty.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const presetSelectItems = headerPresets.map((preset) => ({
+    value: preset.id,
+    label: preset.label,
+  }))
+
+  // Merging rather than replacing: an admin who set up openai headers should
+  // not lose them by picking a claude preset.
+  const applyHeaderPreset = (presetId: string | null) => {
+    setSelectedPreset(presetId ?? '')
+    const preset = headerPresets.find((item) => item.id === presetId)
+    if (!preset) return
+
+    const raw = form.getValues('monitor_setting.channel_test_client_headers')
+    let current: Record<string, Record<string, string>> = {}
+    if (raw && raw.trim()) {
+      try {
+        const parsed = JSON.parse(raw)
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          current = parsed as Record<string, Record<string, string>>
+        }
+      } catch {
+        toast.error(t('Invalid JSON format'))
+        return
+      }
+    }
+
+    current[preset.family] = { ...preset.headers }
+    form.setValue(
+      'monitor_setting.channel_test_client_headers',
+      JSON.stringify(current, null, 2),
+      { shouldDirty: true }
+    )
+    toast.success(t('Preset applied'))
+  }
 
   const form = useForm<
     GlobalModelSettingsFormInput,
@@ -156,11 +304,45 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
   }, [defaultValues, form])
 
   const pingEnabled = form.watch('general_setting.ping_interval_enabled')
+  const autoUpdateEnabled = form.watch(
+    'monitor_setting.upstream_model_update_enabled'
+  )
+
+  // Trigger the scheduled auto-update immediately. auto_apply distinguishes this
+  // from the channels page "detect all" button, which only stages changes.
+  const runUpstreamUpdateNow = async () => {
+    if (runningUpdate) return
+    setRunningUpdate(true)
+    try {
+      const { data } = await api.post(
+        '/api/channel/upstream_updates/detect_all',
+        { auto_apply: true },
+        { skipBusinessError: true, skipErrorHandler: true }
+      )
+      if (data?.success) {
+        toast.success(t('Model auto-update task started'))
+      } else {
+        toast.error(data?.message || t('Failed to start model auto-update'))
+      }
+    } catch (error) {
+      const status = (error as { response?: { status?: number } })?.response
+        ?.status
+      if (status === 409) {
+        toast.info(t('A model update task is already running'))
+      } else {
+        toast.error(t('Failed to start model auto-update'))
+      }
+    } finally {
+      setRunningUpdate(false)
+    }
+  }
 
   const formatJsonField = (
     field:
       | 'global.thinking_model_blacklist'
       | 'global.chat_completions_to_responses_policy'
+      | 'monitor_setting.channel_test_prompts'
+      | 'monitor_setting.channel_test_client_headers'
   ) => {
     const raw = form.getValues(field)
     if (!raw || !raw.trim()) return
@@ -407,6 +589,422 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
               </FormItem>
             )}
           />
+
+          <Separator />
+
+          <div className='space-y-4'>
+            <h3 className='text-base font-semibold'>
+              {t('Automatic Channel Model Update')}
+            </h3>
+
+            <FormField
+              control={form.control}
+              name='monitor_setting.upstream_model_update_enabled'
+              render={({ field }) => (
+                <SettingsSwitchItem>
+                  <SettingsSwitchContent>
+                    <FormLabel>{t('Enable Automatic Model Update')}</FormLabel>
+                    <FormDescription>
+                      {t(
+                        'Periodically fetch the upstream model list of every enabled channel, confirm each model with a real request, then add new models and remove the ones that stay broken.'
+                      )}
+                    </FormDescription>
+                  </SettingsSwitchContent>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </SettingsSwitchItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='monitor_setting.upstream_model_update_interval_hours'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Update Interval (hours)')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={1}
+                      disabled={!autoUpdateEnabled}
+                      className='w-24'
+                      value={
+                        field.value === undefined || field.value === null
+                          ? ''
+                          : String(field.value)
+                      }
+                      onChange={(event) => field.onChange(event.target.value)}
+                      onBlur={field.onBlur}
+                      name={field.name}
+                      ref={field.ref}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t('Defaults to once per day.')}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='monitor_setting.upstream_model_update_scan_all_channels'
+              render={({ field }) => (
+                <SettingsSwitchItem>
+                  <SettingsSwitchContent>
+                    <FormLabel>{t('Scan All Enabled Channels')}</FormLabel>
+                    <FormDescription>
+                      {t(
+                        'Ignore the per-channel detection switch and check every channel that is not disabled.'
+                      )}
+                    </FormDescription>
+                  </SettingsSwitchContent>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      disabled={!autoUpdateEnabled}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </SettingsSwitchItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='monitor_setting.upstream_model_update_validate'
+              render={({ field }) => (
+                <SettingsSwitchItem>
+                  <SettingsSwitchContent>
+                    <FormLabel>{t('Validate Models Before Adding')}</FormLabel>
+                    <FormDescription>
+                      {t(
+                        'Send one real request per model using the channel type matching format. Turning this off adopts the upstream list on trust.'
+                      )}
+                    </FormDescription>
+                  </SettingsSwitchContent>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      disabled={!autoUpdateEnabled}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </SettingsSwitchItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='monitor_setting.upstream_model_update_remove_failed'
+              render={({ field }) => (
+                <SettingsSwitchItem>
+                  <SettingsSwitchContent>
+                    <FormLabel>{t('Remove Failing Models')}</FormLabel>
+                    <FormDescription>
+                      {t(
+                        'Rate limited models are never removed. Only models that keep failing with a channel fault are dropped, and a channel is never left with no models.'
+                      )}
+                    </FormDescription>
+                  </SettingsSwitchContent>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      disabled={!autoUpdateEnabled}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </SettingsSwitchItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='monitor_setting.upstream_model_update_retry_delay_minutes'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Retry Delay After Failure (minutes)')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={1}
+                      disabled={!autoUpdateEnabled}
+                      className='w-24'
+                      value={
+                        field.value === undefined || field.value === null
+                          ? ''
+                          : String(field.value)
+                      }
+                      onChange={(event) => field.onChange(event.target.value)}
+                      onBlur={field.onBlur}
+                      name={field.name}
+                      ref={field.ref}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'A model that just failed is not re-tested until this much time has passed.'
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='monitor_setting.upstream_model_update_failure_threshold'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Failures Before Removal')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={1}
+                      disabled={!autoUpdateEnabled}
+                      className='w-24'
+                      value={
+                        field.value === undefined || field.value === null
+                          ? ''
+                          : String(field.value)
+                      }
+                      onChange={(event) => field.onChange(event.target.value)}
+                      onBlur={field.onBlur}
+                      name={field.name}
+                      ref={field.ref}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Consecutive channel-fault failures required before a model is removed.'
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='monitor_setting.upstream_model_update_rotation_sample_size'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Rotating Sample Size Per Channel')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={0}
+                      disabled={!autoUpdateEnabled}
+                      className='w-24'
+                      value={
+                        field.value === undefined || field.value === null
+                          ? ''
+                          : String(field.value)
+                      }
+                      onChange={(event) => field.onChange(event.target.value)}
+                      onBlur={field.onBlur}
+                      name={field.name}
+                      ref={field.ref}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'How many already-serving models each run spot-checks per channel. The cursor advances every run so all models are eventually covered. Set to 0 to disable spot checks.'
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='monitor_setting.upstream_model_update_max_validations_per_run'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Max Validation Requests Per Run')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={1}
+                      disabled={!autoUpdateEnabled}
+                      className='w-24'
+                      value={
+                        field.value === undefined || field.value === null
+                          ? ''
+                          : String(field.value)
+                      }
+                      onChange={(event) => field.onChange(event.target.value)}
+                      onBlur={field.onBlur}
+                      name={field.name}
+                      ref={field.ref}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Each validation request consumes quota from the root user and writes one usage log entry, so this budget is shared across all channels in a run.'
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='monitor_setting.channel_test_prompts'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Channel Test Prompts')}</FormLabel>
+                  <FormControl>
+                    <Textarea
+                      rows={6}
+                      placeholder={`${t('Example:')}\n${channelTestPromptsExample}`}
+                      {...field}
+                      onChange={(event) => field.onChange(event.target.value)}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'A prompt is picked at random for each test request. Leave empty to use the built-in pool. Realistic prompts avoid being flagged as bot probing the way a fixed "hi" is.'
+                    )}
+                  </FormDescription>
+                  <div className='flex flex-wrap gap-2'>
+                    <Button
+                      type='button'
+                      variant='outline'
+                      size='sm'
+                      onClick={() =>
+                        form.setValue(
+                          'monitor_setting.channel_test_prompts',
+                          channelTestPromptsExample,
+                          { shouldDirty: true }
+                        )
+                      }
+                    >
+                      {t('Fill built-in examples')}
+                    </Button>
+                    <Button
+                      type='button'
+                      variant='outline'
+                      size='sm'
+                      onClick={() =>
+                        formatJsonField('monitor_setting.channel_test_prompts')
+                      }
+                    >
+                      {t('Format JSON')}
+                    </Button>
+                  </div>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='monitor_setting.channel_test_client_headers'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Channel Test Client Headers')}</FormLabel>
+                  <div className='mb-2 flex flex-wrap items-center gap-2'>
+                    <Select
+                      items={presetSelectItems}
+                      value={selectedPreset}
+                      onValueChange={applyHeaderPreset}
+                    >
+                      <SelectTrigger className='w-[420px] max-w-full min-w-0'>
+                        <SelectValue
+                          className='min-w-0 truncate'
+                          placeholder={t('Choose a client preset…')}
+                        />
+                      </SelectTrigger>
+                      <SelectContent
+                        alignItemWithTrigger={false}
+                        className='w-[420px] max-w-[calc(100vw-2rem)]'
+                      >
+                        <SelectGroup>
+                          {presetSelectItems.map((option) => (
+                            <SelectItem
+                              key={option.value}
+                              value={option.value}
+                              className='items-start py-2'
+                            >
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <FormControl>
+                    <Textarea
+                      rows={10}
+                      placeholder={`${t('Example:')}\n${channelTestClientHeadersExample}`}
+                      {...field}
+                      onChange={(event) => field.onChange(event.target.value)}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Headers sent with channel test requests, so upstreams that only accept a real client (Claude Code, an official SDK) do not reject the test. Grouped by client family: claude / openai / codex / gemini / generic, plus "*" for all. An empty value removes a built-in header. Built-in versions go stale — pick a preset above, then edit.'
+                    )}
+                  </FormDescription>
+                  <div className='flex flex-wrap gap-2'>
+                    <Button
+                      type='button'
+                      variant='outline'
+                      size='sm'
+                      onClick={() =>
+                        formatJsonField(
+                          'monitor_setting.channel_test_client_headers'
+                        )
+                      }
+                    >
+                      {t('Format JSON')}
+                    </Button>
+                    <Button
+                      type='button'
+                      variant='outline'
+                      size='sm'
+                      onClick={() => {
+                        form.setValue(
+                          'monitor_setting.channel_test_client_headers',
+                          '{}',
+                          { shouldDirty: true }
+                        )
+                        setSelectedPreset('')
+                      }}
+                    >
+                      {t('Reset to built-in')}
+                    </Button>
+                  </div>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <div className='flex flex-wrap gap-2'>
+              <Button
+                type='button'
+                variant='outline'
+                size='sm'
+                disabled={runningUpdate}
+                onClick={runUpstreamUpdateNow}
+              >
+                {t('Run model update now')}
+              </Button>
+            </div>
+            <FormDescription>
+              {t(
+                'Runs one update cycle immediately using the saved settings. Save your changes first.'
+              )}
+            </FormDescription>
+          </div>
         </SettingsForm>
       </Form>
     </SettingsSection>

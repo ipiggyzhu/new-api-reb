@@ -164,33 +164,40 @@ export function DeploymentsTable() {
     }
   }
 
-  const columns = useDeploymentsColumns({
-    onViewLogs: (id) => {
-      setLogsDeploymentId(id)
-      setLogsOpen(true)
-    },
-    onViewDetails: (id) => {
-      setDetailsDeploymentId(id)
-      setDetailsOpen(true)
-    },
-    onUpdateConfig: (id) => {
-      setUpdateDeploymentId(id)
-      setUpdateOpen(true)
-    },
-    onExtend: (id) => {
-      setExtendDeploymentId(id)
-      setExtendOpen(true)
-    },
-    onRename: (id, currentName) => {
-      setRenameCurrentName(currentName)
-      setRenameDeploymentId(id)
-      setRenameOpen(true)
-    },
-    onDelete: (deployment) => {
-      setDeleteTarget(deployment)
-      setDeleteOpen(true)
-    },
-  })
+  // These are memoized because useDeploymentsColumns keys its column memo on
+  // them; inline arrows would hand it a new identity on every render and the
+  // memo would never hit.
+  const columnActions = useMemo(
+    () => ({
+      onViewLogs: (id: string | number) => {
+        setLogsDeploymentId(id)
+        setLogsOpen(true)
+      },
+      onViewDetails: (id: string | number) => {
+        setDetailsDeploymentId(id)
+        setDetailsOpen(true)
+      },
+      onUpdateConfig: (id: string | number) => {
+        setUpdateDeploymentId(id)
+        setUpdateOpen(true)
+      },
+      onExtend: (id: string | number) => {
+        setExtendDeploymentId(id)
+        setExtendOpen(true)
+      },
+      onRename: (id: string | number, currentName: string) => {
+        setRenameCurrentName(currentName)
+        setRenameDeploymentId(id)
+        setRenameOpen(true)
+      },
+      onDelete: (deployment: Deployment) => {
+        setDeleteTarget(deployment)
+        setDeleteOpen(true)
+      },
+    }),
+    []
+  )
+  const columns = useDeploymentsColumns(columnActions)
 
   const { table } = useDataTable({
     data: deployments,

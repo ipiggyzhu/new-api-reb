@@ -211,6 +211,41 @@ func TestStreamScannerHandler_DataWithExtraSpaces(t *testing.T) {
 	assert.Equal(t, "{\"trimmed\":true}", got)
 }
 
+// A terminator sent without the "data:" prefix is off-spec but real upstreams
+// emit it. It used to be sliced five bytes short and the leftover "]" was
+// handed to the adaptor as a chunk, so the caller saw a malformed event and the
+// stream was recorded as EOF instead of a clean finish.
+func TestStreamScannerHandler_BareDoneTerminatesWithoutEmittingGarbage(t *testing.T) {
+	t.Parallel()
+
+	body := "data: {\"a\":1}\n[DONE]\ndata: {\"never\":\"delivered\"}\n"
+	c, resp, info := setupStreamTest(t, strings.NewReader(body))
+
+	var got []string
+	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+		got = append(got, data)
+	})
+
+	assert.Equal(t, []string{`{"a":1}`}, got)
+	assert.Contains(t, info.StreamStatus.Summary(), "done")
+}
+
+// Short lines must be skipped rather than sliced. "data:" alone carries no
+// payload, and neither does a truncated terminator.
+func TestStreamScannerHandler_SkipsShortAndEmptyDataLines(t *testing.T) {
+	t.Parallel()
+
+	body := "data:\n[DONE\nx\ndata: {\"a\":1}\ndata: [DONE]\n"
+	c, resp, info := setupStreamTest(t, strings.NewReader(body))
+
+	var got []string
+	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+		got = append(got, data)
+	})
+
+	assert.Equal(t, []string{`{"a":1}`}, got)
+}
+
 // TestStreamScannerHandler_ClientCancelAbortsUpstreamAndReturns pins the
 // disconnect contract: when the client goes away, the handler must return
 // promptly (all goroutines joined, so the gin.Context can never leak into a
@@ -281,6 +316,51 @@ func TestStreamScannerHandler_ClientCancelAbortsUpstreamAndReturns(t *testing.T)
 	body := recorder.Body.String()
 	assert.Contains(t, body, "first")
 	assert.NotContains(t, body, "second")
+}
+
+// ---------- Write deadline hygiene ----------
+
+// deadlineRecordingWriter stands in for the client connection: gin's
+// responseWriter has Unwrap, so http.NewResponseController resolves
+// SetWriteDeadline against this writer exactly as it would against net.Conn.
+type deadlineRecordingWriter struct {
+	*httptest.ResponseRecorder
+	mu        sync.Mutex
+	deadlines []time.Time
+}
+
+func (w *deadlineRecordingWriter) SetWriteDeadline(t time.Time) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.deadlines = append(w.deadlines, t)
+	return nil
+}
+
+// The server runs with WriteTimeout=0, so net/http never resets a
+// connection's write deadline between keep-alive requests. If the handler
+// returns with the per-write deadline still armed, the next request on the
+// same connection hits an expired deadline and its response write fails.
+func TestStreamScannerHandler_ClearsWriteDeadlineOnFinish(t *testing.T) {
+	t.Parallel()
+
+	w := &deadlineRecordingWriter{ResponseRecorder: httptest.NewRecorder()}
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader(buildSSEBody(3)))}
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
+
+	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+		_ = StringData(c, data)
+	})
+
+	w.mu.Lock()
+	deadlines := append([]time.Time(nil), w.deadlines...)
+	w.mu.Unlock()
+
+	require.NotEmpty(t, deadlines, "stream writes must arm a write deadline")
+	assert.False(t, deadlines[0].IsZero(), "writes during the stream must push the deadline forward")
+	assert.True(t, deadlines[len(deadlines)-1].IsZero(), "deadline must be cleared when the stream ends")
 }
 
 // ---------- Ping tests ----------

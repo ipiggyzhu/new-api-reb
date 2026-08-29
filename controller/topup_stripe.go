@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
 	"github.com/stripe/stripe-go/v81"
 	"github.com/stripe/stripe-go/v81/checkout/session"
 	"github.com/stripe/stripe-go/v81/webhook"
@@ -47,18 +48,25 @@ func (*StripeAdaptor) RequestAmount(c *gin.Context, req *StripePayRequest) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": fmt.Sprintf("充值数量不能小于 %d", getStripeMinTopup())})
 		return
 	}
+	// Same upper bound RequestPay enforces: this quote path also feeds req.Amount
+	// into the topup plan's ratio math, so an unbounded amount must be rejected
+	// here too rather than producing a nonsense price.
+	if maxTopup := getStripeMaxTopup(); req.Amount > maxTopup {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": fmt.Sprintf("充值数量不能大于 %d", maxTopup)})
+		return
+	}
 	id := c.GetInt("id")
 	group, err := model.GetUserGroup(id, true)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "获取用户分组失败"})
 		return
 	}
-	payMoney := getStripePayMoney(float64(req.Amount), group)
-	if payMoney <= 0.01 {
+	plan, err := getStripeTopupPlan(req.Amount, group)
+	if err != nil || plan.payMoney <= 0.01 {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值金额过低"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "success", "data": strconv.FormatFloat(payMoney, 'f', 2, 64)})
+	c.JSON(http.StatusOK, gin.H{"message": "success", "data": strconv.FormatFloat(plan.payMoney, 'f', 2, 64)})
 }
 
 func (*StripeAdaptor) RequestPay(c *gin.Context, req *StripePayRequest) {
@@ -70,8 +78,8 @@ func (*StripeAdaptor) RequestPay(c *gin.Context, req *StripePayRequest) {
 		c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("充值数量不能小于 %d", getStripeMinTopup()), "data": 10})
 		return
 	}
-	if req.Amount > 10000 {
-		c.JSON(http.StatusOK, gin.H{"message": "充值数量不能大于 10000", "data": 10})
+	if maxTopup := getStripeMaxTopup(); req.Amount > maxTopup {
+		c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("充值数量不能大于 %d", maxTopup), "data": 10})
 		return
 	}
 
@@ -86,23 +94,31 @@ func (*StripeAdaptor) RequestPay(c *gin.Context, req *StripePayRequest) {
 	}
 
 	id := c.GetInt("id")
-	user, _ := model.GetUserById(id, false)
-	chargedMoney := GetChargedAmount(float64(req.Amount), *user)
+	user, err := model.GetUserById(id, false)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "获取用户信息失败"})
+		return
+	}
+	plan, err := getStripeTopupPlan(req.Amount, user.Group)
+	if err != nil || plan.payMoney <= 0.01 {
+		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "充值金额过低"})
+		return
+	}
 
 	reference := fmt.Sprintf("new-api-ref-%d-%d-%s", user.Id, time.Now().UnixMilli(), randstr.String(4))
 	referenceId := "ref_" + common.Sha1([]byte(reference))
 
-	payLink, err := genStripeLink(referenceId, user.StripeCustomer, user.Email, req.Amount, req.SuccessURL, req.CancelURL)
+	payLink, err := genStripeLink(referenceId, user.StripeCustomer, user.Email, plan.quantity, req.SuccessURL, req.CancelURL)
 	if err != nil {
-		logger.LogError(c.Request.Context(), fmt.Sprintf("Stripe 创建 Checkout Session 失败 user_id=%d trade_no=%s amount=%d error=%q", id, referenceId, req.Amount, err.Error()))
+		logger.LogError(c.Request.Context(), fmt.Sprintf("Stripe 创建 Checkout Session 失败 user_id=%d trade_no=%s amount=%d quantity=%d error=%q", id, referenceId, req.Amount, plan.quantity, err.Error()))
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "拉起支付失败"})
 		return
 	}
 
 	topUp := &model.TopUp{
 		UserId:          id,
-		Amount:          req.Amount,
-		Money:           chargedMoney,
+		Amount:          plan.creditAmount,
+		Money:           plan.creditUnits,
 		TradeNo:         referenceId,
 		PaymentMethod:   model.PaymentMethodStripe,
 		PaymentProvider: model.PaymentProviderStripe,
@@ -115,7 +131,7 @@ func (*StripeAdaptor) RequestPay(c *gin.Context, req *StripePayRequest) {
 		c.JSON(http.StatusOK, gin.H{"message": "error", "data": "创建订单失败"})
 		return
 	}
-	logger.LogInfo(c.Request.Context(), fmt.Sprintf("Stripe 充值订单创建成功 user_id=%d trade_no=%s amount=%d money=%.2f", id, referenceId, req.Amount, chargedMoney))
+	logger.LogInfo(c.Request.Context(), fmt.Sprintf("Stripe 充值订单创建成功 user_id=%d trade_no=%s amount=%d quantity=%d pay_money=%.2f credit_units=%.6f", id, referenceId, req.Amount, plan.quantity, plan.payMoney, plan.creditUnits))
 	c.JSON(http.StatusOK, gin.H{
 		"message": "success",
 		"data": gin.H{
@@ -385,34 +401,63 @@ func genStripeLink(referenceId string, customerId string, email string, amount i
 	return result.URL, nil
 }
 
-func GetChargedAmount(count float64, user model.User) float64 {
-	topUpGroupRatio := common.GetTopupGroupRatio(user.Group)
-	if topUpGroupRatio == 0 {
-		topUpGroupRatio = 1
-	}
-
-	return count * topUpGroupRatio
+// stripeTopupPlan is the single pricing calculation behind the Stripe amount
+// quote and the checkout session, so the quoted price, the amount Stripe
+// charges and the quota credited on webhook cannot diverge.
+type stripeTopupPlan struct {
+	// quantity is the checkout line-item count at the fixed StripePriceId
+	// unit price. The topup group ratio and preset discount scale it, so they
+	// scale the price actually paid — same semantics as the epay path.
+	quantity int64
+	// payMoney is quantity * StripeUnitPrice: the quoted charge, exact as
+	// long as StripeUnitPrice mirrors the StripePriceId unit amount.
+	payMoney float64
+	// creditUnits is quantity with the ratio/discount divided back out — the
+	// USD units to credit. model.Recharge and model.ManualCompleteTopUp add
+	// Money * QuotaPerUnit for Stripe orders, so TopUp.Money stores this.
+	creditUnits float64
+	// creditAmount is creditUnits truncated for the integer TopUp.Amount
+	// column, mirroring the epay path's truncation.
+	creditAmount int64
 }
 
-func getStripePayMoney(amount float64, group string) float64 {
-	originalAmount := amount
+func getStripeTopupPlan(displayAmount int64, group string) (stripeTopupPlan, error) {
+	dBase := decimal.NewFromInt(displayAmount)
 	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
-		amount = amount / common.QuotaPerUnit
+		dBase = dBase.Div(decimal.NewFromFloat(common.QuotaPerUnit))
 	}
-	// Using float64 for monetary calculations is acceptable here due to the small amounts involved
+
 	topupGroupRatio := common.GetTopupGroupRatio(group)
 	if topupGroupRatio == 0 {
 		topupGroupRatio = 1
 	}
 	// apply optional preset discount by the original request amount (if configured), default 1.0
 	discount := 1.0
-	if ds, ok := operation_setting.GetPaymentSetting().AmountDiscount[int(originalAmount)]; ok {
-		if ds > 0 {
-			discount = ds
-		}
+	if ds, ok := operation_setting.GetPaymentSetting().AmountDiscount[int(displayAmount)]; ok && ds > 0 {
+		discount = ds
 	}
-	payMoney := amount * setting.StripeUnitPrice * topupGroupRatio * discount
-	return payMoney
+	dScale := decimal.NewFromFloat(topupGroupRatio).Mul(decimal.NewFromFloat(discount))
+	if dBase.Sign() <= 0 || dScale.Sign() <= 0 {
+		return stripeTopupPlan{}, errors.New("无效的充值数量")
+	}
+
+	// Stripe checkout can only charge integer multiples of the fixed price,
+	// so the scaled quantity is rounded half away from zero and the credit is
+	// derived back from that same integer, keeping money collected and quota
+	// credited exactly proportional.
+	quantity := dBase.Mul(dScale).Round(0).IntPart()
+	if quantity < 1 {
+		return stripeTopupPlan{}, errors.New("充值金额过低")
+	}
+
+	dQuantity := decimal.NewFromInt(quantity)
+	dCredit := dQuantity.Div(dScale)
+	return stripeTopupPlan{
+		quantity:     quantity,
+		payMoney:     dQuantity.Mul(decimal.NewFromFloat(setting.StripeUnitPrice)).InexactFloat64(),
+		creditUnits:  dCredit.InexactFloat64(),
+		creditAmount: dCredit.IntPart(),
+	}, nil
 }
 
 func getStripeMinTopup() int64 {
@@ -421,4 +466,15 @@ func getStripeMinTopup() int64 {
 		minTopup = minTopup * int(common.QuotaPerUnit)
 	}
 	return int64(minTopup)
+}
+
+// getStripeMaxTopup returns the per-checkout cap of 10000 USD units expressed
+// in the active quota display unit, so the bound tracks the same unit as
+// req.Amount and getStripeMinTopup.
+func getStripeMaxTopup() int64 {
+	maxTopup := int64(10000)
+	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
+		maxTopup = decimal.NewFromInt(maxTopup).Mul(decimal.NewFromFloat(common.QuotaPerUnit)).IntPart()
+	}
+	return maxTopup
 }

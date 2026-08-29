@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
@@ -157,7 +158,12 @@ type SubscriptionPlan struct {
 	DurationValue int    `json:"duration_value" gorm:"type:int;not null;default:1"`
 	CustomSeconds int64  `json:"custom_seconds" gorm:"type:bigint;not null;default:0"`
 
-	Enabled   bool `json:"enabled" gorm:"default:true"`
+	// Enabled deliberately carries no `default:true` tag: MySQL and PostgreSQL
+	// normalize boolean defaults differently, which makes AutoMigrate reissue
+	// ALTER TABLE on every restart. A DB-side default also makes an explicitly
+	// disabled plan unsavable, because GORM omits the false zero value on insert
+	// and the database substitutes true. Callers set this field explicitly.
+	Enabled   bool `json:"enabled"`
 	SortOrder int  `json:"sort_order" gorm:"type:int;default:0"`
 
 	AllowBalancePay *bool `json:"allow_balance_pay"`
@@ -717,6 +723,9 @@ func AdminBindSubscription(userId int, planId int, sourceNote string) (string, e
 }
 
 func calcSubscriptionBalanceQuota(priceAmount float64) (int, error) {
+	if math.IsNaN(priceAmount) || math.IsInf(priceAmount, 0) {
+		return 0, errors.New("subscription price is not finite")
+	}
 	if priceAmount <= 0 {
 		return 0, nil
 	}
@@ -725,9 +734,12 @@ func calcSubscriptionBalanceQuota(priceAmount float64) (int, error) {
 	}
 	quota := decimal.NewFromFloat(priceAmount).
 		Mul(decimal.NewFromFloat(common.QuotaPerUnit)).
-		Ceil().
-		IntPart()
-	return int(quota), nil
+		Ceil()
+	converted, clamp := common.QuotaFromDecimalChecked(quota)
+	if clamp != nil {
+		return 0, fmt.Errorf("subscription price quota is out of range: %w", clamp)
+	}
+	return converted, nil
 }
 
 // PurchaseSubscriptionWithBalance creates a subscription by deducting the user's wallet quota.
@@ -1391,7 +1403,7 @@ func RefundSubscriptionPreConsume(requestId string) error {
 			record.Status = "refunded"
 			return tx.Save(&record).Error
 		}
-		if err := PostConsumeUserSubscriptionDelta(record.UserSubscriptionId, -record.PreConsumed); err != nil {
+		if err := postConsumeUserSubscriptionDeltaTx(tx, record.UserSubscriptionId, -record.PreConsumed); err != nil {
 			return err
 		}
 		record.Status = "refunded"
@@ -1490,20 +1502,30 @@ func PostConsumeUserSubscriptionDelta(userSubscriptionId int, delta int64) error
 		return nil
 	}
 	return DB.Transaction(func(tx *gorm.DB) error {
-		var sub UserSubscription
-		if err := lockForUpdate(tx).
-			Where("id = ?", userSubscriptionId).
-			First(&sub).Error; err != nil {
-			return err
-		}
-		newUsed := sub.AmountUsed + delta
-		if newUsed < 0 {
-			newUsed = 0
-		}
-		if sub.AmountTotal > 0 && newUsed > sub.AmountTotal {
-			return fmt.Errorf("subscription used exceeds total, used=%d total=%d", newUsed, sub.AmountTotal)
-		}
-		sub.AmountUsed = newUsed
-		return tx.Save(&sub).Error
+		return postConsumeUserSubscriptionDeltaTx(tx, userSubscriptionId, delta)
 	})
+}
+
+// postConsumeUserSubscriptionDeltaTx applies the delta on the caller's tx.
+// Callers already inside DB.Transaction must use this instead of
+// PostConsumeUserSubscriptionDelta: a nested top-level transaction runs on a
+// second pooled connection, which on SQLite (_txlock=immediate) blocks on the
+// outer write lock until busy_timeout, and elsewhere commits independently of
+// the outer tx.
+func postConsumeUserSubscriptionDeltaTx(tx *gorm.DB, userSubscriptionId int, delta int64) error {
+	var sub UserSubscription
+	if err := lockForUpdate(tx).
+		Where("id = ?", userSubscriptionId).
+		First(&sub).Error; err != nil {
+		return err
+	}
+	newUsed := sub.AmountUsed + delta
+	if newUsed < 0 {
+		newUsed = 0
+	}
+	if sub.AmountTotal > 0 && newUsed > sub.AmountTotal {
+		return fmt.Errorf("subscription used exceeds total, used=%d total=%d", newUsed, sub.AmountTotal)
+	}
+	sub.AmountUsed = newUsed
+	return tx.Save(&sub).Error
 }

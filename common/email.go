@@ -10,12 +10,14 @@ import (
 	"time"
 )
 
-func generateMessageID() (string, error) {
-	split := strings.Split(SMTPFrom, "@")
+// generateMessageID takes the sender as an argument so the Message-ID domain
+// comes from the same sender snapshot the message is delivered with.
+func generateMessageID(from string) (string, error) {
+	split := strings.Split(from, "@")
 	if len(split) < 2 {
 		return "", fmt.Errorf("invalid SMTP account")
 	}
-	domain := strings.Split(SMTPFrom, "@")[1]
+	domain := split[1]
 	return fmt.Sprintf("<%d.%s@%s>", time.Now().UnixNano(), GetRandomString(12), domain), nil
 }
 
@@ -76,10 +78,14 @@ func newSMTPClient(addr string) (*smtp.Client, error) {
 }
 
 func SendEmail(subject string, receiver string, content string) error {
-	if SMTPFrom == "" { // for compatibility
-		SMTPFrom = SMTPAccount
+	// Snapshot the sender once: SMTPFrom is rewritten by the option map whenever an
+	// admin saves SMTP settings, and SendEmail runs on request handlers and notify
+	// goroutines, so reading the package variable repeatedly could mix two configs.
+	from := SMTPFrom
+	if from == "" { // for compatibility
+		from = SMTPAccount
 	}
-	id, err2 := generateMessageID()
+	id, err2 := generateMessageID(from)
 	if err2 != nil {
 		return err2
 	}
@@ -93,7 +99,7 @@ func SendEmail(subject string, receiver string, content string) error {
 		"Date: %s\r\n"+
 		"Message-ID: %s\r\n"+ // 添加 Message-ID 头
 		"Content-Type: text/html; charset=UTF-8\r\n\r\n%s\r\n",
-		receiver, SystemName, SMTPFrom, encodedSubject, time.Now().Format(time.RFC1123Z), id, content))
+		receiver, SystemName, from, encodedSubject, time.Now().Format(time.RFC1123Z), id, content))
 	auth := getSMTPAuth()
 	addr := fmt.Sprintf("%s:%d", SMTPServer, SMTPPort)
 	to := strings.Split(receiver, ";")
@@ -108,7 +114,7 @@ func SendEmail(subject string, receiver string, content string) error {
 			return err
 		}
 	}
-	if err = client.Mail(SMTPFrom); err != nil {
+	if err = client.Mail(from); err != nil {
 		return err
 	}
 	for _, receiver := range to {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -20,6 +21,11 @@ const (
 	systemTaskRunnerIdleInterval = 15 * time.Second
 	systemTaskLockTTL            = 60 * time.Second
 	logCleanupBatchSize          = 100
+	// logCleanupProgressBatches is how many delete batches run between progress
+	// writes. A 90-day purge on this deploy is ~8k batches; writing state per
+	// batch made the progress UPDATE as numerous as the DELETE itself on a single
+	// SQLite writer.
+	logCleanupProgressBatches = 20
 
 	// systemTaskSchedulerInterval throttles how often the scheduler/stale-lock
 	// pass runs, independent of how often the runner wakes to claim tasks.
@@ -136,6 +142,23 @@ func StartSystemTaskRunner() {
 			var lastScheduler time.Time
 			var lastStaleLockCleanup time.Time
 			runPass := func() {
+				// A panic here would otherwise end the runner goroutine for good:
+				// systemTaskRunnerOnce prevents a restart and there is no watchdog,
+				// so every background job — channel health tests, upstream model
+				// updates, midjourney/async polling, stale-lock expiry — would stop
+				// silently until the process restarts. Worse, a log cleanup enqueued
+				// afterwards stays 'pending' forever and GetActiveSystemTask keeps
+				// returning it, so the admin can never start another one.
+				//
+				// The panic vectors are not all inside handlers: Enabled() and
+				// Interval() run DB queries and read monitor settings in this
+				// goroutine, before any task is claimed.
+				defer func() {
+					if r := recover(); r != nil {
+						common.SysError(fmt.Sprintf("system task runner pass panic recovered: runner=%s panic=%v\n%s", runnerID, r, debug.Stack()))
+					}
+				}()
+
 				// The scheduler/stale-lock pass is throttled independently of the
 				// claim pass: wakeups (e.g. a manual log cleanup) should claim
 				// immediately without re-running the scheduler every time.
@@ -316,6 +339,11 @@ func runWithLeaseHeartbeat(task *model.SystemTask, runnerID string, fn func(ctx 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	done := make(chan struct{})
+	// Deferred, not a plain call after fn: a panic inside fn would otherwise skip
+	// the close and park the heartbeat goroutine forever on a select where neither
+	// case can fire — done never closes and a stopped ticker never ticks — pinning
+	// the task struct with it.
+	defer close(done)
 
 	go func() {
 		for {
@@ -332,7 +360,6 @@ func runWithLeaseHeartbeat(task *model.SystemTask, runnerID string, fn func(ctx 
 	}()
 
 	fn(ctx)
-	close(done)
 }
 
 func runLogCleanupTask(ctx context.Context, task *model.SystemTask, runnerID string) {
@@ -375,6 +402,14 @@ func runLogCleanupTask(ctx context.Context, task *model.SystemTask, runnerID str
 		// lock to expire. If a whole pass deletes nothing while rows remain, the
 		// rows cannot be removed and we fail instead of busy-looping.
 		progressed := false
+		// Progress is written every logCleanupProgressBatches batches rather than
+		// after every one. On a single-file SQLite deploy (LOG_SQL_DSN unset) the
+		// progress UPDATE lands on the same single writer as the DELETE, so writing
+		// per batch doubled the serialized write transactions a purge costs and
+		// stretched the window during which relay-completion writes queue behind
+		// it. Lease loss is still detected promptly: the heartbeat goroutine
+		// cancels ctx, and DeleteOldLogBatch honours it.
+		batchesSinceStateWrite := 0
 		for state.Remaining > 0 {
 			rowsAffected, err := model.DeleteOldLogBatch(ctx, payload.TargetTimestamp, payload.BatchSize)
 			if err != nil {
@@ -397,6 +432,11 @@ func runLogCleanupTask(ctx context.Context, task *model.SystemTask, runnerID str
 			}
 			state.Progress = logCleanupProgress(state.Processed, state.Total)
 
+			batchesSinceStateWrite++
+			if batchesSinceStateWrite < logCleanupProgressBatches {
+				continue
+			}
+			batchesSinceStateWrite = 0
 			if err := model.UpdateSystemTaskState(task.TaskID, runnerID, state); err != nil {
 				logSystemTaskLockError(ctx, task, err)
 				return
@@ -406,6 +446,14 @@ func runLogCleanupTask(ctx context.Context, task *model.SystemTask, runnerID str
 		if !progressed {
 			failSystemTask(task, runnerID, errors.New("no log rows were deleted"))
 			return
+		}
+		if batchesSinceStateWrite > 0 {
+			// Publish whatever the tail batches accumulated, so the recount at the
+			// top of the outer loop is not the first thing the admin sees move.
+			if err := model.UpdateSystemTaskState(task.TaskID, runnerID, state); err != nil {
+				logSystemTaskLockError(ctx, task, err)
+				return
+			}
 		}
 	}
 

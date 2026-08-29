@@ -287,11 +287,11 @@ func aliImageHandler(a *Adaptor, c *gin.Context, resp *http.Response, info *rela
 	responseFormat := c.GetString("response_format")
 
 	var aliTaskResponse AliResponse
+	defer service.CloseResponseBodyGracefully(resp)
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError), nil
 	}
-	service.CloseResponseBodyGracefully(resp)
 	err = common.Unmarshal(responseBody, &aliTaskResponse)
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError), nil
@@ -322,7 +322,7 @@ func aliImageHandler(a *Adaptor, c *gin.Context, resp *http.Response, info *rela
 				Type:    "ali_error",
 				Param:   "",
 				Code:    aliResponse.Output.Code,
-			}, resp.StatusCode), nil
+			}, aliInBandErrorStatusCode(aliResponse.Output.Code, resp.StatusCode)), nil
 		}
 	}
 

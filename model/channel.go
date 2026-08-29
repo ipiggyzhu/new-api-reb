@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/pkg/channel_score"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/samber/lo"
@@ -43,13 +44,19 @@ type Channel struct {
 	//MaxInputTokens     *int    `json:"max_input_tokens" gorm:"default:0"`
 	StatusCodeMapping *string `json:"status_code_mapping" gorm:"type:varchar(1024);default:''"`
 	Priority          *int64  `json:"priority" gorm:"bigint;default:0"`
-	AutoBan           *int    `json:"auto_ban" gorm:"default:1"`
-	OtherInfo         string  `json:"other_info"`
-	Tag               *string `json:"tag" gorm:"index"`
-	Setting           *string `json:"setting" gorm:"type:text"` // 渠道额外设置
-	ParamOverride     *string `json:"param_override" gorm:"type:text"`
-	HeaderOverride    *string `json:"header_override" gorm:"type:text"`
-	Remark            *string `json:"remark" gorm:"type:varchar(255)" validate:"max=255"`
+	// MaxConcurrency caps how many relay requests this channel may serve at once,
+	// 0 meaning unlimited. It sits next to Priority because it is read on the
+	// selection path for every request and is denormalized into abilities the same
+	// way, and because the two work together: a saturated channel is skipped and
+	// the request falls through to the next priority tier.
+	MaxConcurrency *int    `json:"max_concurrency" gorm:"default:0"`
+	AutoBan        *int    `json:"auto_ban" gorm:"default:1"`
+	OtherInfo      string  `json:"other_info"`
+	Tag            *string `json:"tag" gorm:"index"`
+	Setting        *string `json:"setting" gorm:"type:text"` // 渠道额外设置
+	ParamOverride  *string `json:"param_override" gorm:"type:text"`
+	HeaderOverride *string `json:"header_override" gorm:"type:text"`
+	Remark         *string `json:"remark" gorm:"type:varchar(255)" validate:"max=255"`
 	// add after v0.8.5
 	ChannelInfo ChannelInfo `json:"channel_info" gorm:"type:json"`
 
@@ -172,6 +179,51 @@ func (c *ChannelInfo) Scan(value interface{}) error {
 	return common.Unmarshal(bytesValue, c)
 }
 
+// clone returns a ChannelInfo that shares no maps with the receiver, so a
+// cached entry and a handed-out copy can be mutated independently.
+func (c ChannelInfo) clone() ChannelInfo {
+	cloned := c
+	if c.MultiKeyStatusList != nil {
+		cloned.MultiKeyStatusList = make(map[int]int, len(c.MultiKeyStatusList))
+		for index, status := range c.MultiKeyStatusList {
+			cloned.MultiKeyStatusList[index] = status
+		}
+	}
+	if c.MultiKeyDisabledReason != nil {
+		cloned.MultiKeyDisabledReason = make(map[int]string, len(c.MultiKeyDisabledReason))
+		for index, reason := range c.MultiKeyDisabledReason {
+			cloned.MultiKeyDisabledReason[index] = reason
+		}
+	}
+	if c.MultiKeyDisabledTime != nil {
+		cloned.MultiKeyDisabledTime = make(map[int]int64, len(c.MultiKeyDisabledTime))
+		for index, disabledAt := range c.MultiKeyDisabledTime {
+			cloned.MultiKeyDisabledTime[index] = disabledAt
+		}
+	}
+	return cloned
+}
+
+// CloneForCache returns a copy that shares no mutable state with the receiver.
+// The channel cache hands these out instead of the pointers it stores, which is
+// what lets a caller read (or locally modify) a channel without holding
+// channelSyncLock while the sync goroutine or the auto-ban path replaces the
+// cached entry. Only ChannelInfo's maps and the Keys slice need deep copies;
+// every other field is a value or an immutable string/pointer that is replaced
+// rather than mutated in place.
+func (channel *Channel) CloneForCache() *Channel {
+	if channel == nil {
+		return nil
+	}
+	cloned := *channel
+	cloned.ChannelInfo = channel.ChannelInfo.clone()
+	if channel.Keys != nil {
+		cloned.Keys = make([]string, len(channel.Keys))
+		copy(cloned.Keys, channel.Keys)
+	}
+	return &cloned
+}
+
 func (channel *Channel) GetKeys() []string {
 	if channel.Key == "" {
 		return []string{}
@@ -245,32 +297,34 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		selectedIdx := enabledIdx[rand.Intn(len(enabledIdx))]
 		return keys[selectedIdx], selectedIdx, nil
 	case constant.MultiKeyModePolling:
-		// Use channel-specific lock to ensure thread-safe polling
-
-		channelInfo, err := CacheGetChannelInfo(channel.Id)
-		if err != nil {
-			return "", 0, types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		// Where the cursor lives depends on the mode. With the memory cache on,
+		// `channel` is a private copy handed out by the cache, so an advance written
+		// to it would be dropped and polling would reuse one key forever; the
+		// process-wide store holds it instead. With the cache off this struct was
+		// just read from the database, so the persisted cursor stays authoritative
+		// and keeps rotating across instances. The polling lock taken above
+		// serializes the read-modify-write either way.
+		start := channel.ChannelInfo.MultiKeyPollingIndex
+		if common.MemoryCacheEnabled {
+			start = loadChannelPollingIndex(channel.Id, start)
 		}
-		defer func() {
-			if common.DebugEnabled {
-				logger.LogDebug(nil, "channel %d polling index: %d", channel.Id, channel.ChannelInfo.MultiKeyPollingIndex)
-			}
-			if !common.MemoryCacheEnabled {
-				_ = channel.SaveChannelInfo()
-			} else {
-				// CacheUpdateChannel(channel)
-			}
-		}()
-		// Start from the saved polling index and look for the next enabled key
-		start := channelInfo.MultiKeyPollingIndex
 		if start < 0 || start >= len(keys) {
 			start = 0
 		}
 		for i := 0; i < len(keys); i++ {
 			idx := (start + i) % len(keys)
 			if getStatus(idx) == common.ChannelStatusEnabled {
-				// update polling index for next call (point to the next position)
-				channel.ChannelInfo.MultiKeyPollingIndex = (idx + 1) % len(keys)
+				// point the cursor at the next position for the following call
+				nextIndex := (idx + 1) % len(keys)
+				channel.ChannelInfo.MultiKeyPollingIndex = nextIndex
+				if common.MemoryCacheEnabled {
+					storeChannelPollingIndex(channel.Id, nextIndex)
+				} else {
+					_ = channel.savePollingIndex()
+				}
+				if common.DebugEnabled {
+					logger.LogDebug(nil, "channel %d polling index: %d", channel.Id, nextIndex)
+				}
 				return keys[idx], idx, nil
 			}
 		}
@@ -284,6 +338,21 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 
 func (channel *Channel) SaveChannelInfo() error {
 	return DB.Model(channel).Update("channel_info", channel.ChannelInfo).Error
+}
+
+// savePollingIndex persists only MultiKeyPollingIndex, merged into the
+// channel_info currently in the database. Writing this struct's whole
+// channel_info would resurrect keys that a concurrent UpdateChannelStatus
+// disabled after this copy was loaded.
+func (channel *Channel) savePollingIndex() error {
+	return DB.Transaction(func(tx *gorm.DB) error {
+		var current Channel
+		if err := lockForUpdate(tx).Select("channel_info").First(&current, "id = ?", channel.Id).Error; err != nil {
+			return err
+		}
+		current.ChannelInfo.MultiKeyPollingIndex = channel.ChannelInfo.MultiKeyPollingIndex
+		return tx.Model(&Channel{Id: channel.Id}).Update("channel_info", current.ChannelInfo).Error
+	})
 }
 
 func (channel *Channel) GetModels() []string {
@@ -485,7 +554,27 @@ func (channel *Channel) GetWeight() int {
 	if channel.Weight == nil {
 		return 0
 	}
-	return int(*channel.Weight)
+	return saturatingUintToInt(*channel.Weight)
+}
+
+// saturatingUintToInt keeps unsigned database/JSON values safe when the
+// selector and random number generator convert them to int.
+func saturatingUintToInt(value uint) int {
+	maxInt := int(^uint(0) >> 1)
+	if value > uint(maxInt) {
+		return maxInt
+	}
+	return int(value)
+}
+
+// GetMaxConcurrency returns the channel's concurrency cap, 0 meaning unlimited.
+// A negative value stored by an older client is treated as unlimited rather than
+// as a cap that can never be satisfied.
+func (channel *Channel) GetMaxConcurrency() int {
+	if channel.MaxConcurrency == nil || *channel.MaxConcurrency < 0 {
+		return 0
+	}
+	return *channel.MaxConcurrency
 }
 
 func (channel *Channel) GetBaseURL() string {
@@ -567,6 +656,13 @@ func (channel *Channel) Update() error {
 	if err != nil {
 		return err
 	}
+	// An admin edit restates this channel's baseline. Whatever the dynamic score
+	// had learned was measured against the previous configuration, so it is
+	// dropped instead of being carried onto the new one: a priority the admin just
+	// raised has to take effect as written, not compete with an accumulated
+	// offset. This is the reset the "raised priority appears to do nothing"
+	// report needed.
+	channel_score.Reset(channel.Id)
 	DB.Model(channel).First(channel, "id = ?", channel.Id)
 	err = channel.UpdateAbilities(nil)
 	return err
@@ -618,6 +714,49 @@ func GetChannelPollingLock(channelId int) *sync.Mutex {
 	return actual.(*sync.Mutex)
 }
 
+// channelPollingIndex holds the live multi-key round-robin cursor per channel,
+// keyed by channel ID. The cursor cannot live on the cached *Channel: callers
+// receive private copies of that struct, so an advance written there would be
+// discarded and polling would hand out the same key forever. Keeping it here
+// also means a full cache rebuild no longer has to read the cursor back out of
+// the outgoing cache entry, which was a cross-lock read.
+//
+// Access is serialized by the per-channel lock from GetChannelPollingLock, the
+// same lock GetNextEnabledKey already holds around key selection.
+var (
+	channelPollingIndexMutex sync.Mutex
+	channelPollingIndex      = make(map[int]int)
+)
+
+// loadChannelPollingIndex returns the live cursor for a channel, seeding it from
+// the value persisted in channel_info the first time the channel is polled after
+// startup. Caller must hold the channel's polling lock.
+func loadChannelPollingIndex(channelId int, persisted int) int {
+	channelPollingIndexMutex.Lock()
+	defer channelPollingIndexMutex.Unlock()
+	if index, ok := channelPollingIndex[channelId]; ok {
+		return index
+	}
+	channelPollingIndex[channelId] = persisted
+	return persisted
+}
+
+// storeChannelPollingIndex records the next cursor position for a channel.
+// Caller must hold the channel's polling lock.
+func storeChannelPollingIndex(channelId int, index int) {
+	channelPollingIndexMutex.Lock()
+	defer channelPollingIndexMutex.Unlock()
+	channelPollingIndex[channelId] = index
+}
+
+// forgetChannelPollingIndex drops a channel's cursor, so a deleted channel does
+// not retain a map entry for the lifetime of the process.
+func forgetChannelPollingIndex(channelId int) {
+	channelPollingIndexMutex.Lock()
+	defer channelPollingIndexMutex.Unlock()
+	delete(channelPollingIndex, channelId)
+}
+
 // CleanupChannelPollingLocks removes locks for channels that no longer exist
 // This is optional and can be called periodically to prevent memory leaks
 func CleanupChannelPollingLocks() {
@@ -633,6 +772,7 @@ func CleanupChannelPollingLocks() {
 		channelId := key.(int)
 		if !activeChannelSet[channelId] {
 			channelPollingLocks.Delete(channelId)
+			forgetChannelPollingIndex(channelId)
 		}
 		return true
 	})
@@ -704,27 +844,39 @@ func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
 }
 
 func UpdateChannelStatus(channelId int, usingKey string, status int, reason string) bool {
+	// A status change makes everything learned about this channel stale: what was
+	// measured was a channel in a different state. This is the aggregation point
+	// for the automatic paths too — service.DisableChannel and EnableChannel both
+	// come through here — so hooking it covers auto-ban and auto-enable without a
+	// hook in each caller.
+	channel_score.Reset(channelId)
 	if common.MemoryCacheEnabled {
 		channelStatusLock.Lock()
 		defer channelStatusLock.Unlock()
 
+		// CacheGetChannel returns a private copy, so the mutation below cannot be
+		// observed by concurrent readers until it is published back into the cache.
 		channelCache, _ := CacheGetChannel(channelId)
 		if channelCache == nil {
 			return false
 		}
 		if channelCache.ChannelInfo.IsMultiKey {
-			// Use per-channel lock to prevent concurrent map read/write with GetNextEnabledKey
+			// Use per-channel lock to prevent two concurrent key-status updates for
+			// the same channel from each starting off the same copy and losing one
+			// of the two updates.
 			beforeStatus := channelCache.Status
 			pollingLock := GetChannelPollingLock(channelId)
 			pollingLock.Lock()
 			// 如果是多Key模式，更新缓存中的状态
 			handlerMultiKeyUpdate(channelCache, usingKey, status, reason)
 			pollingLock.Unlock()
+			// Publish the per-key status changes (MultiKeyStatusList and friends);
+			// without this the cached entry keeps serving keys this call just
+			// disabled until the next full sync.
+			cachePublishChannel(channelCache)
 			if beforeStatus != channelCache.Status {
 				CacheUpdateChannelStatus(channelId, channelCache.Status)
 			}
-			//CacheUpdateChannel(channelCache)
-			//return true
 		} else {
 			// 如果缓存渠道存在，且状态已是目标状态，直接返回
 			if channelCache.Status == status {
@@ -778,25 +930,43 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 	return true
 }
 
+// channelIdsByTag lists the channels a tag operation is about to rewrite. The
+// bulk tag statements below change status with a single UPDATE and never go
+// through UpdateChannelStatus, so the ids have to be collected here for the
+// dynamic-score reset; without it a bulk re-enable brings channels back carrying
+// the scores they earned before being disabled.
+func channelIdsByTag(tag string) []int {
+	var ids []int
+	if err := DB.Model(&Channel{}).Where("tag = ?", tag).Pluck("id", &ids).Error; err != nil {
+		common.SysError(fmt.Sprintf("failed to list channels for tag score reset: tag=%s, error=%v", tag, err))
+		return nil
+	}
+	return ids
+}
+
 func EnableChannelByTag(tag string) error {
+	affected := channelIdsByTag(tag)
 	err := DB.Model(&Channel{}).Where("tag = ?", tag).Update("status", common.ChannelStatusEnabled).Error
 	if err != nil {
 		return err
 	}
+	channel_score.ResetMany(affected)
 	err = UpdateAbilityStatusByTag(tag, true)
 	return err
 }
 
 func DisableChannelByTag(tag string) error {
+	affected := channelIdsByTag(tag)
 	err := DB.Model(&Channel{}).Where("tag = ?", tag).Update("status", common.ChannelStatusManuallyDisabled).Error
 	if err != nil {
 		return err
 	}
+	channel_score.ResetMany(affected)
 	err = UpdateAbilityStatusByTag(tag, false)
 	return err
 }
 
-func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *string, group *string, priority *int64, weight *uint, paramOverride *string, headerOverride *string) error {
+func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *string, group *string, priority *int64, weight *uint, maxConcurrency *int, paramOverride *string, headerOverride *string) error {
 	updateData := Channel{}
 	shouldReCreateAbilities := false
 	updatedTag := tag
@@ -822,6 +992,9 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 	if weight != nil {
 		updateData.Weight = weight
 	}
+	if maxConcurrency != nil {
+		updateData.MaxConcurrency = maxConcurrency
+	}
 	if paramOverride != nil {
 		updateData.ParamOverride = paramOverride
 	}
@@ -829,9 +1002,20 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 		updateData.HeaderOverride = headerOverride
 	}
 
+	// Collected before the UPDATE, because renaming the tag makes the old value
+	// stop matching any row.
+	scoreResetIds := channelIdsByTag(tag)
+
 	err := DB.Model(&Channel{}).Where("tag = ?", tag).Updates(updateData).Error
 	if err != nil {
 		return err
+	}
+	if priority != nil || weight != nil {
+		// The admin just restated the baseline for every channel under this tag.
+		// Learned offsets were relative to the old baseline, so they are discarded
+		// rather than stacked on the new one — otherwise raising a priority could
+		// look like it had no effect.
+		channel_score.ResetMany(scoreResetIds)
 	}
 	if shouldReCreateAbilities {
 		channels, err := GetChannelsByTag(updatedTag, false, false)
@@ -844,7 +1028,7 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 			}
 		}
 	} else {
-		err := UpdateAbilityByTag(tag, newTag, priority, weight)
+		err := UpdateAbilityByTag(tag, newTag, priority, weight, maxConcurrency)
 		if err != nil {
 			return err
 		}
@@ -857,14 +1041,16 @@ func UpdateChannelUsedQuota(id int, quota int) {
 		addNewRecord(BatchUpdateTypeChannelUsedQuota, id, quota)
 		return
 	}
-	updateChannelUsedQuota(id, quota)
-}
-
-func updateChannelUsedQuota(id int, quota int) {
-	err := DB.Model(&Channel{}).Where("id = ?", id).Update("used_quota", gorm.Expr("used_quota + ?", quota)).Error
-	if err != nil {
+	if err := updateChannelUsedQuota(DB, id, quota); err != nil {
 		common.SysLog(fmt.Sprintf("failed to update channel used quota: channel_id=%d, delta_quota=%d, error=%v", id, quota, err))
 	}
+}
+
+// updateChannelUsedQuota applies the delta with db, which is the global handle on
+// the direct path and the flush transaction when called from batchUpdate, so the
+// caller decides whether a failure is logged or aborts the batch.
+func updateChannelUsedQuota(db *gorm.DB, id int, quota int) error {
+	return db.Model(&Channel{}).Where("id = ?", id).Update("used_quota", gorm.Expr("used_quota + ?", quota)).Error
 }
 
 func DeleteChannelByStatus(status int64) (int64, error) {
@@ -965,16 +1151,22 @@ func (channel *Channel) ValidateSettings() error {
 	return nil
 }
 
+// GetSetting parses the channel settings JSON. It is a pure read: callers reach
+// it from request goroutines holding a shared cached *Channel, so repairing the
+// stored JSON here would race on the struct field and issue one full-row Save
+// per request for every request hitting a channel with corrupt settings. Corrupt
+// JSON degrades to zero-value settings; RepairCorruptSettings is the explicit
+// repair path.
 func (channel *Channel) GetSetting() dto.ChannelSettings {
 	setting := dto.ChannelSettings{}
 	if channel.Setting != nil && *channel.Setting != "" {
 		err := common.Unmarshal([]byte(*channel.Setting), &setting)
 		if err != nil {
 			common.SysLog(fmt.Sprintf("failed to unmarshal setting: channel_id=%d, error=%v", channel.Id, err))
-			channel.Setting = nil // 清空设置以避免后续错误
-			_ = channel.Save()    // 保存修改
+			setting = dto.ChannelSettings{}
 		}
 	}
+	setting.Normalize()
 	return setting
 }
 
@@ -987,17 +1179,49 @@ func (channel *Channel) SetSetting(setting dto.ChannelSettings) {
 	channel.Setting = common.GetPointer[string](string(settingBytes))
 }
 
+// GetOtherSettings parses the channel "settings" JSON. Pure read, for the same
+// reason as GetSetting: it runs on the request path against a shared cached
+// *Channel, so mutating and persisting here would both race on the struct and
+// storm the database. Corrupt JSON degrades to zero-value settings.
 func (channel *Channel) GetOtherSettings() dto.ChannelOtherSettings {
 	setting := dto.ChannelOtherSettings{}
 	if channel.OtherSettings != "" {
 		err := common.UnmarshalJsonStr(channel.OtherSettings, &setting)
 		if err != nil {
 			common.SysLog(fmt.Sprintf("failed to unmarshal setting: channel_id=%d, error=%v", channel.Id, err))
-			channel.OtherSettings = "{}" // 清空设置以避免后续错误
-			_ = channel.Save()           // 保存修改
+			setting = dto.ChannelOtherSettings{}
 		}
 	}
 	return setting
+}
+
+// RepairCorruptSettings resets any unparsable settings JSON on this channel and
+// persists the result. This is the explicit replacement for the repair that used
+// to hide inside GetSetting/GetOtherSettings; call it from admin maintenance
+// paths, never from the request path. Reports whether anything was rewritten.
+func (channel *Channel) RepairCorruptSettings() (bool, error) {
+	repaired := false
+	if channel.Setting != nil && *channel.Setting != "" {
+		probe := dto.ChannelSettings{}
+		if err := common.Unmarshal([]byte(*channel.Setting), &probe); err != nil {
+			channel.Setting = nil
+			repaired = true
+		}
+	}
+	if channel.OtherSettings != "" {
+		probe := dto.ChannelOtherSettings{}
+		if err := common.UnmarshalJsonStr(channel.OtherSettings, &probe); err != nil {
+			channel.OtherSettings = "{}"
+			repaired = true
+		}
+	}
+	if !repaired {
+		return false, nil
+	}
+	if err := channel.Save(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (channel *Channel) SetOtherSettings(setting dto.ChannelOtherSettings) {

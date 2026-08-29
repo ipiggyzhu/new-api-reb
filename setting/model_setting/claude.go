@@ -39,12 +39,21 @@ func init() {
 	config.GlobalConfig.Register("claude", &claudeSettings)
 }
 
+// defaultClaudeMaxTokens is the fallback used when neither the requested model
+// nor a "default" entry is configured.
+const defaultClaudeMaxTokens = 8192
+
 // GetClaudeSettings 获取Claude配置
+//
+// This is a pure read. It must not lazily backfill DefaultMaxTokens: the getter
+// runs on the relay hot path from several goroutines at once, while an admin
+// saving claude settings replaces the whole map under OptionMapRWMutex. A write
+// here would be an unsynchronised map write racing both the other readers and
+// that replacement, which Go reports as an unrecoverable
+// "concurrent map writes" fatal error — middleware/recover.go cannot catch it,
+// so the single container would die with every in-flight request. The missing
+// "default" key is handled by GetDefaultMaxTokens falling back to a constant.
 func GetClaudeSettings() *ClaudeSettings {
-	// check default max tokens must have default key
-	if _, ok := claudeSettings.DefaultMaxTokens["default"]; !ok {
-		claudeSettings.DefaultMaxTokens["default"] = 8192
-	}
 	return &claudeSettings
 }
 
@@ -85,5 +94,8 @@ func (c *ClaudeSettings) GetDefaultMaxTokens(model string) int {
 	if maxTokens, ok := c.DefaultMaxTokens[model]; ok {
 		return maxTokens
 	}
-	return c.DefaultMaxTokens["default"]
+	if maxTokens, ok := c.DefaultMaxTokens["default"]; ok {
+		return maxTokens
+	}
+	return defaultClaudeMaxTokens
 }

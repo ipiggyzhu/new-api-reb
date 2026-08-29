@@ -307,7 +307,6 @@ func OpenAIChatRequestToGeminiGenerateContent(c *gin.Context, textRequest dto.Ge
 					continue
 				}
 				text := part.Text
-				hasMarkdownImage := false
 				for {
 					startIdx := strings.Index(text, "![")
 					if startIdx == -1 {
@@ -324,7 +323,6 @@ func OpenAIChatRequestToGeminiGenerateContent(c *gin.Context, textRequest dto.Ge
 					}
 					closeIdx += bracketIdx + 2
 
-					hasMarkdownImage = true
 					if startIdx > 0 {
 						textBefore := text[:startIdx]
 						if textBefore != "" {
@@ -351,9 +349,11 @@ func OpenAIChatRequestToGeminiGenerateContent(c *gin.Context, textRequest dto.Ge
 					parts = append(parts, imgPart)
 					text = text[closeIdx+1:]
 				}
-				if !hasMarkdownImage {
+				// text now holds everything after the last extracted image (or the
+				// whole part when no image matched); it must not be dropped.
+				if text != "" {
 					parts = append(parts, dto.GeminiPart{
-						Text: part.Text,
+						Text: text,
 					})
 				}
 			} else {

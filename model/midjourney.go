@@ -195,6 +195,10 @@ func MjBulkUpdateByTaskIds(taskIDs []int, params map[string]any) error {
 		Updates(params).Error
 }
 
+// midjourneyCountHardLimit 统计 midjourney 任务总数时 COUNT 的安全上限，
+// 防止对超大 midjourneys 表执行无界 COUNT 触发 DoS。
+const midjourneyCountHardLimit = 10000
+
 // CountAllTasks returns total midjourney tasks for admin query
 func CountAllTasks(queryParams TaskQueryParams) int64 {
 	var total int64
@@ -211,7 +215,7 @@ func CountAllTasks(queryParams TaskQueryParams) int64 {
 	if queryParams.EndTimestamp != "" {
 		query = query.Where("submit_time <= ?", queryParams.EndTimestamp)
 	}
-	_ = query.Count(&total).Error
+	_ = countUpTo(query, midjourneyCountHardLimit, &total)
 	return total
 }
 
@@ -228,6 +232,6 @@ func CountAllUserTask(userId int, queryParams TaskQueryParams) int64 {
 	if queryParams.EndTimestamp != "" {
 		query = query.Where("submit_time <= ?", queryParams.EndTimestamp)
 	}
-	_ = query.Count(&total).Error
+	_ = countUpTo(query, midjourneyCountHardLimit, &total)
 	return total
 }

@@ -1,9 +1,7 @@
 package model
 
 import (
-	"errors"
 	"fmt"
-	"math/rand"
 	"sort"
 	"strings"
 	"sync"
@@ -23,16 +21,76 @@ var channelsIDM map[int]*Channel                     // all channels include dis
 var channel2advancedCustomConfig map[int]*dto.AdvancedCustomConfig
 var channelSyncLock sync.RWMutex
 
-func InitChannelCache() {
-	if !common.MemoryCacheEnabled {
-		InvalidatePricingCache()
+// channelCacheGeneration counts published mutations of the channel cache. A full
+// sync captures it before scanning the database and refuses to install a snapshot
+// if it moved, which is what keeps a slow scan from resurrecting a channel that
+// UpdateChannelStatus disabled while the scan was running. Guarded by
+// channelSyncLock.
+var channelCacheGeneration uint64
+
+// channelCacheSyncAttempts bounds how many times a full sync re-scans after
+// losing the generation race before falling back to scanning under the lock.
+const channelCacheSyncAttempts = 3
+
+// channelCacheSnapshot is a fully built, not yet published view of the channel
+// cache.
+type channelCacheSnapshot struct {
+	group2model2channels         map[string]map[string][]int
+	channelsIDM                  map[int]*Channel
+	channel2advancedCustomConfig map[int]*dto.AdvancedCustomConfig
+}
+
+// Entries handed to readers must never be mutated in place, so every cache
+// mutation clones, edits the clone, and republishes it. mutateCachedChannel
+// applies that discipline for a single channel. Caller must hold the write lock.
+func mutateCachedChannel(id int, mutate func(channel *Channel)) *Channel {
+	existing, ok := channelsIDM[id]
+	if !ok {
+		return nil
+	}
+	updated := existing.CloneForCache()
+	mutate(updated)
+	channelsIDM[id] = updated
+	channelCacheGeneration++
+	return updated
+}
+
+// cachePublishChannel installs an already-modified channel into the cache. The
+// caller must own the value (typically a copy obtained from CacheGetChannel) and
+// must not retain it for further mutation afterwards.
+func cachePublishChannel(channel *Channel) {
+	if !common.MemoryCacheEnabled || channel == nil {
 		return
 	}
-	newChannelId2channel := make(map[int]*Channel)
-	newChannel2advancedCustomConfig := make(map[int]*dto.AdvancedCustomConfig)
+	channelSyncLock.Lock()
+	defer channelSyncLock.Unlock()
+	if channelsIDM == nil {
+		channelsIDM = make(map[int]*Channel)
+	}
+	channelsIDM[channel.Id] = channel
+	channelCacheGeneration++
+}
+
+// buildChannelCacheSnapshot reads the channel and ability tables and assembles a
+// new cache view. It performs no locking, so it must not touch the live maps.
+func buildChannelCacheSnapshot() (*channelCacheSnapshot, bool) {
 	var channels []*Channel
-	DB.Find(&channels)
+	if err := DB.Find(&channels).Error; err != nil {
+		common.SysError(fmt.Sprintf("failed to load channels for cache sync: %v", err))
+		return nil, false
+	}
+	var abilities []*Ability
+	if err := DB.Find(&abilities).Error; err != nil {
+		common.SysError(fmt.Sprintf("failed to load abilities for cache sync: %v", err))
+		return nil, false
+	}
+
+	newChannelId2channel := make(map[int]*Channel, len(channels))
+	newChannel2advancedCustomConfig := make(map[int]*dto.AdvancedCustomConfig)
 	for _, channel := range channels {
+		if channel.ChannelInfo.IsMultiKey {
+			channel.Keys = channel.GetKeys()
+		}
 		newChannelId2channel[channel.Id] = channel
 		if channel.Type == constant.ChannelTypeAdvancedCustom {
 			if config := channel.GetOtherSettings().AdvancedCustom; config != nil {
@@ -40,61 +98,116 @@ func InitChannelCache() {
 			}
 		}
 	}
-	var abilities []*Ability
-	DB.Find(&abilities)
-	groups := make(map[string]bool)
-	for _, ability := range abilities {
-		groups[ability.Group] = true
-	}
+
 	newGroup2model2channels := make(map[string]map[string][]int)
-	for group := range groups {
-		newGroup2model2channels[group] = make(map[string][]int)
+	for _, ability := range abilities {
+		if _, ok := newGroup2model2channels[ability.Group]; !ok {
+			newGroup2model2channels[ability.Group] = make(map[string][]int)
+		}
 	}
 	for _, channel := range channels {
 		if channel.Status != common.ChannelStatusEnabled {
 			continue // skip disabled channels
 		}
-		groups := strings.Split(channel.Group, ",")
-		for _, group := range groups {
-			models := strings.Split(channel.Models, ",")
-			for _, model := range models {
-				if _, ok := newGroup2model2channels[group][model]; !ok {
-					newGroup2model2channels[group][model] = make([]int, 0)
+		// A channel may repeat a group or model in its comma-separated columns.
+		// Left unchecked the id lands in the same candidate slice twice, which
+		// doubles its weighted-random share and leaves a stale copy behind when
+		// the channel is later removed from that slice.
+		seenGroupModel := make(map[string]struct{})
+		for _, group := range strings.Split(channel.Group, ",") {
+			// A channel can briefly exist without abilities while an admin is
+			// repairing the table or after a partial import. Keep cache sync
+			// resilient to that inconsistent state instead of assigning through a
+			// nil nested map and panicking the process.
+			if _, ok := newGroup2model2channels[group]; !ok {
+				newGroup2model2channels[group] = make(map[string][]int)
+			}
+			for _, model := range strings.Split(channel.Models, ",") {
+				if _, duplicate := seenGroupModel[group+"|"+model]; duplicate {
+					continue
 				}
+				seenGroupModel[group+"|"+model] = struct{}{}
 				newGroup2model2channels[group][model] = append(newGroup2model2channels[group][model], channel.Id)
 			}
 		}
 	}
 
 	// sort by priority
-	for group, model2channels := range newGroup2model2channels {
-		for model, channels := range model2channels {
-			sort.Slice(channels, func(i, j int) bool {
-				return newChannelId2channel[channels[i]].GetPriority() > newChannelId2channel[channels[j]].GetPriority()
+	for _, model2channels := range newGroup2model2channels {
+		for model, channelIds := range model2channels {
+			sort.Slice(channelIds, func(i, j int) bool {
+				return newChannelId2channel[channelIds[i]].GetPriority() > newChannelId2channel[channelIds[j]].GetPriority()
 			})
-			newGroup2model2channels[group][model] = channels
+			model2channels[model] = channelIds
 		}
 	}
 
-	channelSyncLock.Lock()
-	group2model2channels = newGroup2model2channels
-	//channelsIDM = newChannelId2channel
-	for i, channel := range newChannelId2channel {
-		if channel.ChannelInfo.IsMultiKey {
-			channel.Keys = channel.GetKeys()
-			if channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModePolling {
-				if oldChannel, ok := channelsIDM[i]; ok {
-					// 存在旧的渠道，如果是多key且轮询，保留轮询索引信息
-					if oldChannel.ChannelInfo.IsMultiKey && oldChannel.ChannelInfo.MultiKeyMode == constant.MultiKeyModePolling {
-						channel.ChannelInfo.MultiKeyPollingIndex = oldChannel.ChannelInfo.MultiKeyPollingIndex
-					}
-				}
-			}
-		}
+	return &channelCacheSnapshot{
+		group2model2channels:         newGroup2model2channels,
+		channelsIDM:                  newChannelId2channel,
+		channel2advancedCustomConfig: newChannel2advancedCustomConfig,
+	}, true
+}
+
+func installChannelCacheSnapshot(snapshot *channelCacheSnapshot) {
+	group2model2channels = snapshot.group2model2channels
+	channelsIDM = snapshot.channelsIDM
+	channel2advancedCustomConfig = snapshot.channel2advancedCustomConfig
+	channelCacheGeneration++
+}
+
+func InitChannelCache() {
+	if !common.MemoryCacheEnabled {
+		InvalidatePricingCache()
+		return
 	}
-	channelsIDM = newChannelId2channel
-	channel2advancedCustomConfig = newChannel2advancedCustomConfig
-	channelSyncLock.Unlock()
+
+	// Building a snapshot means two full table scans. Holding channelSyncLock
+	// across them stalls every reader for the duration (a waiting writer also
+	// parks new RLock callers), which shows up as a periodic routing pause. So
+	// the scans run unlocked and only the swap is serialized. channelCacheGeneration
+	// closes the gap the unlocked scan opens: if a status update was published
+	// while the scan was in flight, the snapshot is stale and gets rebuilt. The
+	// last attempt scans under the lock so a channel under constant status churn
+	// still converges.
+	synced := false
+	for attempt := 1; attempt <= channelCacheSyncAttempts && !synced; attempt++ {
+		if attempt == channelCacheSyncAttempts {
+			func() {
+				channelSyncLock.Lock()
+				defer channelSyncLock.Unlock()
+				snapshot, ok := buildChannelCacheSnapshot()
+				if !ok {
+					return
+				}
+				installChannelCacheSnapshot(snapshot)
+				synced = true
+			}()
+			break
+		}
+
+		channelSyncLock.RLock()
+		generationBeforeScan := channelCacheGeneration
+		channelSyncLock.RUnlock()
+
+		snapshot, ok := buildChannelCacheSnapshot()
+		if !ok {
+			return
+		}
+
+		func() {
+			channelSyncLock.Lock()
+			defer channelSyncLock.Unlock()
+			if channelCacheGeneration != generationBeforeScan {
+				return
+			}
+			installChannelCacheSnapshot(snapshot)
+			synced = true
+		}()
+	}
+	if !synced {
+		return
+	}
 	// Lock ordering: InvalidatePricingCache acquires updatePricingLock, and
 	// GetPricing (holding updatePricingLock) nests channelSyncLock.RLock via
 	// loadPricingAdvancedCustomConfigs. channelSyncLock MUST be released before
@@ -111,10 +224,16 @@ func SyncChannelCache(frequency int) {
 	}
 }
 
-func GetRandomSatisfiedChannel(group string, model string, retry int, requestPath string) (*Channel, error) {
+// GetRandomSatisfiedChannel selects a channel for group/model.
+// excludedChannelIds holds the channels already attempted for this request; they
+// are removed from every priority tier so a retry cannot land on the channel that
+// just failed. Tier demotion, exclusion and weighting are delegated to
+// selectChannelCandidate, which the DB path uses as well, so the two paths cannot
+// diverge.
+func GetRandomSatisfiedChannel(group string, model string, retry int, requestPath string, excludedChannelIds map[int]bool) (*Channel, error) {
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
-		return GetChannel(group, model, retry, requestPath)
+		return GetChannel(group, model, retry, requestPath, excludedChannelIds)
 	}
 
 	channelSyncLock.RLock()
@@ -133,79 +252,32 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 		return nil, nil
 	}
 
-	if len(channels) == 1 {
-		if channel, ok := channelsIDM[channels[0]]; ok {
-			return channel, nil
-		}
-		return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channels[0])
-	}
-
-	uniquePriorities := make(map[int]bool)
+	candidates := make([]channelCandidate, 0, len(channels))
 	for _, channelId := range channels {
-		if channel, ok := channelsIDM[channelId]; ok {
-			uniquePriorities[int(channel.GetPriority())] = true
-		} else {
+		channel, ok := channelsIDM[channelId]
+		if !ok {
 			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
 		}
-	}
-	var sortedUniquePriorities []int
-	for priority := range uniquePriorities {
-		sortedUniquePriorities = append(sortedUniquePriorities, priority)
-	}
-	sort.Sort(sort.Reverse(sort.IntSlice(sortedUniquePriorities)))
-
-	if retry >= len(uniquePriorities) {
-		retry = len(uniquePriorities) - 1
-	}
-	targetPriority := int64(sortedUniquePriorities[retry])
-
-	// get the priority for the given retry number
-	var sumWeight = 0
-	var targetChannels []*Channel
-	for _, channelId := range channels {
-		if channel, ok := channelsIDM[channelId]; ok {
-			if channel.GetPriority() == targetPriority {
-				sumWeight += channel.GetWeight()
-				targetChannels = append(targetChannels, channel)
-			}
-		} else {
-			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
-		}
+		candidates = append(candidates, channelCandidate{
+			channelId:      channelId,
+			priority:       channel.GetPriority(),
+			weight:         channel.GetWeight(),
+			maxConcurrency: channel.GetMaxConcurrency(),
+		})
 	}
 
-	if len(targetChannels) == 0 {
-		return nil, errors.New(fmt.Sprintf("no channel found, group: %s, model: %s, priority: %d", group, model, targetPriority))
+	candidates = applyDynamicScores(group, model, candidates)
+
+	channelId, err := selectAndAcquireChannel(candidates, retry, excludedChannelIds)
+	if err != nil {
+		return nil, err
 	}
-
-	// smoothing factor and adjustment
-	smoothingFactor := 1
-	smoothingAdjustment := 0
-
-	if sumWeight == 0 {
-		// when all channels have weight 0, set sumWeight to the number of channels and set smoothing adjustment to 100
-		// each channel's effective weight = 100
-		sumWeight = len(targetChannels) * 100
-		smoothingAdjustment = 100
-	} else if sumWeight/len(targetChannels) < 10 {
-		// when the average weight is less than 10, set smoothing factor to 100
-		smoothingFactor = 100
+	if channelId == 0 {
+		return nil, fmt.Errorf("no channel found, group: %s, model: %s", group, model)
 	}
-
-	// Calculate the total weight of all channels up to endIdx
-	totalWeight := sumWeight * smoothingFactor
-
-	// Generate a random value in the range [0, totalWeight)
-	randomWeight := rand.Intn(totalWeight)
-
-	// Find a channel based on its weight
-	for _, channel := range targetChannels {
-		randomWeight -= channel.GetWeight()*smoothingFactor + smoothingAdjustment
-		if randomWeight < 0 {
-			return channel, nil
-		}
-	}
-	// return null if no channel is not found
-	return nil, errors.New("channel not found")
+	// Copy for the same reason as CacheGetChannel: the selected channel travels
+	// with the request long after this read lock is gone.
+	return channelsIDM[channelId].CloneForCache(), nil
 }
 
 // filterChannelsByRequestPathAndModel restricts candidates by request path and
@@ -236,6 +308,10 @@ func filterChannelsByRequestPathAndModel(channels []int, requestPath string, mod
 	return filtered
 }
 
+// CacheGetChannel returns a private copy of the cached channel. Callers keep
+// using it after channelSyncLock is released, and both the sync goroutine and the
+// auto-ban path replace cache entries concurrently, so handing out the cached
+// pointer would let callers read a channel while it is being rewritten.
 func CacheGetChannel(id int) (*Channel, error) {
 	if !common.MemoryCacheEnabled {
 		return GetChannelById(id, true)
@@ -247,9 +323,11 @@ func CacheGetChannel(id int) (*Channel, error) {
 	if !ok {
 		return nil, fmt.Errorf("渠道# %d，已不存在", id)
 	}
-	return c, nil
+	return c.CloneForCache(), nil
 }
 
+// CacheGetChannelInfo returns a copy of the channel's info for the same reason as
+// CacheGetChannel: a pointer into the cached struct would outlive the read lock.
 func CacheGetChannelInfo(id int) (*ChannelInfo, error) {
 	if !common.MemoryCacheEnabled {
 		channel, err := GetChannelById(id, true)
@@ -265,7 +343,8 @@ func CacheGetChannelInfo(id int) (*ChannelInfo, error) {
 	if !ok {
 		return nil, fmt.Errorf("渠道# %d，已不存在", id)
 	}
-	return &c.ChannelInfo, nil
+	info := c.ChannelInfo.clone()
+	return &info, nil
 }
 
 func CacheUpdateChannelStatus(id int, status int) {
@@ -274,56 +353,91 @@ func CacheUpdateChannelStatus(id int, status int) {
 	}
 	channelSyncLock.Lock()
 	defer channelSyncLock.Unlock()
-	if channel, ok := channelsIDM[id]; ok {
+	channel := mutateCachedChannel(id, func(channel *Channel) {
 		channel.Status = status
-	}
-	if status != common.ChannelStatusEnabled {
-		// delete the channel from group2model2channels
-		for group, model2channels := range group2model2channels {
-			for model, channels := range model2channels {
-				for i, channelId := range channels {
-					if channelId == id {
-						// remove the channel from the slice
-						group2model2channels[group][model] = append(channels[:i], channels[i+1:]...)
-						break
-					}
+	})
+	if status == common.ChannelStatusEnabled {
+		// The auto re-enable path (service.EnableChannel) is the only enable path
+		// without a follow-up InitChannelCache, so the channel must rejoin the
+		// selection map here or it receives no traffic until the next full sync.
+		if channel == nil {
+			return
+		}
+		if group2model2channels == nil {
+			group2model2channels = make(map[string]map[string][]int)
+		}
+		for _, group := range strings.Split(channel.Group, ",") {
+			model2channels, groupExists := group2model2channels[group]
+			if !groupExists {
+				model2channels = make(map[string][]int)
+				group2model2channels[group] = model2channels
+			}
+			for _, model := range strings.Split(channel.Models, ",") {
+				channels := model2channels[model]
+				if isChannelIDInList(channels, id) {
+					continue
 				}
+				channels = append(channels, id)
+				sort.Slice(channels, func(i, j int) bool {
+					ci, iok := channelsIDM[channels[i]]
+					cj, jok := channelsIDM[channels[j]]
+					if !iok || !jok {
+						return iok
+					}
+					return ci.GetPriority() > cj.GetPriority()
+				})
+				model2channels[model] = channels
+			}
+		}
+		return
+	}
+	// Remove the channel from group2model2channels. Every occurrence has to go:
+	// stopping at the first match would leave a duplicate id behind and the
+	// disabled channel would keep being selected until the next full sync.
+	for _, model2channels := range group2model2channels {
+		for model, channels := range model2channels {
+			remaining := make([]int, 0, len(channels))
+			for _, channelId := range channels {
+				if channelId != id {
+					remaining = append(remaining, channelId)
+				}
+			}
+			if len(remaining) != len(channels) {
+				model2channels[model] = remaining
 			}
 		}
 	}
 }
 
 func CacheUpdateChannel(channel *Channel) {
-	if !common.MemoryCacheEnabled {
+	if !common.MemoryCacheEnabled || channel == nil {
 		return
 	}
-	channelSyncLock.Lock()
-	if channel == nil {
-		channelSyncLock.Unlock()
-		return
-	}
-
-	if channelsIDM == nil {
-		channelsIDM = make(map[int]*Channel)
-	}
-	if oldChannel, ok := channelsIDM[channel.Id]; ok {
-		logger.LogDebug(nil, "CacheUpdateChannel before: id=%d, name=%s, status=%d, polling_index=%d", channel.Id, channel.Name, channel.Status, oldChannel.ChannelInfo.MultiKeyPollingIndex)
-	}
-	channelsIDM[channel.Id] = channel
-	if channel2advancedCustomConfig == nil {
-		channel2advancedCustomConfig = make(map[int]*dto.AdvancedCustomConfig)
-	}
-	delete(channel2advancedCustomConfig, channel.Id)
-	if channel.Type == constant.ChannelTypeAdvancedCustom {
-		if config := channel.GetOtherSettings().AdvancedCustom; config != nil {
-			channel2advancedCustomConfig[channel.Id] = config
-		}
-	}
-	logger.LogDebug(nil, "CacheUpdateChannel after: id=%d, name=%s, status=%d, polling_index=%d", channel.Id, channel.Name, channel.Status, channel.ChannelInfo.MultiKeyPollingIndex)
-	// Lock ordering: do NOT hold channelSyncLock while calling
-	// InvalidatePricingCache. GetPricing acquires updatePricingLock first and then
-	// channelSyncLock.RLock (via loadPricingAdvancedCustomConfigs); acquiring
+	// The critical section is a closure so the unlock rides on a defer: a panic
+	// between lock and unlock would otherwise leave channelSyncLock held and block
+	// every reader for the life of the process. InvalidatePricingCache must stay
+	// outside it — GetPricing takes updatePricingLock first and then
+	// channelSyncLock.RLock (via loadPricingAdvancedCustomConfigs), so acquiring
 	// updatePricingLock while holding channelSyncLock would be an AB-BA deadlock.
-	channelSyncLock.Unlock()
+	func() {
+		channelSyncLock.Lock()
+		defer channelSyncLock.Unlock()
+
+		if channelsIDM == nil {
+			channelsIDM = make(map[int]*Channel)
+		}
+		channelsIDM[channel.Id] = channel
+		if channel2advancedCustomConfig == nil {
+			channel2advancedCustomConfig = make(map[int]*dto.AdvancedCustomConfig)
+		}
+		delete(channel2advancedCustomConfig, channel.Id)
+		if channel.Type == constant.ChannelTypeAdvancedCustom {
+			if config := channel.GetOtherSettings().AdvancedCustom; config != nil {
+				channel2advancedCustomConfig[channel.Id] = config
+			}
+		}
+		channelCacheGeneration++
+		logger.LogDebug(nil, "CacheUpdateChannel: id=%d, name=%s, status=%d", channel.Id, channel.Name, channel.Status)
+	}()
 	InvalidatePricingCache()
 }

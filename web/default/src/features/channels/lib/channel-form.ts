@@ -36,6 +36,51 @@ import {
 // Form Validation Schema
 // ============================================================================
 
+/**
+ * Which client a channel's upstream requests are dressed as.
+ *
+ * 'off' is the form-level stand-in for the backend's empty string: Radix Select
+ * reserves '' as a value, so it cannot be a SelectItem. 'auto' resolves from the
+ * channel's own type at request time — an Anthropic channel wears Claude Code's
+ * headers — and the named families force one when the channel type cannot say
+ * what upstream actually expects.
+ *
+ * The family names are a stored contract shared with the backend
+ * (constant.ClientHeaderFamily*) and the channel-test header presets; renaming
+ * one drops whatever is already saved under the old name.
+ */
+export const SYNTHETIC_CLIENT_HEADER_PROFILES = [
+  'off',
+  'auto',
+  'claude',
+  'openai',
+  'codex',
+  'gemini',
+  'generic',
+] as const
+
+export type SyntheticClientHeaderProfile =
+  (typeof SYNTHETIC_CLIENT_HEADER_PROFILES)[number]
+
+function parseSyntheticClientHeaderProfile(
+  parsed: Record<string, unknown>
+): SyntheticClientHeaderProfile {
+  const stored = parsed.synthetic_client_headers_profile
+  if (typeof stored === 'string' && stored !== '') {
+    const known = SYNTHETIC_CLIENT_HEADER_PROFILES.find(
+      (profile) => profile === stored
+    )
+    // An unrecognized value means the backend is newer than this bundle, or the
+    // settings blob was hand-edited. Show 'auto' rather than 'off': the backend
+    // normalizes an unknown family to auto too, and rendering 'off' would make
+    // a save silently disable protection the channel actually has.
+    return known ?? 'auto'
+  }
+  // Channels saved before the profile existed carry only the boolean, which
+  // always meant "follow the channel type".
+  return parsed.synthetic_client_headers ? 'auto' : 'off'
+}
+
 function parseOptionalJson(value: string | undefined): unknown {
   if (!value?.trim()) return undefined
   return JSON.parse(value)
@@ -145,6 +190,11 @@ export const channelFormSchema = z
         'Model mapping must be a JSON object with string values'
       ),
     priority: z.number().optional(),
+    max_concurrency: z
+      .number()
+      .int()
+      .min(0, 'Concurrency limit cannot be negative')
+      .optional(),
     weight: z.number().optional(),
     test_model: z.string().optional(),
     auto_ban: z.number().optional(),
@@ -189,6 +239,13 @@ export const channelFormSchema = z
     thinking_to_content: z.boolean().optional(),
     proxy: z.string().optional(),
     pass_through_body_enabled: z.boolean().optional(),
+    websocket_transport: z.boolean().optional(),
+    synthetic_client_headers: z.boolean().optional(),
+    // 'off' rather than '' because Radix Select reserves the empty string as a
+    // value; buildSettingJSON maps it back to '' for the backend.
+    synthetic_client_headers_profile: z
+      .enum(SYNTHETIC_CLIENT_HEADER_PROFILES)
+      .optional(),
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
     // Type-specific settings (stored in settings JSON)
@@ -308,6 +365,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   group: ['default'],
   model_mapping: '',
   priority: 0,
+  max_concurrency: 0,
   weight: 0,
   test_model: '',
   auto_ban: 1,
@@ -329,6 +387,9 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   thinking_to_content: false,
   proxy: '',
   pass_through_body_enabled: false,
+  websocket_transport: false,
+  synthetic_client_headers: false,
+  synthetic_client_headers_profile: 'off',
   system_prompt: '',
   system_prompt_override: false,
   // Type-specific settings
@@ -367,6 +428,9 @@ export function transformChannelToFormDefaults(
     thinking_to_content: false,
     proxy: '',
     pass_through_body_enabled: false,
+    websocket_transport: false,
+    synthetic_client_headers: false,
+    synthetic_client_headers_profile: 'off' as SyntheticClientHeaderProfile,
     system_prompt: '',
     system_prompt_override: false,
   }
@@ -379,6 +443,10 @@ export function transformChannelToFormDefaults(
         thinking_to_content: parsed.thinking_to_content || false,
         proxy: parsed.proxy || '',
         pass_through_body_enabled: parsed.pass_through_body_enabled || false,
+        websocket_transport: parsed.websocket_transport || false,
+        synthetic_client_headers: parsed.synthetic_client_headers || false,
+        synthetic_client_headers_profile:
+          parseSyntheticClientHeaderProfile(parsed),
         system_prompt: parsed.system_prompt || '',
         system_prompt_override: parsed.system_prompt_override || false,
       }
@@ -449,6 +517,7 @@ export function transformChannelToFormDefaults(
     group: parseGroups(channel.group || 'default'),
     model_mapping: channel.model_mapping || '',
     priority: channel.priority || 0,
+    max_concurrency: channel.max_concurrency || 0,
     weight: channel.weight || 0,
     test_model: channel.test_model || '',
     auto_ban: channel.auto_ban ?? 1,
@@ -491,11 +560,21 @@ export function transformChannelToFormDefaults(
  * Build the setting JSON string from form extra settings
  */
 function buildSettingJSON(formData: ChannelFormValues): string {
+  const syntheticProfile = formData.synthetic_client_headers_profile ?? 'off'
   const settingObj = {
     force_format: formData.force_format || false,
     thinking_to_content: formData.thinking_to_content || false,
     proxy: formData.proxy || '',
     pass_through_body_enabled: formData.pass_through_body_enabled || false,
+    websocket_transport: formData.websocket_transport || false,
+    // Both fields are written together, always. The backend reads the profile
+    // and only falls back to the boolean for rows saved before the profile
+    // existed — so writing an empty profile while leaving the boolean set would
+    // resurrect the setting as 'auto' instead of turning it off. Writing the
+    // pair also keeps a rollback to the previous image reading the same state.
+    synthetic_client_headers: syntheticProfile !== 'off',
+    synthetic_client_headers_profile:
+      syntheticProfile === 'off' ? '' : syntheticProfile,
     system_prompt: formData.system_prompt || '',
     system_prompt_override: formData.system_prompt_override || false,
   }
@@ -622,6 +701,13 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     delete settingsObj.advanced_custom
   }
 
+  // Saving the channel is the gesture that retries the WebSocket handshake, so the
+  // backend's detected-unsupported flag has to be dropped here. This function
+  // merges into the existing settings rather than rebuilding them, so without an
+  // explicit delete the flag would survive every save and the channel could never
+  // leave the SSE fallback.
+  delete settingsObj.websocket_unsupported
+
   return JSON.stringify(settingsObj)
 }
 
@@ -652,6 +738,7 @@ export function transformFormDataToCreatePayload(formData: ChannelFormValues): {
     group: formatGroups(formData.group),
     model_mapping: formData.model_mapping || null,
     priority: formData.priority || null,
+    max_concurrency: formData.max_concurrency ?? 0,
     weight: formData.weight || null,
     test_model: formData.test_model || null,
     auto_ban: formData.auto_ban ?? 1,
@@ -700,6 +787,7 @@ export function transformFormDataToUpdatePayload(
     group: formatGroups(formData.group),
     model_mapping: formData.model_mapping || null,
     priority: formData.priority ?? 0,
+    max_concurrency: formData.max_concurrency ?? 0,
     weight: formData.weight ?? 0,
     test_model: formData.test_model || null,
     auto_ban: formData.auto_ban ?? 1,

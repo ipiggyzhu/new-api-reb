@@ -4,39 +4,29 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
-	"sync"
 
-	"github.com/QuantumNous/new-api/common"
 	"github.com/go-redis/redis/v8"
 )
 
 //go:embed lua/rate_limit.lua
 var rateLimitScript string
 
+// rateLimit is safe for concurrent use. redis.Script tries EVALSHA first and
+// transparently falls back to EVAL when Redis answers NOSCRIPT, so a Redis
+// restart — which drops the script cache — repairs itself. Resolving the SHA
+// once at startup instead meant every later call failed with NOSCRIPT, which the
+// relay middleware turns into a 500: one Redis restart took the gateway down
+// until new-api itself was restarted.
+var rateLimit = redis.NewScript(rateLimitScript)
+
 type RedisLimiter struct {
-	client         *redis.Client
-	limitScriptSHA string
+	client *redis.Client
 }
 
-var (
-	instance *RedisLimiter
-	once     sync.Once
-)
-
+// New returns a limiter bound to r. It used to memoise the first client it ever
+// saw, which would keep using a stale connection if RDB were ever rebuilt.
 func New(ctx context.Context, r *redis.Client) *RedisLimiter {
-	once.Do(func() {
-		// 预加载脚本
-		limitSHA, err := r.ScriptLoad(ctx, rateLimitScript).Result()
-		if err != nil {
-			common.SysLog(fmt.Sprintf("Failed to load rate limit script: %v", err))
-		}
-		instance = &RedisLimiter{
-			client:         r,
-			limitScriptSHA: limitSHA,
-		}
-	})
-
-	return instance
+	return &RedisLimiter{client: r}
 }
 
 func (rl *RedisLimiter) Allow(ctx context.Context, key string, opts ...Option) (bool, error) {
@@ -53,9 +43,9 @@ func (rl *RedisLimiter) Allow(ctx context.Context, key string, opts ...Option) (
 	}
 
 	// 执行限流
-	result, err := rl.client.EvalSha(
+	result, err := rateLimit.Run(
 		ctx,
-		rl.limitScriptSHA,
+		rl.client,
 		[]string{key},
 		config.Requested,
 		config.Rate,

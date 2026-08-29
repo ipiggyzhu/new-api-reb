@@ -18,9 +18,141 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useEffect, useState } from 'react'
 import type { IconBaseProps, IconType } from 'react-icons'
+import {
+  SiAfdian,
+  SiAlipay,
+  SiAmericanexpress,
+  SiAnthropic,
+  SiApple,
+  SiApplepay,
+  SiBinance,
+  SiBitcoin,
+  SiBuymeacoffee,
+  SiCashapp,
+  SiClaude,
+  SiCoinbase,
+  SiDiscord,
+  SiDogecoin,
+  SiEthereum,
+  SiFacebook,
+  SiGitee,
+  SiGithub,
+  SiGitlab,
+  SiGoogle,
+  SiGooglepay,
+  SiInstagram,
+  SiJcb,
+  SiKlarna,
+  SiKofi,
+  SiLemonsqueezy,
+  SiLine,
+  SiLinux,
+  SiLitecoin,
+  SiMastercard,
+  SiMonero,
+  SiPaddle,
+  SiPatreon,
+  SiPayoneer,
+  SiPaypal,
+  SiQq,
+  SiReddit,
+  SiRevolut,
+  SiRipple,
+  SiShopify,
+  SiSolana,
+  SiSquare,
+  SiSteam,
+  SiStripe,
+  SiTelegram,
+  SiTether,
+  SiVenmo,
+  SiVisa,
+  SiWebmoney,
+  SiWechat,
+  SiWhatsapp,
+  SiWise,
+  SiX,
+  SiXrp,
+  SiYoutube,
+} from 'react-icons/si'
 
 type IconPackModule = Record<string, unknown>
 type IconPackLoader = () => Promise<IconPackModule>
+
+/**
+ * Resolving a name through ICON_PACK_LOADERS downloads a whole react-icons pack
+ * to render a single glyph. The names that actually show up in payment and
+ * branding config are a short list, and naming them here lets the bundler
+ * tree-shake them down to a few KB that ship with the page instead. Anything
+ * outside this list still falls back to the pack.
+ *
+ * `si` is deliberately absent from ICON_PACK_LOADERS and covered by this table
+ * alone. It is the one pack this component also imports statically, and a
+ * static import wins over a dynamic one — the pack landed in the initial chunk,
+ * where the namespace-object consumption in the loader (`.then(module => module)`)
+ * also defeated tree-shaking, because marking the namespace as used marks all
+ * 3400+ exports as used. The two together put ~5 MB of Simple Icons in front of
+ * every visitor's first paint. The table below is what the brand/payment config
+ * can plausibly name; an unrecognised Si* name now renders nothing rather than
+ * pulling the pack back in.
+ */
+const PRELOADED_ICONS: Record<string, IconType> = {
+  SiAfdian,
+  SiAlipay,
+  SiAmericanexpress,
+  SiAnthropic,
+  SiApple,
+  SiApplepay,
+  SiBinance,
+  SiBitcoin,
+  SiBuymeacoffee,
+  SiCashapp,
+  SiClaude,
+  SiCoinbase,
+  SiDiscord,
+  SiDogecoin,
+  SiEthereum,
+  SiFacebook,
+  SiGitee,
+  SiGithub,
+  SiGitlab,
+  SiGoogle,
+  SiGooglepay,
+  SiInstagram,
+  SiJcb,
+  SiKlarna,
+  SiKofi,
+  SiLemonsqueezy,
+  SiLine,
+  SiLinux,
+  SiLitecoin,
+  SiMastercard,
+  SiMonero,
+  SiPaddle,
+  SiPatreon,
+  SiPayoneer,
+  SiPaypal,
+  SiQq,
+  SiReddit,
+  SiRevolut,
+  SiRipple,
+  SiShopify,
+  SiSolana,
+  SiSquare,
+  SiSteam,
+  SiStripe,
+  SiTelegram,
+  SiTether,
+  SiVenmo,
+  SiVisa,
+  SiWebmoney,
+  SiWechat,
+  SiWhatsapp,
+  SiWise,
+  SiX,
+  SiXrp,
+  SiYoutube,
+}
 
 const ICON_PACK_LOADERS = {
   ai: () => import('react-icons/ai').then((module) => module as IconPackModule),
@@ -51,7 +183,6 @@ const ICON_PACK_LOADERS = {
   pi: () => import('react-icons/pi').then((module) => module as IconPackModule),
   ri: () => import('react-icons/ri').then((module) => module as IconPackModule),
   rx: () => import('react-icons/rx').then((module) => module as IconPackModule),
-  si: () => import('react-icons/si').then((module) => module as IconPackModule),
   sl: () => import('react-icons/sl').then((module) => module as IconPackModule),
   tb: () => import('react-icons/tb').then((module) => module as IconPackModule),
   tfi: () =>
@@ -88,7 +219,6 @@ const ICON_PACK_CANDIDATES: Array<[RegExp, IconPackId[]]> = [
   [/^Pi[A-Z0-9]/, ['pi']],
   [/^Ri[A-Z0-9]/, ['ri']],
   [/^Rx[A-Z0-9]/, ['rx']],
-  [/^Si[A-Z0-9]/, ['si']],
   [/^Sl[A-Z0-9]/, ['sl']],
   [/^Tb[A-Z0-9]/, ['tb']],
   [/^Tfi[A-Z0-9]/, ['tfi']],
@@ -123,6 +253,9 @@ function isIconComponent(value: unknown): value is IconType {
 }
 
 async function resolveReactIcon(iconName: string): Promise<IconType | null> {
+  const preloaded = PRELOADED_ICONS[iconName]
+  if (preloaded) return preloaded
+
   for (const packId of getCandidatePacks(iconName)) {
     try {
       const icon = (await loadIconPack(packId))[iconName]
@@ -145,6 +278,7 @@ type ResolvedIconState = {
 
 export function ReactIconByName({ name, ...props }: ReactIconByNameProps) {
   const iconName = normalizeIconName(name)
+  const preloadedIcon = iconName ? PRELOADED_ICONS[iconName] : undefined
   const [resolvedIcon, setResolvedIcon] = useState<ResolvedIconState | null>(
     null
   )
@@ -152,7 +286,7 @@ export function ReactIconByName({ name, ...props }: ReactIconByNameProps) {
   useEffect(() => {
     let cancelled = false
 
-    if (!iconName) return
+    if (!iconName || preloadedIcon) return
 
     void resolveReactIcon(iconName).then((Icon) => {
       if (!cancelled) setResolvedIcon({ iconName, Icon })
@@ -161,7 +295,14 @@ export function ReactIconByName({ name, ...props }: ReactIconByNameProps) {
     return () => {
       cancelled = true
     }
-  }, [iconName])
+  }, [iconName, preloadedIcon])
+
+  // Preloaded icons render on the first pass instead of flashing empty for a
+  // frame while an effect resolves them.
+  if (preloadedIcon) {
+    const PreloadedIcon = preloadedIcon
+    return <PreloadedIcon {...props} />
+  }
 
   if (!iconName || resolvedIcon?.iconName !== iconName || !resolvedIcon.Icon) {
     return null

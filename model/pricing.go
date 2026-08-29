@@ -46,11 +46,16 @@ type PricingVendor struct {
 }
 
 var (
+	// pricingMap, vendorsList, supportedEndpointMap and lastGetPricingTime are
+	// guarded by pricingDataLock; updatePricingLock only serializes rebuilds.
+	// Published slices/maps are immutable once swapped in, so returning them to
+	// callers without a copy is safe.
 	pricingMap           []Pricing
 	vendorsList          []PricingVendor
 	supportedEndpointMap map[string]common.EndpointInfo
 	lastGetPricingTime   time.Time
 	updatePricingLock    sync.Mutex
+	pricingDataLock      sync.RWMutex
 
 	// 缓存映射：模型名 -> 启用分组 / 计费类型
 	modelEnableGroups     = make(map[string][]string)
@@ -64,23 +69,36 @@ var (
 )
 
 func GetPricing() []Pricing {
-	if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
-		updatePricingLock.Lock()
-		defer updatePricingLock.Unlock()
-		// Double check after acquiring the lock
-		if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
-			modelSupportEndpointsLock.Lock()
-			defer modelSupportEndpointsLock.Unlock()
-			updatePricing()
-		}
+	pricingDataLock.RLock()
+	stale := time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0
+	data := pricingMap
+	pricingDataLock.RUnlock()
+	if !stale {
+		return data
 	}
-	return pricingMap
+	updatePricingLock.Lock()
+	defer updatePricingLock.Unlock()
+	// Double check after acquiring the lock
+	pricingDataLock.RLock()
+	stale = time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0
+	pricingDataLock.RUnlock()
+	if stale {
+		updatePricing()
+	}
+	pricingDataLock.RLock()
+	data = pricingMap
+	pricingDataLock.RUnlock()
+	return data
 }
 
 func InvalidatePricingCache() {
+	// updatePricingLock keeps an in-flight rebuild from republishing right over
+	// the invalidation.
 	updatePricingLock.Lock()
 	defer updatePricingLock.Unlock()
 
+	pricingDataLock.Lock()
+	defer pricingDataLock.Unlock()
 	pricingMap = nil
 	vendorsList = nil
 	lastGetPricingTime = time.Time{}
@@ -88,10 +106,10 @@ func InvalidatePricingCache() {
 
 // GetVendors 返回当前定价接口使用到的供应商信息
 func GetVendors() []PricingVendor {
-	if time.Since(lastGetPricingTime) > time.Minute*1 || len(pricingMap) == 0 {
-		// 保证先刷新一次
-		GetPricing()
-	}
+	// 保证先刷新一次
+	GetPricing()
+	pricingDataLock.RLock()
+	defer pricingDataLock.RUnlock()
 	return vendorsList
 }
 
@@ -248,9 +266,9 @@ func updatePricing() {
 	initDefaultVendorMapping(metaMap, vendorMap, enableAbilities)
 
 	// 构建对前端友好的供应商列表
-	vendorsList = make([]PricingVendor, 0, len(vendorMap))
+	newVendorsList := make([]PricingVendor, 0, len(vendorMap))
 	for _, v := range vendorMap {
-		vendorsList = append(vendorsList, PricingVendor{
+		newVendorsList = append(newVendorsList, PricingVendor{
 			ID:          v.Id,
 			Name:        v.Name,
 			Description: v.Description,
@@ -305,24 +323,24 @@ func updatePricing() {
 		}
 	}
 
-	modelSupportEndpointTypes = make(map[string][]constant.EndpointType)
+	newModelSupportEndpointTypes := make(map[string][]constant.EndpointType)
 	for model, endpoints := range modelSupportEndpointsStr {
 		supportedEndpoints := make([]constant.EndpointType, 0)
 		for _, endpointStr := range endpoints {
 			endpointType := constant.EndpointType(endpointStr)
 			supportedEndpoints = append(supportedEndpoints, endpointType)
 		}
-		modelSupportEndpointTypes[model] = supportedEndpoints
+		newModelSupportEndpointTypes[model] = supportedEndpoints
 	}
 
 	// 构建全局 supportedEndpointMap（默认 + 自定义覆盖）
-	supportedEndpointMap = make(map[string]common.EndpointInfo)
+	newSupportedEndpointMap := make(map[string]common.EndpointInfo)
 	// 1. 默认端点
-	for _, endpoints := range modelSupportEndpointTypes {
+	for _, endpoints := range newModelSupportEndpointTypes {
 		for _, et := range endpoints {
 			if info, ok := common.GetDefaultEndpointInfo(et); ok {
-				if _, exists := supportedEndpointMap[string(et)]; !exists {
-					supportedEndpointMap[string(et)] = info
+				if _, exists := newSupportedEndpointMap[string(et)]; !exists {
+					newSupportedEndpointMap[string(et)] = info
 				}
 			}
 		}
@@ -337,7 +355,7 @@ func updatePricing() {
 			for k, v := range raw {
 				switch val := v.(type) {
 				case string:
-					supportedEndpointMap[k] = common.EndpointInfo{Path: val, Method: "POST"}
+					newSupportedEndpointMap[k] = common.EndpointInfo{Path: val, Method: "POST"}
 				case map[string]interface{}:
 					ep := common.EndpointInfo{Method: "POST"}
 					if p, ok := val["path"].(string); ok {
@@ -346,7 +364,7 @@ func updatePricing() {
 					if m, ok := val["method"].(string); ok {
 						ep.Method = strings.ToUpper(m)
 					}
-					supportedEndpointMap[k] = ep
+					newSupportedEndpointMap[k] = ep
 				default:
 					// ignore unsupported types
 				}
@@ -354,12 +372,12 @@ func updatePricing() {
 		}
 	}
 
-	pricingMap = make([]Pricing, 0)
+	newPricingMap := make([]Pricing, 0)
 	for model, groups := range modelGroupsMap {
 		pricing := Pricing{
 			ModelName:              model,
 			EnableGroup:            groups.Items(),
-			SupportedEndpointTypes: modelSupportEndpointTypes[model],
+			SupportedEndpointTypes: newModelSupportEndpointTypes[model],
 		}
 
 		// 补充模型元数据（描述、标签、供应商、状态）
@@ -406,28 +424,43 @@ func updatePricing() {
 				pricing.BillingExpr = expr
 			}
 		}
-		pricingMap = append(pricingMap, pricing)
+		newPricingMap = append(newPricingMap, pricing)
 	}
 
 	// 防止大更新后数据不通用
-	if len(pricingMap) > 0 {
-		pricingMap[0].PricingVersion = "5a90f2b86c08bd983a9a2e6d66c255f4eaef9c4bc934386d2b6ae84ef0ff1f1f"
+	if len(newPricingMap) > 0 {
+		newPricingMap[0].PricingVersion = "5a90f2b86c08bd983a9a2e6d66c255f4eaef9c4bc934386d2b6ae84ef0ff1f1f"
 	}
+
+	// 发布阶段：以上全部构建在局部变量中完成，这里整体换入全局缓存，
+	// 无锁读取到的永远是完整的一版数据
+	modelSupportEndpointsLock.Lock()
+	modelSupportEndpointTypes = newModelSupportEndpointTypes
+	modelSupportEndpointsLock.Unlock()
 
 	// 刷新缓存映射，供高并发快速查询
-	modelEnableGroupsLock.Lock()
-	modelEnableGroups = make(map[string][]string)
-	modelQuotaTypeMap = make(map[string]int)
-	for _, p := range pricingMap {
-		modelEnableGroups[p.ModelName] = p.EnableGroup
-		modelQuotaTypeMap[p.ModelName] = p.QuotaType
+	newModelEnableGroups := make(map[string][]string)
+	newModelQuotaTypeMap := make(map[string]int)
+	for _, p := range newPricingMap {
+		newModelEnableGroups[p.ModelName] = p.EnableGroup
+		newModelQuotaTypeMap[p.ModelName] = p.QuotaType
 	}
+	modelEnableGroupsLock.Lock()
+	modelEnableGroups = newModelEnableGroups
+	modelQuotaTypeMap = newModelQuotaTypeMap
 	modelEnableGroupsLock.Unlock()
 
+	pricingDataLock.Lock()
+	pricingMap = newPricingMap
+	vendorsList = newVendorsList
+	supportedEndpointMap = newSupportedEndpointMap
 	lastGetPricingTime = time.Now()
+	pricingDataLock.Unlock()
 }
 
 // GetSupportedEndpointMap 返回全局端点到路径的映射
 func GetSupportedEndpointMap() map[string]common.EndpointInfo {
+	pricingDataLock.RLock()
+	defer pricingDataLock.RUnlock()
 	return supportedEndpointMap
 }

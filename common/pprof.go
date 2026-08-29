@@ -13,8 +13,14 @@ import (
 func Monitor() {
 	for {
 		percent, err := cpu.Percent(time.Second, false)
-		if err != nil {
-			panic(err)
+		if err != nil || len(percent) == 0 {
+			// This runs in a bare goroutine, so a panic here would kill the
+			// whole gateway. A transient /proc read failure is not fatal.
+			if err != nil {
+				SysError("读取CPU使用率失败: " + err.Error())
+			}
+			time.Sleep(30 * time.Second)
+			continue
 		}
 		if percent[0] > 80 {
 			fmt.Println("cpu usage too high")

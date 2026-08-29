@@ -2,6 +2,8 @@ package openai
 
 import (
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -35,7 +37,17 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 	localUsage := &dto.RealtimeUsage{}
 	sumUsage := &dto.RealtimeUsage{}
 
+	// localUsage is the only accumulator both readers touch, so every read, every
+	// field update and every reassignment of the variable itself goes through this
+	// mutex. usage and sumUsage stay unguarded because only the target reader and
+	// this goroutine touch them, and wg.Wait below orders those two.
+	var localUsageMu sync.Mutex
+	var wg sync.WaitGroup
+
+	wg.Add(1)
 	gopool.Go(func() {
+		// Registered before the recover below so it still runs last on a panic.
+		defer wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				errChan <- fmt.Errorf("panic in client reader: %v", r)
@@ -76,10 +88,12 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 					return
 				}
 				logger.LogInfo(c, fmt.Sprintf("type: %s, textToken: %d, audioToken: %d", realtimeEvent.Type, textToken, audioToken))
+				localUsageMu.Lock()
 				localUsage.TotalTokens += textToken + audioToken
 				localUsage.InputTokens += textToken + audioToken
 				localUsage.InputTokenDetails.TextTokens += textToken
 				localUsage.InputTokenDetails.AudioTokens += audioToken
+				localUsageMu.Unlock()
 
 				err = helper.WssString(c, targetConn, string(message))
 				if err != nil {
@@ -95,7 +109,10 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 		}
 	})
 
+	wg.Add(1)
 	gopool.Go(func() {
+		// Registered before the recover below so it still runs last on a panic.
+		defer wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
 				errChan <- fmt.Errorf("panic in target reader: %v", r)
@@ -141,7 +158,9 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 						// 本次计费完成，清除
 						usage = &dto.RealtimeUsage{}
 
+						localUsageMu.Lock()
 						localUsage = &dto.RealtimeUsage{}
+						localUsageMu.Unlock()
 					} else {
 						textToken, audioToken, err := service.CountTokenRealtime(info, *realtimeEvent, info.UpstreamModelName)
 						if err != nil {
@@ -149,23 +168,31 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 							return
 						}
 						logger.LogInfo(c, fmt.Sprintf("type: %s, textToken: %d, audioToken: %d", realtimeEvent.Type, textToken, audioToken))
-						localUsage.TotalTokens += textToken + audioToken
 						info.IsFirstRequest = false
+						// Detach the accumulator under the same lock that adds to it, so
+						// tokens the client reader records while the charge below is in
+						// flight land in the fresh one instead of being wiped by the reset.
+						localUsageMu.Lock()
+						localUsage.TotalTokens += textToken + audioToken
 						localUsage.InputTokens += textToken + audioToken
 						localUsage.InputTokenDetails.TextTokens += textToken
 						localUsage.InputTokenDetails.AudioTokens += audioToken
-						err = preConsumeUsage(c, info, localUsage, sumUsage)
+						// 本次计费完成，清除
+						billedUsage := localUsage
+						localUsage = &dto.RealtimeUsage{}
+						localUsageMu.Unlock()
+
+						err = preConsumeUsage(c, info, billedUsage, sumUsage)
 						if err != nil {
 							errChan <- fmt.Errorf("error consume usage: %v", err)
 							return
 						}
-						// 本次计费完成，清除
-						localUsage = &dto.RealtimeUsage{}
 						// print now usage
 					}
 					logger.LogInfo(c, fmt.Sprintf("realtime streaming sumUsage: %v", sumUsage))
+					localUsageMu.Lock()
 					logger.LogInfo(c, fmt.Sprintf("realtime streaming localUsage: %v", localUsage))
-					logger.LogInfo(c, fmt.Sprintf("realtime streaming localUsage: %v", localUsage))
+					localUsageMu.Unlock()
 
 				} else if realtimeEvent.Type == dto.RealtimeEventTypeSessionUpdated || realtimeEvent.Type == dto.RealtimeEventTypeSessionCreated {
 					realtimeSession := realtimeEvent.Session
@@ -181,10 +208,12 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 						return
 					}
 					logger.LogInfo(c, fmt.Sprintf("type: %s, textToken: %d, audioToken: %d", realtimeEvent.Type, textToken, audioToken))
+					localUsageMu.Lock()
 					localUsage.TotalTokens += textToken + audioToken
 					localUsage.OutputTokens += textToken + audioToken
 					localUsage.OutputTokenDetails.TextTokens += textToken
 					localUsage.OutputTokenDetails.AudioTokens += audioToken
+					localUsageMu.Unlock()
 				}
 
 				err = helper.WssString(c, clientConn, string(message))
@@ -209,6 +238,26 @@ func OpenaiRealtimeHandler(c *gin.Context, info *relaycommon.RelayInfo) (*types.
 		logger.LogError(c, "realtime error: "+err.Error())
 	case <-c.Done():
 	}
+
+	// Only one of the two readers has stopped at this point; the other is still
+	// blocked in ReadMessage on a peer that may never speak again, so the join
+	// below has to force both reads to fail first.
+	//
+	// The target connection gets a full Close: WssHelper closes it the moment this
+	// returns anyway, and closing also unblocks the client reader if it is parked
+	// writing to a stalled upstream. The client connection only gets an expired
+	// read deadline, because the caller still owns it and writes a final error
+	// frame to it, and a deadline leaves writes alone. Note that expiring the
+	// *write* deadline is not an option: gorilla stores it in an unsynchronised
+	// field that an in-flight write is already reading.
+	_ = targetConn.Close()
+	_ = clientConn.SetReadDeadline(time.Now())
+
+	// Joining before touching usage/localUsage/sumUsage is what makes the reads
+	// below safe: the readers reassign those pointers and accumulate into them,
+	// and this is the single happens-before edge covering all three. It also keeps
+	// a reader from writing to a connection the caller is about to close.
+	wg.Wait()
 
 	if usage.TotalTokens != 0 {
 		_ = preConsumeUsage(c, info, usage, sumUsage)

@@ -7,8 +7,7 @@ func RefreshPricing() {
 	updatePricingLock.Lock()
 	defer updatePricingLock.Unlock()
 
-	modelSupportEndpointsLock.Lock()
-	defer modelSupportEndpointsLock.Unlock()
-
+	// updatePricing 在发布阶段自行持有 modelSupportEndpointsLock，
+	// 这里再加锁会与其自身死锁。
 	updatePricing()
 }

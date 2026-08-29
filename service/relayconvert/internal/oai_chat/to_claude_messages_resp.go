@@ -40,16 +40,13 @@ func buildClaudeUsageFromOpenAIUsage(oaiUsage *dto.Usage) *dto.ClaudeUsage {
 		oaiUsage.ClaudeCacheCreation1hTokens,
 	)
 	cacheCreationTokens := oaiUsage.PromptTokensDetails.CacheCreationTokensTotal()
-	inputTokens := oaiUsage.PromptTokens
-	if oaiUsage.PromptTokensDetails.CacheWriteTokens > 0 {
-		// OpenAI native cache-write usage counts cached and cache-write tokens
-		// inside prompt_tokens, while Claude semantics reports input_tokens
-		// excluding both. Both counts are unadjusted prefixes and may overlap,
-		// so clamp a negative remainder at zero.
-		inputTokens = oaiUsage.PromptTokens - oaiUsage.PromptTokensDetails.CachedTokens - cacheCreationTokens
-		if inputTokens < 0 {
-			inputTokens = 0
-		}
+	// OpenAI-semantic usage counts cached and cache-write tokens inside
+	// prompt_tokens, while Claude semantics reports input_tokens excluding
+	// both. The counts are unadjusted prefixes and may overlap, so clamp a
+	// negative remainder at zero.
+	inputTokens := oaiUsage.PromptTokens - oaiUsage.PromptTokensDetails.CachedTokens - cacheCreationTokens
+	if inputTokens < 0 {
+		inputTokens = 0
 	}
 	usage := &dto.ClaudeUsage{
 		InputTokens:              inputTokens,
@@ -146,43 +143,44 @@ func StreamResponseOpenAI2Claude(openAIResponse *dto.ChatCompletionsStreamRespon
 		if openAIResponse.IsToolCall() {
 			info.ClaudeConvertInfo.LastMessagesType = relaycommon.LastMessageTypeTools
 			info.ClaudeConvertInfo.ToolCallBaseIndex = 0
-			info.ClaudeConvertInfo.ToolCallMaxIndexOffset = 0
-			var toolCall dto.ToolCallResponse
-			if len(openAIResponse.Choices) > 0 && len(openAIResponse.Choices[0].Delta.ToolCalls) > 0 {
-				toolCall = openAIResponse.Choices[0].Delta.ToolCalls[0]
-			} else {
-				first := openAIResponse.GetFirstToolCall()
-				if first != nil {
-					toolCall = *first
-				} else {
-					toolCall = dto.ToolCallResponse{}
+			maxOffset := 0
+			// IsToolCall guarantees Choices[0].Delta.ToolCalls is non-empty; the
+			// first chunk may already carry multiple parallel tool calls, so each
+			// one must open its own content block at a distinct index.
+			for i, toolCall := range openAIResponse.Choices[0].Delta.ToolCalls {
+				offset := i
+				if toolCall.Index != nil {
+					offset = *toolCall.Index
+				}
+				if offset > maxOffset {
+					maxOffset = offset
+				}
+				resp := &dto.ClaudeResponse{
+					Type: "content_block_start",
+					ContentBlock: &dto.ClaudeMediaMessage{
+						Id:    toolCall.ID,
+						Type:  "tool_use",
+						Name:  toolCall.Function.Name,
+						Input: map[string]interface{}{},
+					},
+				}
+				resp.SetIndex(offset)
+				claudeResponses = append(claudeResponses, resp)
+				// 首块包含工具 delta，则追加 input_json_delta
+				if toolCall.Function.Arguments != "" {
+					idx := offset
+					claudeResponses = append(claudeResponses, &dto.ClaudeResponse{
+						Index: &idx,
+						Type:  "content_block_delta",
+						Delta: &dto.ClaudeMediaMessage{
+							Type:        "input_json_delta",
+							PartialJson: &toolCall.Function.Arguments,
+						},
+					})
 				}
 			}
-			resp := &dto.ClaudeResponse{
-				Type: "content_block_start",
-				ContentBlock: &dto.ClaudeMediaMessage{
-					Id:    toolCall.ID,
-					Type:  "tool_use",
-					Name:  toolCall.Function.Name,
-					Input: map[string]interface{}{},
-				},
-			}
-			resp.SetIndex(0)
-			claudeResponses = append(claudeResponses, resp)
-			// 首块包含工具 delta，则追加 input_json_delta
-			if toolCall.Function.Arguments != "" {
-				idx := 0
-				claudeResponses = append(claudeResponses, &dto.ClaudeResponse{
-					Index: &idx,
-					Type:  "content_block_delta",
-					Delta: &dto.ClaudeMediaMessage{
-						Type:        "input_json_delta",
-						PartialJson: &toolCall.Function.Arguments,
-					},
-				})
-			}
-		} else {
-
+			info.ClaudeConvertInfo.ToolCallMaxIndexOffset = maxOffset
+			info.ClaudeConvertInfo.Index = maxOffset
 		}
 		// 判断首个响应是否存在内容（非标准的 OpenAI 响应）
 		if len(openAIResponse.Choices) > 0 {
@@ -293,12 +291,11 @@ func StreamResponseOpenAI2Claude(openAIResponse *dto.ChatCompletionsStreamRespon
 		doneChunk := chosenChoice.FinishReason != nil && *chosenChoice.FinishReason != ""
 		if doneChunk {
 			info.FinishReason = *chosenChoice.FinishReason
-			oaiUsage := openAIResponse.Usage
-			if oaiUsage == nil {
-				oaiUsage = info.ClaudeConvertInfo.Usage
+			if openAIResponse.Usage == nil && info.ClaudeConvertInfo.Usage == nil {
 				// Some upstreams emit finish_reason first, then send a final usage-only chunk.
-				// Defer closing until usage is available so the final message_delta carries it.
-				return claudeResponses
+				// Defer closing until usage is available so the final message_delta carries it;
+				// any delta riding on this chunk still goes out below.
+				doneChunk = false
 			}
 		}
 

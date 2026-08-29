@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/common/limiter"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/setting"
 
 	"github.com/gin-gonic/gin"
@@ -68,10 +69,18 @@ func recordRedisRequest(ctx context.Context, rdb *redis.Client, key string, maxC
 		return
 	}
 
+	// One round trip instead of three. This runs on every successful relay
+	// request, and the three commands were already fire-and-forget.
 	now := time.Now().Format(timeFormat)
-	rdb.LPush(ctx, key, now)
-	rdb.LTrim(ctx, key, 0, int64(maxCount-1))
-	rdb.Expire(ctx, key, time.Duration(setting.ModelRequestRateLimitDurationMinutes)*time.Minute)
+	_, err := rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.LPush(ctx, key, now)
+		pipe.LTrim(ctx, key, 0, int64(maxCount-1))
+		pipe.Expire(ctx, key, time.Duration(setting.ModelRequestRateLimitDurationMinutes)*time.Minute)
+		return nil
+	})
+	if err != nil {
+		logger.LogError(ctx, "failed to record rate limit request: "+err.Error())
+	}
 }
 
 // Redis限流处理器
@@ -85,7 +94,7 @@ func redisRateLimitHandler(duration int64, totalMaxCount, successMaxCount int) g
 		successKey := fmt.Sprintf("rateLimit:%s:%s", ModelRequestRateLimitSuccessCountMark, userId)
 		allowed, err := checkRedisRateLimit(ctx, rdb, successKey, successMaxCount, duration)
 		if err != nil {
-			fmt.Println("检查成功请求数限制失败:", err.Error())
+			logger.LogError(c.Request.Context(), "rate limit success-count check failed: "+err.Error())
 			abortWithOpenAiMessage(c, http.StatusInternalServerError, "rate_limit_check_failed")
 			return
 		}
@@ -108,13 +117,16 @@ func redisRateLimitHandler(duration int64, totalMaxCount, successMaxCount int) g
 			)
 
 			if err != nil {
-				fmt.Println("检查总请求数限制失败:", err.Error())
+				logger.LogError(c.Request.Context(), "rate limit total-count check failed: "+err.Error())
 				abortWithOpenAiMessage(c, http.StatusInternalServerError, "rate_limit_check_failed")
 				return
 			}
 
 			if !allowed {
+				// The success-limit branch above returns here; this one relied on
+				// c.Next() being a no-op after Abort to reach the same outcome.
 				abortWithOpenAiMessage(c, http.StatusTooManyRequests, fmt.Sprintf("您已达到总请求数限制：%d分钟内最多请求%d次，包括失败次数，请检查您的请求是否正确", setting.ModelRequestRateLimitDurationMinutes, totalMaxCount))
+				return
 			}
 		}
 

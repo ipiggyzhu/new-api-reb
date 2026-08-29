@@ -31,6 +31,10 @@ type ModelRequest struct {
 
 func Distribute() func(c *gin.Context) {
 	return func(c *gin.Context) {
+		// Every exit path releases the concurrency slot, including the aborts below
+		// and a panic recovered further up the chain. A slot that leaks is never
+		// reclaimed, so the channel would look permanently busier than it is.
+		defer service.ReleaseHeldChannelSlot(c)
 		var channel *model.Channel
 		channelId, ok := common.GetContextKey(c, constant.ContextKeyTokenSpecificChannelId)
 		modelRequest, shouldSelectChannel, err := getModelRequest(c)
@@ -53,11 +57,18 @@ func Distribute() func(c *gin.Context) {
 				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorChannelDisabled))
 				return
 			}
+			// A token pinned to one channel names it explicitly, so the cap is not
+			// enforced here — rejecting would make a saturated channel impossible to
+			// reach for the operator diagnosing it. The slot is still taken (limit 0)
+			// so the gauge, and therefore the cap other requests are measured
+			// against, counts this request too.
+			model.AcquireChannelSlot(channel.Id, 0)
+			service.HoldChannelSlot(c, channel.Id)
 		} else {
 			// Select a channel for the user
 			// check token model mapping
 			modelLimitEnable := common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled)
-			if modelLimitEnable {
+			if modelLimitEnable && !isNoModelTaskQuery(c.GetInt("relay_mode")) {
 				s, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
 				if !ok {
 					// token model limit is empty, all models are not allowed
@@ -103,10 +114,17 @@ func Distribute() func(c *gin.Context) {
 
 				if preferredChannelID, found := service.GetPreferredChannelByAffinity(c, modelRequest.Model, usingGroup); found {
 					affinityUsable := false
+					affinitySaturated := false
 					preferred, err := model.CacheGetChannel(preferredChannelID)
 					if err == nil && preferred != nil && preferred.Status == common.ChannelStatusEnabled &&
 						channelSupportsRequestPath(preferred, c.Request.URL.Path, modelRequest.Model) {
-						if usingGroup == "auto" {
+						// A pinned channel that is merely busy is not a broken one. Taking
+						// its slot here is what keeps affinity and the concurrency cap
+						// consistent: the pin wins only while the channel has room, and
+						// the overflow falls through to ordinary tier selection below.
+						if !model.AcquireChannelSlot(preferred.Id, preferred.GetMaxConcurrency()) {
+							affinitySaturated = true
+						} else if usingGroup == "auto" {
 							userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
 							autoGroups := service.GetUserAutoGroup(userGroup)
 							for _, g := range autoGroups {
@@ -115,6 +133,7 @@ func Distribute() func(c *gin.Context) {
 									common.SetContextKey(c, constant.ContextKeyAutoGroup, g)
 									channel = preferred
 									affinityUsable = true
+									service.HoldChannelSlot(c, preferred.Id)
 									service.MarkChannelAffinityUsed(c, g, preferred.Id)
 									break
 								}
@@ -123,10 +142,22 @@ func Distribute() func(c *gin.Context) {
 							channel = preferred
 							selectGroup = usingGroup
 							affinityUsable = true
+							service.HoldChannelSlot(c, preferred.Id)
 							service.MarkChannelAffinityUsed(c, usingGroup, preferred.Id)
 						}
+						if !affinityUsable && !affinitySaturated {
+							// The slot was taken before the group checks rejected the
+							// channel, and no one downstream will bind it.
+							model.ReleaseChannelSlot(preferred.Id)
+						}
 					}
-					if !affinityUsable && !service.ShouldKeepChannelAffinityOnChannelDisabled() {
+					if affinitySaturated {
+						// Deliberately neither cleared nor refreshed: the key stays pinned
+						// so requests return to this channel once it drains, and
+						// SetChannelAffinityBypassed stops the fallback channel from
+						// stealing the pin on its way out.
+						service.SetChannelAffinityBypassed(c)
+					} else if !affinityUsable && !service.ShouldKeepChannelAffinityOnChannelDisabled() {
 						service.ClearCurrentChannelAffinityCache(c)
 					}
 				}
@@ -144,6 +175,12 @@ func Distribute() func(c *gin.Context) {
 						if usingGroup == "auto" {
 							showGroup = fmt.Sprintf("auto(%s)", selectGroup)
 						}
+						if errors.Is(err, model.ErrAllChannelsSaturated) {
+							abortWithOpenAiMessage(c, http.StatusServiceUnavailable,
+								i18n.T(c, i18n.MsgDistributorChannelsSaturated, map[string]any{"Group": showGroup, "Model": modelRequest.Model}),
+								types.ErrorCodeChannelsSaturated)
+							return
+						}
 						message := i18n.T(c, i18n.MsgDistributorGetChannelFailed, map[string]any{"Group": showGroup, "Model": modelRequest.Model, "Error": err.Error()})
 						// 如果错误，但是渠道不为空，说明是数据库一致性问题
 						//if channel != nil {
@@ -157,13 +194,25 @@ func Distribute() func(c *gin.Context) {
 						abortWithOpenAiMessage(c, http.StatusServiceUnavailable, i18n.T(c, i18n.MsgDistributorNoAvailableChannel, map[string]any{"Group": usingGroup, "Model": modelRequest.Model}), types.ErrorCodeModelNotFound)
 						return
 					}
+					service.HoldChannelSlot(c, channel.Id)
 				}
 			}
 		}
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
-		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
+		setupErr := SetupContextForSelectedChannel(c, channel, modelRequest.Model)
+		// channel stays nil on requests that skip channel selection (task fetch
+		// endpoints); the setup call then only stamps original_model and its
+		// channel-is-nil error is expected. A real channel that fails setup
+		// (e.g. no enabled key) must not reach the relay with an empty key.
+		if channel != nil && setupErr != nil {
+			abortWithOpenAiMessage(c, http.StatusServiceUnavailable, setupErr.Error(), setupErr.GetErrorCode())
+			return
+		}
 		c.Next()
-		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
+		// The response status is not a verdict here: a stream that failed
+		// mid-flight already committed its 200, so RecordChannelAffinity reads the
+		// relay handler's own outcome instead.
+		if channel != nil {
 			service.RecordChannelAffinity(c, channel.Id)
 		}
 	}
@@ -216,6 +265,27 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	}
 	if !gjson.ValidBytes(requestBody) {
 		return nil, errors.New("invalid JSON request body")
+	}
+
+	// gjson reads the first occurrence of a duplicated object key while
+	// encoding/json keeps the last, so a body with two top-level "model" (or
+	// "group") keys would be authorized and billed as one model yet forwarded
+	// upstream as the other when pass-through keeps the raw body.
+	modelKeys, groupKeys := 0, 0
+	gjson.ParseBytes(requestBody).ForEach(func(key, _ gjson.Result) bool {
+		switch key.String() {
+		case "model":
+			modelKeys++
+		case "group":
+			groupKeys++
+		}
+		return modelKeys < 2 && groupKeys < 2
+	})
+	if modelKeys > 1 {
+		return nil, errors.New("duplicate model field in request body")
+	}
+	if groupKeys > 1 {
+		return nil, errors.New("duplicate group field in request body")
 	}
 
 	values := gjson.GetManyBytes(requestBody, "model", "group")
@@ -438,6 +508,26 @@ func getTaskOriginModelName(c *gin.Context) string {
 		return task.Properties.OriginModelName
 	}
 	return ""
+}
+
+// isNoModelTaskQuery reports whether the request is a mj/suno task
+// fetch/status endpoint. getModelRequest deliberately leaves the model empty
+// for these modes (they consume no model), so the token model allowlist has
+// nothing to authorize and must not reject them. Video task fetch is not
+// exempt: getTaskOriginModelName backfills the task's origin model there and
+// the allowlist check runs against it.
+func isNoModelTaskQuery(relayMode int) bool {
+	switch relayMode {
+	case relayconstant.RelayModeMidjourneyTaskFetch,
+		relayconstant.RelayModeMidjourneyTaskFetchByCondition,
+		relayconstant.RelayModeMidjourneyTaskImageSeed,
+		relayconstant.RelayModeMidjourneyNotify,
+		relayconstant.RelayModeSunoFetch,
+		relayconstant.RelayModeSunoFetchByID:
+		return true
+	default:
+		return false
+	}
 }
 
 func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string) *types.NewAPIError {

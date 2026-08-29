@@ -71,11 +71,16 @@ func memoryEmailVerificationRateLimiter(c *gin.Context) {
 
 func EmailVerificationRateLimit() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// Init unconditionally: the Redis path falls back to the in-memory limiter
+		// when Incr fails, and with Redis enabled nothing else on the request path
+		// initializes it — rateLimitFactory and userRateLimitFactory both take
+		// their own Redis branch. Request would then assign into a nil store map
+		// and panic on the first Redis hiccup. Init is idempotent via sync.Once.
+		inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
 		if common.RedisEnabled {
 			redisEmailVerificationRateLimiter(c)
-		} else {
-			inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
-			memoryEmailVerificationRateLimiter(c)
+			return
 		}
+		memoryEmailVerificationRateLimiter(c)
 	}
 }

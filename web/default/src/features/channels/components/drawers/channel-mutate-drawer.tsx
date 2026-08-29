@@ -284,6 +284,9 @@ const SENSITIVE_FORM_FIELDS = [
   'thinking_to_content',
   'proxy',
   'pass_through_body_enabled',
+  'websocket_transport',
+  'synthetic_client_headers',
+  'synthetic_client_headers_profile',
   'system_prompt',
   'system_prompt_override',
   'allow_service_tier',
@@ -332,11 +335,14 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.remark?.trim() ||
     values.priority ||
     values.weight ||
+    values.max_concurrency ||
     values.proxy?.trim() ||
     values.system_prompt?.trim() ||
     values.force_format ||
     values.thinking_to_content ||
     values.pass_through_body_enabled ||
+    values.websocket_transport ||
+    (values.synthetic_client_headers_profile ?? 'off') !== 'off' ||
     values.system_prompt_override ||
     values.claude_beta_query ||
     values.upstream_model_update_check_enabled ||
@@ -730,6 +736,7 @@ export function ChannelMutateDrawer({
   const currentAdvancedCustom = form.watch('advanced_custom')
   const currentPriority = form.watch('priority')
   const currentWeight = form.watch('weight')
+  const currentMaxConcurrency = form.watch('max_concurrency')
   const currentTestModel = form.watch('test_model')
   const currentAutoBan = form.watch('auto_ban')
   const currentTag = form.watch('tag')
@@ -740,6 +747,9 @@ export function ChannelMutateDrawer({
   const currentForceFormat = form.watch('force_format')
   const currentThinkingToContent = form.watch('thinking_to_content')
   const currentPassThroughBodyEnabled = form.watch('pass_through_body_enabled')
+  const currentSyntheticClientHeadersProfile = form.watch(
+    'synthetic_client_headers_profile'
+  )
   const currentDisableTaskPollingSleep = form.watch(
     'disable_task_polling_sleep'
   )
@@ -992,6 +1002,7 @@ export function ChannelMutateDrawer({
   const routingStrategyConfigured = Boolean(
     currentPriority ||
     currentWeight ||
+    currentMaxConcurrency ||
     currentTestModel?.trim() ||
     (currentAutoBan ?? 1) !== 1
   )
@@ -1007,6 +1018,7 @@ export function ChannelMutateDrawer({
     currentForceFormat ||
     currentThinkingToContent ||
     currentPassThroughBodyEnabled ||
+    (currentSyntheticClientHeadersProfile ?? 'off') !== 'off' ||
     currentDisableTaskPollingSleep ||
     currentProxy?.trim() ||
     currentSystemPrompt?.trim() ||
@@ -1204,6 +1216,15 @@ export function ChannelMutateDrawer({
     modelMappingGuardrail.entries.length > 3
       ? modelMappingGuardrail.entries.length - 3
       : 0
+
+  // Machine-written by the backend after a handshake proved the upstream refuses
+  // the upgrade. Read from settings rather than form state because it is never a
+  // form field: the switch shows what the admin asked for, this shows what is
+  // actually happening. buildSettingsJSON drops the flag, so saving clears it.
+  const websocketDowngraded = useMemo(
+    () => parseSettingsRecord(currentSettings).websocket_unsupported === true,
+    [currentSettings]
+  )
 
   const upstreamUpdateMeta = useMemo(() => {
     const settings = parseSettingsRecord(currentSettings)
@@ -3658,6 +3679,33 @@ export function ChannelMutateDrawer({
                                   </FormItem>
                                 )}
                               />
+
+                              <FormField
+                                control={form.control}
+                                name='max_concurrency'
+                                render={({ field }) => (
+                                  <FormItem>
+                                    <FormLabel>
+                                      {t('Concurrency Limit')}
+                                    </FormLabel>
+                                    <FormControl>
+                                      <Input
+                                        type='number'
+                                        min={0}
+                                        placeholder='0'
+                                        {...field}
+                                        onChange={(e) =>
+                                          field.onChange(Number(e.target.value))
+                                        }
+                                      />
+                                    </FormControl>
+                                    <FormDescription>
+                                      {t(FIELD_DESCRIPTIONS.MAX_CONCURRENCY)}
+                                    </FormDescription>
+                                    <FormMessage />
+                                  </FormItem>
+                                )}
+                              />
                             </div>
 
                             <FormField
@@ -4128,6 +4176,100 @@ export function ChannelMutateDrawer({
                                         onCheckedChange={field.onChange}
                                       />
                                     </FormControl>
+                                  </FormItem>
+                                )}
+                              />
+
+                              <FormField
+                                control={form.control}
+                                name='websocket_transport'
+                                render={({ field }) => (
+                                  <FormItem className='px-4 py-3'>
+                                    <div className='flex items-center justify-between'>
+                                      <div className='space-y-0.5'>
+                                        <FormLabel>
+                                          {t('WebSocket Transport')}
+                                        </FormLabel>
+                                        <FormDescription>
+                                          {t(
+                                            'Use the Responses API WebSocket transport for /v1/responses. Requires an upstream that supports WebSocket mode; pointing at an HTTP-only relay falls back to SSE automatically.'
+                                          )}
+                                        </FormDescription>
+                                      </div>
+                                      <FormControl>
+                                        <Switch
+                                          checked={field.value}
+                                          onCheckedChange={field.onChange}
+                                        />
+                                      </FormControl>
+                                    </div>
+                                    {websocketDowngraded && (
+                                      <p className='text-destructive mt-2 text-xs'>
+                                        {t(
+                                          'Upstream refused the WebSocket upgrade, so this channel is running on SSE. Save the channel to try again.'
+                                        )}
+                                      </p>
+                                    )}
+                                  </FormItem>
+                                )}
+                              />
+
+                              <FormField
+                                control={form.control}
+                                name='synthetic_client_headers_profile'
+                                render={({ field }) => (
+                                  <FormItem className='px-4 py-3'>
+                                    <FormLabel>
+                                      {t('Synthesize Client Headers')}
+                                    </FormLabel>
+                                    <Select
+                                      onValueChange={field.onChange}
+                                      value={field.value ?? 'off'}
+                                    >
+                                      <FormControl>
+                                        <SelectTrigger>
+                                          <SelectValue
+                                            placeholder={t(
+                                              'Select client profile'
+                                            )}
+                                          />
+                                        </SelectTrigger>
+                                      </FormControl>
+                                      <SelectContent
+                                        alignItemWithTrigger={false}
+                                      >
+                                        <SelectGroup>
+                                          <SelectItem value='off'>
+                                            {t('Off — send no client profile')}
+                                          </SelectItem>
+                                          <SelectItem value='auto'>
+                                            {t(
+                                              'Auto — match the channel type (recommended)'
+                                            )}
+                                          </SelectItem>
+                                          <SelectItem value='claude'>
+                                            {t('Claude Code CLI')}
+                                          </SelectItem>
+                                          <SelectItem value='openai'>
+                                            {t('openai-python SDK')}
+                                          </SelectItem>
+                                          <SelectItem value='codex'>
+                                            {t('Codex CLI')}
+                                          </SelectItem>
+                                          <SelectItem value='gemini'>
+                                            {t('google-genai SDK')}
+                                          </SelectItem>
+                                          <SelectItem value='generic'>
+                                            {t('Generic HTTP client')}
+                                          </SelectItem>
+                                        </SelectGroup>
+                                      </SelectContent>
+                                    </Select>
+                                    <FormDescription>
+                                      {t(
+                                        'Send generated client headers instead of forwarding the caller’s, so no caller credential, IP or user-agent reaches upstream. Auto follows the channel type — an Anthropic channel looks like Claude Code. Pick a family only when the upstream expects a different client than the channel type implies. Client versions come from the header presets in system settings.'
+                                      )}
+                                    </FormDescription>
                                   </FormItem>
                                 )}
                               />

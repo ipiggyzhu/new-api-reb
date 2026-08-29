@@ -50,13 +50,19 @@ export function useOAuthLogin(status: SystemStatus | null) {
 
   useEffect(() => {
     setGithubButtonText(t('Continue with GitHub'))
+  }, [t])
 
-    return () => {
+  // Kept separate from the label effect: sharing [t] meant a language change
+  // mid-redirect cancelled the timeout that re-enables the button, leaving it
+  // disabled with no way back.
+  useEffect(
+    () => () => {
       if (githubTimeoutRef.current) {
         clearTimeout(githubTimeoutRef.current)
       }
-    }
-  }, [t])
+    },
+    []
+  )
 
   const resetSession = async () => {
     try {

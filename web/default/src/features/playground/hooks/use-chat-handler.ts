@@ -134,6 +134,10 @@ export function useChatHandler({
       if (streamFlushTimerRef.current !== null) {
         window.clearTimeout(streamFlushTimerRef.current)
       }
+      // A non-streaming completion can run for minutes; without this the fetch
+      // outlived the page and resolved into an unmounted component.
+      abortControllerRef.current?.abort()
+      abortControllerRef.current = null
     },
     []
   )

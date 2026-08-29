@@ -644,6 +644,8 @@ export function aggregateChannelsByTag(
         response_time: 0,
         priority: -1 as unknown as number | null,
         weight: -1 as unknown as number | null,
+        max_concurrency: -1 as unknown as number | null,
+        in_flight: 0,
         balance: 0,
         test_time: 0,
         created_time: 0,
@@ -685,6 +687,16 @@ export function aggregateChannelsByTag(
     } else if (tagRow.weight !== channel.weight) {
       tagRow.weight = null
     }
+
+    // Aggregate concurrency limit (same value or null if different)
+    if (tagRow.max_concurrency === -1) {
+      tagRow.max_concurrency = channel.max_concurrency
+    } else if (tagRow.max_concurrency !== channel.max_concurrency) {
+      tagRow.max_concurrency = null
+    }
+
+    // Aggregate in-flight requests (sum: the tag row's load is its children's)
+    tagRow.in_flight = (tagRow.in_flight ?? 0) + (channel.in_flight ?? 0)
 
     // Aggregate group (concatenate and deduplicate)
     if (tagRow.group === '') {

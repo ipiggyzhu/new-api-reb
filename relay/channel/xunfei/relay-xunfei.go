@@ -1,6 +1,7 @@
 package xunfei
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -130,7 +131,7 @@ func buildXunfeiAuthUrl(hostUrl string, apiKey, apiSecret string) string {
 
 func xunfeiStreamHandler(c *gin.Context, textRequest dto.GeneralOpenAIRequest, appId string, apiSecret string, apiKey string) (*dto.Usage, *types.NewAPIError) {
 	domain, authUrl := getXunfeiAuthUrl(c, apiKey, apiSecret, textRequest.Model)
-	dataChan, stopChan, err := xunfeiMakeRequest(textRequest, domain, authUrl, appId)
+	dataChan, stopChan, err := xunfeiMakeRequest(c.Request.Context(), textRequest, domain, authUrl, appId)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed)
 	}
@@ -160,7 +161,7 @@ func xunfeiStreamHandler(c *gin.Context, textRequest dto.GeneralOpenAIRequest, a
 
 func xunfeiHandler(c *gin.Context, textRequest dto.GeneralOpenAIRequest, appId string, apiSecret string, apiKey string) (*dto.Usage, *types.NewAPIError) {
 	domain, authUrl := getXunfeiAuthUrl(c, apiKey, apiSecret, textRequest.Model)
-	dataChan, stopChan, err := xunfeiMakeRequest(textRequest, domain, authUrl, appId)
+	dataChan, stopChan, err := xunfeiMakeRequest(c.Request.Context(), textRequest, domain, authUrl, appId)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed)
 	}
@@ -200,48 +201,66 @@ func xunfeiHandler(c *gin.Context, textRequest dto.GeneralOpenAIRequest, appId s
 	return &usage, nil
 }
 
-func xunfeiMakeRequest(textRequest dto.GeneralOpenAIRequest, domain, authUrl, appId string) (chan XunfeiChatResponse, chan bool, error) {
+func xunfeiMakeRequest(ctx context.Context, textRequest dto.GeneralOpenAIRequest, domain, authUrl, appId string) (chan XunfeiChatResponse, chan bool, error) {
 	d := websocket.Dialer{
 		HandshakeTimeout: 5 * time.Second,
 	}
 	conn, resp, err := d.Dial(authUrl, nil)
-	if err != nil || resp.StatusCode != 101 {
+	if err != nil {
 		return nil, nil, err
+	}
+	if resp != nil && resp.Body != nil {
+		// Dial replaces the handshake body with an in-memory buffer on both the
+		// success and bad-handshake paths, so this close owns no socket. Kept
+		// only so the code stays correct if that ever changes.
+		_ = resp.Body.Close()
+	}
+	if resp.StatusCode != 101 {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("xunfei websocket handshake failed with status %d", resp.StatusCode)
 	}
 
 	data := requestOpenAI2Xunfei(textRequest, appId, domain)
 	err = conn.WriteJSON(data)
 	if err != nil {
+		// The upgrade succeeded, so this goroutine owns the socket until the
+		// reader below takes over; returning without closing leaks it.
+		_ = conn.Close()
 		return nil, nil, err
 	}
 
 	dataChan := make(chan XunfeiChatResponse)
-	stopChan := make(chan bool)
+	// Buffered so the terminal signal never blocks once the consumer has left.
+	stopChan := make(chan bool, 1)
 	go func() {
 		defer func() {
 			conn.Close()
 		}()
+		defer func() { stopChan <- true }()
+
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
 				common.SysLog("error reading stream response: " + err.Error())
-				break
+				return
 			}
 			var response XunfeiChatResponse
 			err = json.Unmarshal(msg, &response)
 			if err != nil {
 				common.SysLog("error unmarshalling stream response: " + err.Error())
-				break
+				return
 			}
-			dataChan <- response
+			select {
+			case dataChan <- response:
+			case <-ctx.Done():
+				// The caller stopped reading (client disconnect); without this the
+				// send would block forever and leak this goroutine plus the socket.
+				return
+			}
 			if response.Payload.Choices.Status == 2 {
-				if err != nil {
-					common.SysLog("error closing websocket connection: " + err.Error())
-				}
-				break
+				return
 			}
 		}
-		stopChan <- true
 	}()
 
 	return dataChan, stopChan, nil

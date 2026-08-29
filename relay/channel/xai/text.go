@@ -1,6 +1,7 @@
 package xai
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -48,6 +49,12 @@ func xAIStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		if err := common.UnmarshalJsonStr(data, &xAIResp); err != nil {
 			common.SysLog("error unmarshalling stream response: " + err.Error())
 			sr.Error(err)
+			return
+		}
+		// A literal "data: null" frame unmarshals into a nil pointer without error.
+		// Record it as a soft error so the rest of the stream still gets relayed.
+		if xAIResp == nil {
+			sr.Error(errors.New("nil stream response"))
 			return
 		}
 

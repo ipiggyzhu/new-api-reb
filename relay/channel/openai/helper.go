@@ -131,6 +131,35 @@ func processCompletionsStreamResponse(streamResponse dto.CompletionsStreamRespon
 	}
 }
 
+// canForwardChunkImmediately reports whether a stream chunk can be written to
+// the client the moment it arrives, instead of being held until the next chunk
+// shows up.
+//
+// The one-chunk lookahead exists for a single reason: handleLastResponse may
+// suppress a trailing usage-only chunk when the caller did not ask for usage,
+// and the stream has to be one chunk ahead to know which chunk is the trailing
+// one. Paying that lookahead on every chunk delays the client's first token by a
+// full upstream inter-chunk interval, so it is only worth paying on chunks that
+// could actually be suppressed.
+//
+// Suppression requires a chunk carrying usage, so the "usage" substring is a
+// conservative filter: a chunk without it can never be suppressed and goes out
+// at once, which covers every content delta — the entire visible response. A
+// false positive (a model literally emitting `"usage"` in its text) merely falls
+// back to the old buffered behaviour for that one chunk.
+func canForwardChunkImmediately(info *relaycommon.RelayInfo, data string) bool {
+	if info.RelayFormat != types.RelayFormatOpenAI {
+		// Claude and Gemini rebuild the tail chunk in HandleFinalResponse using
+		// the settled usage, so for them the last chunk must stay buffered.
+		return false
+	}
+	if info.ShouldIncludeUsage {
+		// The caller asked for usage, so nothing is ever suppressed.
+		return true
+	}
+	return !strings.Contains(data, `"usage"`)
+}
+
 func handleLastResponse(lastStreamData string, responseId *string, createAt *int64,
 	systemFingerprint *string, model *string, usage **dto.Usage,
 	containStreamUsage *bool, info *relaycommon.RelayInfo,

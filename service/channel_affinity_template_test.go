@@ -116,66 +116,6 @@ func TestApplyChannelAffinityOverrideTemplate_MergeOperations(t *testing.T) {
 	require.Equal(t, "trim_prefix", secondOp["mode"])
 }
 
-func TestShouldSkipRetryAfterChannelAffinityFailure(t *testing.T) {
-	tests := []struct {
-		name string
-		ctx  func() *gin.Context
-		want bool
-	}{
-		{
-			name: "nil context",
-			ctx: func() *gin.Context {
-				return nil
-			},
-			want: false,
-		},
-		{
-			name: "explicit skip retry flag in context",
-			ctx: func() *gin.Context {
-				ctx := buildChannelAffinityTemplateContextForTest(channelAffinityMeta{
-					RuleName:   "rule-explicit-flag",
-					SkipRetry:  false,
-					UsingGroup: "default",
-					ModelName:  "gpt-5",
-				})
-				ctx.Set(ginKeyChannelAffinitySkipRetry, true)
-				return ctx
-			},
-			want: true,
-		},
-		{
-			name: "fallback to matched rule meta",
-			ctx: func() *gin.Context {
-				return buildChannelAffinityTemplateContextForTest(channelAffinityMeta{
-					RuleName:   "rule-skip-retry",
-					SkipRetry:  true,
-					UsingGroup: "default",
-					ModelName:  "gpt-5",
-				})
-			},
-			want: true,
-		},
-		{
-			name: "no flag and no skip retry meta",
-			ctx: func() *gin.Context {
-				return buildChannelAffinityTemplateContextForTest(channelAffinityMeta{
-					RuleName:   "rule-no-skip-retry",
-					SkipRetry:  false,
-					UsingGroup: "default",
-					ModelName:  "gpt-5",
-				})
-			},
-			want: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, ShouldSkipRetryAfterChannelAffinityFailure(tt.ctx()))
-		})
-	}
-}
-
 func TestExtractChannelAffinityValue_RequestHeader(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(rec)
@@ -253,6 +193,10 @@ func TestClearCurrentChannelAffinityCache(t *testing.T) {
 		RuleName:   "codex cli trace",
 		SkipRetry:  true,
 	})
+	// The skip-retry flag exists only once affinity actually served the request, so
+	// it has to be established the same way production does — by marking the pinned
+	// channel as used — rather than inferred from the rule's SkipRetry alone.
+	MarkChannelAffinityUsed(ctx, "default", 9527)
 	require.True(t, ShouldSkipRetryAfterChannelAffinityFailure(ctx))
 
 	deleted := ClearCurrentChannelAffinityCache(ctx)

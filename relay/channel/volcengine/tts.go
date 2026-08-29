@@ -12,6 +12,7 @@ import (
 
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -143,6 +144,10 @@ func getContentTypeByEncoding(encoding string) string {
 }
 
 func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, encoding string) (usage any, err *types.NewAPIError) {
+	// Registered before the read: a ReadAll that fails midway returned without
+	// ever reaching a deferred Close, so the connection was never released.
+	defer service.CloseResponseBodyGracefully(resp)
+
 	body, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
 		return nil, types.NewErrorWithStatusCode(
@@ -151,7 +156,6 @@ func handleTTSResponse(c *gin.Context, resp *http.Response, info *relaycommon.Re
 			http.StatusInternalServerError,
 		)
 	}
-	defer resp.Body.Close()
 
 	var volcResp VolcengineTTSResponse
 	if unmarshalErr := json.Unmarshal(body, &volcResp); unmarshalErr != nil {

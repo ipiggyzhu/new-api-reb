@@ -136,7 +136,9 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 
 	var requestBody io.Reader
-	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+	// A channel test builds its payload as a Go struct and leaves the gin body nil,
+	// so passing it through would send an empty body upstream.
+	if (model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled) && !info.IsChannelTest {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
@@ -194,13 +196,22 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		}
 	}
 
-	usage, openaiErr := adaptor.DoResponse(c, resp.(*http.Response), info)
+	// httpResp, not a second resp.(*http.Response): the assertion above is inside
+	// an `if resp != nil` guard because an adaptor may legitimately return a nil
+	// response, and re-asserting out here panics on exactly that case. A panic
+	// unwinds past controller.Relay's deferred refund, which only refunds when its
+	// error variable is non-nil, so the pre-consumed quota would be silently kept.
+	usage, openaiErr := adaptor.DoResponse(c, httpResp, info)
 	if openaiErr != nil {
 		service.ResetStatusCode(openaiErr, statusCodeMappingStr)
 		return openaiErr
 	}
 
-	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+	usageDto, newAPIError := adaptorUsage(usage)
+	if newAPIError != nil {
+		return newAPIError
+	}
+	service.PostTextConsumeQuota(c, info, usageDto, nil)
 	return nil
 }
 
@@ -295,12 +306,21 @@ func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo) (newAPI
 		}
 	}
 
-	usage, openaiErr := adaptor.DoResponse(c, resp.(*http.Response), info)
+	// httpResp, not a second resp.(*http.Response): the assertion above is inside
+	// an `if resp != nil` guard because an adaptor may legitimately return a nil
+	// response, and re-asserting out here panics on exactly that case. A panic
+	// unwinds past controller.Relay's deferred refund, which only refunds when its
+	// error variable is non-nil, so the pre-consumed quota would be silently kept.
+	usage, openaiErr := adaptor.DoResponse(c, httpResp, info)
 	if openaiErr != nil {
 		service.ResetStatusCode(openaiErr, statusCodeMappingStr)
 		return openaiErr
 	}
 
-	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
+	usageDto, newAPIError := adaptorUsage(usage)
+	if newAPIError != nil {
+		return newAPIError
+	}
+	service.PostTextConsumeQuota(c, info, usageDto, nil)
 	return nil
 }

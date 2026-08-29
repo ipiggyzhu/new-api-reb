@@ -17,11 +17,11 @@ import (
 )
 
 func RerankHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	defer service.CloseResponseBodyGracefully(resp)
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
-	service.CloseResponseBodyGracefully(resp)
 	logger.LogDebug(c, "reranker response body: %s", responseBody)
 	var jinaResp dto.RerankResponse
 	if info.ChannelType == constant.ChannelTypeXinference {
