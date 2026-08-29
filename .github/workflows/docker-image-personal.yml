@@ -1,0 +1,97 @@
+name: Publish Docker image (personal, ghcr.io)
+
+# Personal build for this fork. It publishes to this repository's own GitHub
+# Container Registry namespace, which needs no configured secrets: GITHUB_TOKEN
+# is issued automatically and `packages: write` is all the permission required.
+#
+# The upstream docker-image-branch.yml is left untouched. It logs in to Docker
+# Hub and pushes to calciumion/new-api, which only the upstream maintainer can
+# write to, so it cannot work from a fork no matter which credentials are set.
+
+on:
+  push:
+    branches:
+      - feat/channel-routing-and-gateway-improvements
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & push (amd64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 1
+
+      - name: Resolve image name and tags
+        id: meta
+        env:
+          REPOSITORY: ${{ github.repository }}
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          # GHCR rejects uppercase in image paths, and a branch name may contain
+          # characters that are not valid in a tag (a slash, most commonly).
+          IMAGE=$(printf '%s' "ghcr.io/$REPOSITORY" | tr '[:upper:]' '[:lower:]')
+
+          TAG_PREFIX=$(printf '%s' "$BRANCH_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_.-]+/-/g; s/^[.-]+//; s/[.-]+$//')
+          TAG_PREFIX=${TAG_PREFIX:0:105}
+          TAG_PREFIX=$(printf '%s' "$TAG_PREFIX" | sed -E 's/[.-]+$//')
+          if [ -z "$TAG_PREFIX" ]; then
+            echo "::error::Branch '$BRANCH_NAME' cannot be converted to a valid Docker tag"
+            exit 1
+          fi
+
+          VERSION="${TAG_PREFIX}-$(date +'%Y%m%d')-$(git rev-parse --short HEAD)"
+
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "tag_prefix=$TAG_PREFIX" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Write VERSION
+        # The Dockerfile reads this file twice: once for the frontend bundle's
+        # displayed version and once for the -ldflags stamp on the Go binary.
+        run: echo "${{ steps.meta.outputs.version }}" > VERSION
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@c99871dec2022cc055c062a10cc1a1310835ceb4 # v4.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag_prefix }}
+            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
+            ${{ steps.meta.outputs.image }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Keep the published tag a plain single-arch image rather than an
+          # attestation manifest list, so `docker pull` on a server behaves
+          # predictably.
+          provenance: false
+
+      - name: Summarise
+        run: |
+          {
+            echo "### Image published"
+            echo '```'
+            echo "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag_prefix }}"
+            echo "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}"
+            echo "${{ steps.meta.outputs.image }}:latest"
+            echo "${{ steps.build.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
