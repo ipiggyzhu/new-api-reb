@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/channel_score"
 	relaychannel "github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/gemini"
 	"github.com/QuantumNous/new-api/relay/channel/ollama"
@@ -415,6 +416,36 @@ func SearchChannels(c *gin.Context) {
 // in-memory map.
 func GetChannelInFlight(c *gin.Context) {
 	common.ApiSuccess(c, gin.H{"in_flight": model.ChannelInFlightSnapshot()})
+}
+
+// GetChannelDynamicScore exposes the dynamic scoring state, which is otherwise
+// unobservable: the scores live only in memory (or Redis), are deliberately never
+// written back to the channel, and no log line reports them. Without this an
+// operator can only infer that the feature works by watching which channel
+// traffic lands on over many requests.
+//
+// Read-only and strictly non-mutating — channel_score.Snapshot copies rows out
+// without creating entries, so polling this cannot change routing.
+//
+// The response carries the scope metadata verbatim from the snapshot. It matters:
+// with Redis configured, the rows are this instance's mirror rather than the
+// cluster's state, and consecutive_success / fault_count are not mirrored at all.
+// Reporting the rows without that caveat would invite reading a partial view as
+// the whole truth.
+func GetChannelDynamicScore(c *gin.Context) {
+	filter := channel_score.ScoreFilter{
+		Group: c.Query("group"),
+		Model: c.Query("model"),
+	}
+	if raw := c.Query("channel_id"); raw != "" {
+		channelId, err := strconv.Atoi(raw)
+		if err != nil || channelId <= 0 {
+			common.ApiErrorMsg(c, "invalid channel_id")
+			return
+		}
+		filter.ChannelID = channelId
+	}
+	common.ApiSuccess(c, channel_score.Snapshot(filter))
 }
 
 func GetChannel(c *gin.Context) {

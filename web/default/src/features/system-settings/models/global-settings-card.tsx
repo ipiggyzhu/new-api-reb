@@ -123,6 +123,7 @@ const schema = z.object({
     upstream_model_update_scan_all_channels: z.boolean(),
     upstream_model_update_validate: z.boolean(),
     upstream_model_update_remove_failed: z.boolean(),
+    upstream_model_update_remove_unavailable_models: z.boolean(),
     upstream_model_update_retry_delay_minutes: z.coerce.number().min(1),
     upstream_model_update_failure_threshold: z.coerce.number().min(1),
     upstream_model_update_rotation_sample_size: z.coerce.number().min(0),
@@ -146,6 +147,7 @@ type FlatGlobalModelSettings = {
   'monitor_setting.upstream_model_update_scan_all_channels': boolean
   'monitor_setting.upstream_model_update_validate': boolean
   'monitor_setting.upstream_model_update_remove_failed': boolean
+  'monitor_setting.upstream_model_update_remove_unavailable_models': boolean
   'monitor_setting.upstream_model_update_retry_delay_minutes': number
   'monitor_setting.upstream_model_update_failure_threshold': number
   'monitor_setting.upstream_model_update_rotation_sample_size': number
@@ -181,6 +183,8 @@ const flattenGlobalValues = (
     values.monitor_setting.upstream_model_update_validate,
   'monitor_setting.upstream_model_update_remove_failed':
     values.monitor_setting.upstream_model_update_remove_failed,
+  'monitor_setting.upstream_model_update_remove_unavailable_models':
+    values.monitor_setting.upstream_model_update_remove_unavailable_models,
   'monitor_setting.upstream_model_update_retry_delay_minutes':
     values.monitor_setting.upstream_model_update_retry_delay_minutes,
   'monitor_setting.upstream_model_update_failure_threshold':
@@ -306,6 +310,11 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
   const pingEnabled = form.watch('general_setting.ping_interval_enabled')
   const autoUpdateEnabled = form.watch(
     'monitor_setting.upstream_model_update_enabled'
+  )
+  // The upstream-rejection rule only widens what counts as a model failure; with
+  // removal itself off it would have nothing to act on, so the switch follows it.
+  const removeFailedEnabled = form.watch(
+    'monitor_setting.upstream_model_update_remove_failed'
   )
 
   // Trigger the scheduled auto-update immediately. auto_apply distinguishes this
@@ -716,6 +725,30 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
                     <Switch
                       checked={field.value}
                       disabled={!autoUpdateEnabled}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </SettingsSwitchItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='monitor_setting.upstream_model_update_remove_unavailable_models'
+              render={({ field }) => (
+                <SettingsSwitchItem>
+                  <SettingsSwitchContent>
+                    <FormLabel>{t('Remove Models the Upstream Rejects')}</FormLabel>
+                    <FormDescription>
+                      {t(
+                        'Also count an explicit HTTP 404 "model not supported" as a model failure. Quota, balance, auth and rate limit errors never count, and neither do 400 or 503 responses, because those are account-level or transient. Off by default: turning it on lets models start being removed on a deployment where this never happened before.'
+                      )}
+                    </FormDescription>
+                  </SettingsSwitchContent>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      disabled={!autoUpdateEnabled || !removeFailedEnabled}
                       onCheckedChange={field.onChange}
                     />
                   </FormControl>

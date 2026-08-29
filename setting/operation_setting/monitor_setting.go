@@ -26,6 +26,15 @@ type MonitorSetting struct {
 	UpstreamModelUpdateValidate bool `json:"upstream_model_update_validate"`
 	// 是否删除连续验证失败达阈值的模型
 	UpstreamModelUpdateRemoveFailed bool `json:"upstream_model_update_remove_failed"`
+	// 是否把上游明确的「不支持该模型」（HTTP 404 且带模型级标记）计入模型失败。
+	//
+	// 默认关闭，且与 UpstreamModelUpdateRemoveFailed 是两道独立的闸门。原因是
+	// 历史上这条判定走的是 service.IsChannelFaultError，而它的默认状态码白名单
+	// 只有 401，所以 404「不支持所选模型」从来没有被计数过 —— 删除路径事实上
+	// 是死的。修正判定会让一条既有部署里从未触发过的删除行为突然开始工作，即使
+	// 管理员并没有改动任何设置。要求显式开启，是为了让这个行为变化是被选择的，
+	// 而不是升级镜像的副作用。
+	UpstreamModelUpdateRemoveUnavailableModels bool `json:"upstream_model_update_remove_unavailable_models"`
 	// 模型验证失败后至少间隔多少分钟才复测
 	UpstreamModelUpdateRetryDelayMinutes int `json:"upstream_model_update_retry_delay_minutes"`
 	// 连续失败多少次才删除模型
@@ -64,15 +73,18 @@ var monitorSetting = MonitorSetting{
 	AutoTestChannelMinutes: 10,
 	ChannelTestMode:        ChannelTestModeScheduledAll,
 
-	UpstreamModelUpdateEnabled:              false,
-	UpstreamModelUpdateIntervalHours:        24,
-	UpstreamModelUpdateScanAllChannels:      true,
-	UpstreamModelUpdateValidate:             true,
-	UpstreamModelUpdateRemoveFailed:         true,
-	UpstreamModelUpdateRetryDelayMinutes:    60,
-	UpstreamModelUpdateFailureThreshold:     2,
-	UpstreamModelUpdateRotationSampleSize:   5,
-	UpstreamModelUpdateMaxValidationsPerRun: 200,
+	UpstreamModelUpdateEnabled:         false,
+	UpstreamModelUpdateIntervalHours:   24,
+	UpstreamModelUpdateScanAllChannels: true,
+	UpstreamModelUpdateValidate:        true,
+	UpstreamModelUpdateRemoveFailed:    true,
+	// Off by default: see the field comment. Correcting the predicate would
+	// otherwise start deleting models on deployments that never opted into it.
+	UpstreamModelUpdateRemoveUnavailableModels: false,
+	UpstreamModelUpdateRetryDelayMinutes:       60,
+	UpstreamModelUpdateFailureThreshold:        2,
+	UpstreamModelUpdateRotationSampleSize:      5,
+	UpstreamModelUpdateMaxValidationsPerRun:    200,
 }
 
 // builtinChannelTestPrompts 是渠道测试与模型验证的默认提示词池。内容刻意贴近

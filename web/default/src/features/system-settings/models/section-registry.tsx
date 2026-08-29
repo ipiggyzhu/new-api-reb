@@ -75,6 +75,10 @@ const MODELS_SECTIONS = [
               settings['monitor_setting.upstream_model_update_validate'],
             upstream_model_update_remove_failed:
               settings['monitor_setting.upstream_model_update_remove_failed'],
+            upstream_model_update_remove_unavailable_models:
+              settings[
+                'monitor_setting.upstream_model_update_remove_unavailable_models'
+              ],
             upstream_model_update_retry_delay_minutes:
               settings[
                 'monitor_setting.upstream_model_update_retry_delay_minutes'

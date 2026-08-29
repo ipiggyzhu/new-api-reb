@@ -240,6 +240,7 @@ export type ModelSettings = {
   'monitor_setting.upstream_model_update_scan_all_channels': boolean
   'monitor_setting.upstream_model_update_validate': boolean
   'monitor_setting.upstream_model_update_remove_failed': boolean
+  'monitor_setting.upstream_model_update_remove_unavailable_models': boolean
   'monitor_setting.upstream_model_update_retry_delay_minutes': number
   'monitor_setting.upstream_model_update_failure_threshold': number
   'monitor_setting.upstream_model_update_rotation_sample_size': number

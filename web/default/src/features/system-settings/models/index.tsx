@@ -78,6 +78,7 @@ const defaultModelSettings: ModelSettings = {
   'monitor_setting.upstream_model_update_scan_all_channels': true,
   'monitor_setting.upstream_model_update_validate': true,
   'monitor_setting.upstream_model_update_remove_failed': true,
+  'monitor_setting.upstream_model_update_remove_unavailable_models': false,
   'monitor_setting.upstream_model_update_retry_delay_minutes': 60,
   'monitor_setting.upstream_model_update_failure_threshold': 2,
   'monitor_setting.upstream_model_update_rotation_sample_size': 5,

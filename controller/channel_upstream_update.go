@@ -578,6 +578,37 @@ func limitUpstreamModelRemovals(existingModels []string, removeModels []string) 
 	return removeModels
 }
 
+// upstreamModelUpdateMaxCumulativeFailureRatio bounds how much of a channel may be
+// under recorded suspicion before removals stop entirely.
+//
+// limitUpstreamModelRemovals only sees ONE run. Rotation samples a handful of
+// models per run, so a channel-wide outage produces a small, individually
+// "reasonable" removal set every run and passes that guard each time — eroding most
+// of a working configuration over a day while never once tripping the half-channel
+// rule. This looks at the accumulated health map instead: if a large share of the
+// channel is failing, the explanation is the channel, not the models.
+const upstreamModelUpdateMaxCumulativeFailureRatio = 0.5
+
+// shouldSuspendUpstreamModelRemovals reports whether the breadth of recorded
+// failures makes removal unsafe for this channel right now. It is deliberately
+// evaluated against models the channel still serves, so stale health entries for
+// already-removed models cannot hold a healthy channel hostage.
+func shouldSuspendUpstreamModelRemovals(existingModels []string, health map[string]dto.ModelHealthState) bool {
+	if len(health) == 0 || len(existingModels) == 0 {
+		return false
+	}
+	failing := 0
+	for _, modelName := range normalizeModelNames(existingModels) {
+		if state, ok := health[modelName]; ok && state.Failures > 0 {
+			failing++
+		}
+	}
+	if failing == 0 {
+		return false
+	}
+	return float64(failing) > float64(len(existingModels))*upstreamModelUpdateMaxCumulativeFailureRatio
+}
+
 // validateChannelModels issues one real request per selected model and turns the
 // results into add/remove decisions. Only errors that service.IsChannelFaultError
 // classifies as genuine channel faults count against a model: a rate limit or a
@@ -660,6 +691,20 @@ func (r *upstreamModelUpdateRunContext) validateChannelModels(
 		}
 	}
 
+	// Checked before the per-run bound: the health map remembers what earlier runs
+	// saw, which is the only place a slow channel-wide outage is visible. The
+	// failures stay recorded either way, so once the channel recovers and successes
+	// clear them, removal resumes on its own.
+	if shouldSuspendUpstreamModelRemovals(existingModels, health) {
+		if len(removeModels) > 0 {
+			common.SysLog(fmt.Sprintf(
+				"upstream model removal suspended: channel_id=%d models=%s reason=too many models failing at once",
+				channel.Id, strings.Join(removeModels, ","),
+			))
+		}
+		removeModels = nil
+	}
+
 	removeModels = limitUpstreamModelRemovals(existingModels, removeModels)
 	if len(removeModels) > 0 {
 		r.mu.Lock()
@@ -703,7 +748,23 @@ func (r *upstreamModelUpdateRunContext) classifyModelValidationResult(
 		return isCandidate, false
 	}
 
-	if !service.IsChannelFaultError(result.newAPIError) {
+	// Two independent kinds of evidence count against a model:
+	//
+	//   - the channel itself faulted (IsChannelFaultError), the original rule;
+	//   - the upstream said it does not have this model (isModelUnavailableError).
+	//
+	// The second exists because IsChannelFaultError answers a different question —
+	// "should this channel be auto-disabled" — and its default status-code allowlist
+	// is 401 alone. A 404 "model not supported" therefore never counted, so
+	// state.Failures never advanced, removal never reached its threshold, and dead
+	// model names accumulated on every channel indefinitely.
+	//
+	// Gated separately and off by default: correcting this changes what an existing
+	// deployment does without the operator changing any setting.
+	modelUnavailable := r.monitor.UpstreamModelUpdateRemoveUnavailableModels &&
+		isModelUnavailableError(result.newAPIError, result.localErr)
+
+	if !modelUnavailable && !service.IsChannelFaultError(result.newAPIError) {
 		// Rate limited or otherwise transient: leave the model untouched. A new
 		// candidate simply stays staged and is retried next run.
 		if isCandidate {
@@ -744,9 +805,17 @@ func (r *upstreamModelUpdateRunContext) classifyModelValidationResult(
 	}
 	health[modelName] = state
 
+	// The reason is logged because the two paths carry different confidence: a
+	// channel fault may clear on its own, while an upstream 404 naming the model is
+	// a statement about its catalogue. An operator reviewing a deletion needs to
+	// know which one drove it.
+	reason := "channel_fault"
+	if modelUnavailable {
+		reason = "model_unavailable"
+	}
 	common.SysLog(fmt.Sprintf(
-		"upstream model validation failed: channel_id=%d model=%s failures=%d threshold=%d err=%v",
-		channelID, modelName, state.Failures, failureThreshold, result.newAPIError,
+		"upstream model validation failed: channel_id=%d model=%s reason=%s failures=%d threshold=%d err=%v",
+		channelID, modelName, reason, state.Failures, failureThreshold, result.newAPIError,
 	))
 
 	return false, r.monitor.UpstreamModelUpdateRemoveFailed && state.Failures >= failureThreshold
