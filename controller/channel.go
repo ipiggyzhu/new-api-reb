@@ -448,6 +448,38 @@ func GetChannelDynamicScore(c *gin.Context) {
 	common.ApiSuccess(c, channel_score.Snapshot(filter))
 }
 
+// GetChannelDynamicScoreSummary is the channel list's companion to the row-level
+// endpoint above: one aggregate per channel instead of every (group, model) key.
+//
+// The list cannot poll the row endpoint. A key exists per requested model name,
+// and that name is the caller's original rather than the wildcard ability it
+// matched, so the row count is bounded by client behaviour rather than by
+// configuration. This response stays one small object per channel with traffic.
+//
+// Keyed by channel id as a string because that is what the in-flight gauge does
+// and what the list merges against; JSON object keys are strings regardless, so
+// making the map's Go type match avoids a silent int-vs-string mismatch at the
+// merge site.
+func GetChannelDynamicScoreSummary(c *gin.Context) {
+	summaries, snapshot := channel_score.SummarizeByChannel()
+	byID := make(map[string]channel_score.ChannelScoreSummary, len(summaries))
+	for channelID, summary := range summaries {
+		byID[strconv.Itoa(channelID)] = summary
+	}
+	// The scope metadata travels with the aggregate for the same reason it travels
+	// with the rows: under Redis these counts describe this instance's mirror, and
+	// a list cell that omitted the caveat would present a partial view as the
+	// cluster's state. Rows themselves are deliberately absent.
+	common.ApiSuccess(c, gin.H{
+		"enabled":          snapshot.Enabled,
+		"usable":           snapshot.Usable,
+		"redis_configured": snapshot.RedisConfigured,
+		"instance_local":   snapshot.InstanceLocal,
+		"complete":         snapshot.Complete,
+		"summaries":        byID,
+	})
+}
+
 func GetChannel(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {

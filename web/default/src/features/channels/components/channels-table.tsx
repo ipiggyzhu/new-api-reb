@@ -50,6 +50,7 @@ import {
   getChannels,
   searchChannels,
   getGroups,
+  getChannelDynamicScoreSummary,
   getChannelInFlight,
 } from '../api'
 import {
@@ -59,6 +60,7 @@ import {
 } from '../constants'
 import {
   channelsQueryKeys,
+  CHANNEL_DYNAMIC_SCORE_POLL_MS,
   CHANNEL_IN_FLIGHT_POLL_MS,
   aggregateChannelsByTag,
   isTagAggregateRow,
@@ -320,6 +322,17 @@ export function ChannelsTable() {
     placeholderData: (previousData) => previousData,
   })
 
+  // Scores are polled separately from the list for the same reasons as the gauge
+  // above, and separately from each other because they move on different
+  // timescales: an in-flight count changes per request, a tier offset only on a
+  // promotion or demotion threshold.
+  const { data: dynamicScoreData } = useQuery({
+    queryKey: channelsQueryKeys.dynamicScoreSummary(),
+    queryFn: getChannelDynamicScoreSummary,
+    refetchInterval: CHANNEL_DYNAMIC_SCORE_POLL_MS,
+    placeholderData: (previousData) => previousData,
+  })
+
   // Apply tag aggregation if tag mode is enabled
   const channels = useMemo(() => {
     const rawChannels = data?.data?.items || []
@@ -335,12 +348,28 @@ export function ChannelsTable() {
         }))
       : rawChannels
 
-    if (enableTagMode && withInFlight.length > 0) {
-      return aggregateChannelsByTag(withInFlight)
+    // Folded on the same way, but left undefined rather than defaulted when a
+    // channel has no entry: absent means "nothing scored", which the cell renders
+    // as the configured priority alone. A zeroed summary would instead claim the
+    // channel has been measured and found neutral.
+    const summaries = dynamicScoreData?.data?.summaries
+    const scoringOn =
+      Boolean(dynamicScoreData?.data?.enabled) &&
+      Boolean(dynamicScoreData?.data?.usable)
+    const withScores =
+      summaries && scoringOn
+        ? withInFlight.map((channel) => ({
+            ...channel,
+            dynamic_score: summaries[String(channel.id)],
+          }))
+        : withInFlight
+
+    if (enableTagMode && withScores.length > 0) {
+      return aggregateChannelsByTag(withScores)
     }
 
-    return withInFlight
-  }, [data, inFlightData, enableTagMode])
+    return withScores
+  }, [data, inFlightData, dynamicScoreData, enableTagMode])
 
   const totalCount = data?.data?.total || 0
   const typeCounts = data?.data?.type_counts

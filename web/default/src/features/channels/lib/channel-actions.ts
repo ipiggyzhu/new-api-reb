@@ -55,6 +55,8 @@ export const channelsQueryKeys = {
   details: () => [...channelsQueryKeys.all, 'detail'] as const,
   detail: (id: number) => [...channelsQueryKeys.details(), id] as const,
   inFlight: () => [...channelsQueryKeys.all, 'in-flight'] as const,
+  dynamicScoreSummary: () =>
+    [...channelsQueryKeys.all, 'dynamic-score-summary'] as const,
 }
 
 /**
@@ -63,6 +65,14 @@ export const channelsQueryKeys = {
  * endpoint only reads an in-memory counter map.
  */
 export const CHANNEL_IN_FLIGHT_POLL_MS = 3000
+
+/**
+ * How often the channel list refreshes the dynamic score summary. Slower than
+ * the in-flight gauge because a tier offset only moves on a promotion or
+ * demotion threshold rather than on every request, and this endpoint ranges the
+ * whole score map instead of reading one counter.
+ */
+export const CHANNEL_DYNAMIC_SCORE_POLL_MS = 15000
 
 function getChannelTestResponseTime(
   response: ChannelTestResponse

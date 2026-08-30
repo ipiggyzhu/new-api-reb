@@ -72,7 +72,9 @@ export function DynamicScoreTableDialog(props: Props) {
   const load = useCallback(() => {
     const seq = ++seqRef.current
     setLoading(true)
-    getDynamicScores()
+    // Explicitly voided: the chain handles its own errors and the caller is an
+    // event handler with nothing to await.
+    void getDynamicScores()
       .then((res) => {
         if (seq !== seqRef.current) return
         if (res.success && res.data) setSnapshot(res.data)
@@ -160,8 +162,33 @@ export function DynamicScoreTableDialog(props: Props) {
         <div className='text-muted-foreground py-8 text-center text-sm'>
           {t('Loading...')}
         </div>
-      ) : rows.length > 0 ? (
-        <div className='max-h-[60vh] overflow-auto'>
+      ) : (
+        <ScoreRows rows={rows} />
+      )}
+    </Dialog>
+  )
+}
+
+/**
+ * ScoreRows is split out so the loading / loaded / empty choice above stays a
+ * single ternary. Inlining it nested three JSX branches deep, which reads as one
+ * expression but spans the whole table.
+ */
+function ScoreRows({ rows }: { rows: DynamicScoreRow[] }) {
+  const { t } = useTranslation()
+
+  if (rows.length === 0) {
+    return (
+      <div className='text-muted-foreground py-8 text-center text-sm'>
+        {t(
+          'No scoring recorded yet. A row appears once a channel has served or failed a request.'
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div className='max-h-[60vh] overflow-auto'>
           <Table>
             <TableHeader>
               <TableRow>
@@ -233,14 +260,6 @@ export function DynamicScoreTableDialog(props: Props) {
               ))}
             </TableBody>
           </Table>
-        </div>
-      ) : (
-        <div className='text-muted-foreground py-8 text-center text-sm'>
-          {t(
-            'No scoring recorded yet. A row appears once a channel has served or failed a request.'
-          )}
-        </div>
-      )}
-    </Dialog>
+    </div>
   )
 }

@@ -77,6 +77,10 @@ import {
 import { parseUpstreamUpdateMeta } from '../lib/upstream-update-utils'
 import type { Channel } from '../types'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
+import {
+  DynamicScorePriorityBadge,
+  DynamicScoreWeightBadge,
+} from './dynamic-score-badge'
 import { useChannels } from './channels-provider'
 import { DataTableRowActions } from './data-table-row-actions'
 import { DataTableTagRowActions } from './data-table-tag-row-actions'
@@ -214,15 +218,20 @@ function PriorityCell({ channel }: { channel: Channel }) {
     )
   }
 
-  // Regular channel row - editable
+  // Regular channel row - editable, with the live scoring effect beside it. The
+  // input keeps showing the configured value because that is what editing writes;
+  // the badge is the only place the adjustment applied at selection time appears.
   return (
-    <NumericSpinnerInput
-      value={priority ?? 0}
-      onChange={(value) => {
-        handleUpdateChannelField(channel.id, 'priority', value, queryClient)
-      }}
-      min={-999}
-    />
+    <div className='flex items-center gap-1'>
+      <NumericSpinnerInput
+        value={priority ?? 0}
+        onChange={(value) => {
+          handleUpdateChannelField(channel.id, 'priority', value, queryClient)
+        }}
+        min={-999}
+      />
+      <DynamicScorePriorityBadge channel={channel} />
+    </div>
   )
 }
 
@@ -272,15 +281,20 @@ function WeightCell({ channel }: { channel: Channel }) {
     )
   }
 
-  // Regular channel row - editable
+  // Regular channel row - editable, with the live scoring multiplier beside it.
+  // Separate from the priority badge because the two move independently: a channel
+  // can keep its tier while its success rate halves the traffic it draws.
   return (
-    <NumericSpinnerInput
-      value={weight ?? 0}
-      onChange={(value) => {
-        handleUpdateChannelField(channel.id, 'weight', value, queryClient)
-      }}
-      min={0}
-    />
+    <div className='flex items-center gap-1'>
+      <NumericSpinnerInput
+        value={weight ?? 0}
+        onChange={(value) => {
+          handleUpdateChannelField(channel.id, 'weight', value, queryClient)
+        }}
+        min={0}
+      />
+      <DynamicScoreWeightBadge channel={channel} />
+    </div>
   )
 }
 

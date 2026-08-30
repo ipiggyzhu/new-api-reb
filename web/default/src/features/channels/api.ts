@@ -25,6 +25,7 @@ import type {
   BatchSetTagParams,
   Channel,
   ChannelBalanceResponse,
+  ChannelDynamicScoreSummaryResponse,
   ChannelInFlightResponse,
   ChannelOpsResponse,
   ChannelTestResponse,
@@ -123,6 +124,26 @@ export async function getChannelOps(): Promise<ChannelOpsResponse> {
  */
 export async function getChannelInFlight(): Promise<ChannelInFlightResponse> {
   const res = await api.get('/api/channel/in_flight', channelActionConfig())
+  return res.data
+}
+
+/**
+ * Get the dynamic scoring effect currently applied to each channel.
+ *
+ * Aggregated server-side rather than fetching the raw score rows: a row exists
+ * per (group, requested model), and the model is the caller's original name
+ * rather than the wildcard ability it matched, so the row count is bounded by
+ * client behaviour. This response is one small object per channel with traffic.
+ *
+ * Polled on its own like the in-flight gauge, for the same reason: it reads
+ * in-memory state, while the channel list is an expensive paginated query that
+ * also fights with inline cell editing when refreshed.
+ */
+export async function getChannelDynamicScoreSummary(): Promise<ChannelDynamicScoreSummaryResponse> {
+  const res = await api.get(
+    '/api/channel/dynamic_score_summary',
+    channelActionConfig()
+  )
   return res.data
 }
 

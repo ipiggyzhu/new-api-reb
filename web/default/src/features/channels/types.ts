@@ -63,6 +63,28 @@ export const channelSchema = z.object({
    * the row, so it is absent everywhere else a Channel is parsed.
    */
   in_flight: z.number().nullish(),
+  /**
+   * Dynamic scoring's current effect on this channel, folded on the same way
+   * in_flight is: a separate id-keyed endpoint rather than a stored column.
+   *
+   * Absent when the feature is off or the channel has no scored traffic. The
+   * configured `priority` above never changes — scoring shifts a channel only
+   * within one request's candidate ranking, so this is the only place the effect
+   * is observable.
+   */
+  dynamic_score: z
+    .object({
+      active: z.number(),
+      total: z.number(),
+      adjusted: z.number(),
+      min_offset: z.number(),
+      max_offset: z.number(),
+      weighted: z.number(),
+      min_weight_factor: z.number(),
+      max_weight_factor: z.number(),
+      idle: z.number(),
+    })
+    .nullish(),
   auto_ban: z.number().nullish(),
   other_info: z.string().default(''),
   tag: z.string().nullish(),
@@ -212,6 +234,52 @@ export interface ChannelInFlightResponse {
   message?: string
   data?: {
     in_flight?: Record<string, number>
+  }
+}
+
+/**
+ * One channel's dynamic scores reduced to what a list cell can show. Mirrors
+ * pkg/channel_score.ChannelScoreSummary.
+ *
+ * `adjusted` of `active` is the honest headline: a bare offset range reads the
+ * same whether one key or every key moved. There is deliberately no average —
+ * tier offsets are ordinal and request-local, so averaging them yields a number
+ * that corresponds to nothing.
+ */
+export interface ChannelScoreSummary {
+  active: number
+  total: number
+  adjusted: number
+  min_offset: number
+  max_offset: number
+  /**
+   * Keys whose weight factor left 1.0, with the range across them. A channel can
+   * sit at offset 0 while being handed half the traffic, which the offset fields
+   * alone would render as untouched.
+   */
+  weighted: number
+  min_weight_factor: number
+  max_weight_factor: number
+  idle: number
+}
+
+/**
+ * Response of the per-channel score summary endpoint.
+ *
+ * The scope flags are not decoration: under Redis these counts describe one
+ * instance's mirror rather than the cluster, so a cell that showed the numbers
+ * without them would present a partial view as the whole truth.
+ */
+export interface ChannelDynamicScoreSummaryResponse {
+  success: boolean
+  message?: string
+  data?: {
+    enabled?: boolean
+    usable?: boolean
+    redis_configured?: boolean
+    instance_local?: boolean
+    complete?: boolean
+    summaries?: Record<string, ChannelScoreSummary>
   }
 }
 

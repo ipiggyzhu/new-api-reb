@@ -45,6 +45,7 @@ func TestChannelStatusRoutesRegisterWithoutConflict(t *testing.T) {
 // answers 401 for unknown paths too.
 func TestChannelReadRoutesAreRegistered(t *testing.T) {
 	assertChannelRoutePermission(t, http.MethodGet, "/dynamic_score", authz.ChannelRead, controller.GetChannelDynamicScore)
+	assertChannelRoutePermission(t, http.MethodGet, "/dynamic_score_summary", authz.ChannelRead, controller.GetChannelDynamicScoreSummary)
 	assertChannelRoutePermission(t, http.MethodGet, "/in_flight", authz.ChannelRead, controller.GetChannelInFlight)
 }
 
@@ -55,7 +56,7 @@ func TestChannelReadRoutesAreRegistered(t *testing.T) {
 func TestStaticChannelRoutesAreNotShadowedByIDParam(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	for _, path := range []string{"/dynamic_score", "/in_flight", "/models", "/search", "/ops"} {
+	for _, path := range []string{"/dynamic_score", "/dynamic_score_summary", "/in_flight", "/models", "/search", "/ops"} {
 		t.Run(path, func(t *testing.T) {
 			engine := gin.New()
 			group := engine.Group("/api/channel")
