@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 
 	"github.com/bytedance/gopkg/util/gopool"
@@ -44,28 +45,27 @@ func MarkChannelWebsocketUnsupported(channelId int, channelName string, reason s
 			}
 		}()
 
-		// selectAll so Save writes the row back intact; omitting the key column
-		// would persist an empty credential over a working one.
-		channel, err := model.GetChannelById(channelId, true)
+		// Goes through MutateChannelSettings rather than load-edit-Save: the
+		// upstream-model update task rewrites the same column from its own snapshot,
+		// so an unsynchronized Save here was lost whenever the two overlapped.
+		// The mutation returning false means the flag was already set, which
+		// suppresses both the redundant write and the duplicate notification.
+		alreadySet := false
+		err := model.MutateChannelSettings(channelId, func(settings *dto.ChannelOtherSettings) bool {
+			if settings.WebsocketUnsupported {
+				alreadySet = true
+				return false
+			}
+			settings.WebsocketUnsupported = true
+			return true
+		})
 		if err != nil {
-			common.SysLog(fmt.Sprintf("failed to load channel while marking websocket unsupported: channel_id=%d, error=%v", channelId, err))
-			return
-		}
-
-		otherSettings := channel.GetOtherSettings()
-		if otherSettings.WebsocketUnsupported {
-			// Another instance got there first. Nothing to write, and no second
-			// notification for the same downgrade.
-			return
-		}
-		otherSettings.WebsocketUnsupported = true
-		channel.SetOtherSettings(otherSettings)
-
-		if err := channel.Save(); err != nil {
 			common.SysLog(fmt.Sprintf("failed to persist websocket unsupported flag: channel_id=%d, error=%v", channelId, err))
 			return
 		}
-		model.CacheUpdateChannel(channel)
+		if alreadySet {
+			return
+		}
 
 		common.SysLog(fmt.Sprintf("通道「%s」（#%d）的 WebSocket 传输已降级为 SSE，原因：%s", channelName, channelId, common.LocalLogPreview(reason)))
 

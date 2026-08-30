@@ -403,23 +403,51 @@ func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {
 	return normalizeModelNames(ids), nil
 }
 
-// channelUpstreamModelPersistMu serializes the task's channel writes. The scan
-// runs channels concurrently, but SQLite allows only one writer at a time, so
-// letting workers flush settings simultaneously would trade progress for
-// busy-wait errors.
+// channelUpstreamModelPersistMu serializes this task's ability rebuilds. The scan
+// runs channels concurrently, but SQLite allows only one writer at a time, and a
+// rebuild is a delete-then-insert of every row for a channel, so letting workers
+// rebuild simultaneously would trade progress for busy-wait errors.
+//
+// It does NOT guard the settings column any more: that is serialized per channel
+// inside model.MutateChannelSettings, which also covers the WebSocket probe this
+// mutex could never reach.
 var channelUpstreamModelPersistMu sync.Mutex
 
+// updateChannelUpstreamModelSettings persists this task's own fields onto the
+// channel's settings.
+//
+// It copies field by field onto a freshly loaded copy instead of writing the
+// whole struct. The task computes `settings` from a snapshot taken at the start of
+// a scan that makes real upstream requests, so by the time it writes, minutes may
+// have passed and the WebSocket handshake probe may have set
+// websocket_unsupported on the same column. Writing the whole struct discarded
+// that flag; writing only what this task owns cannot.
+//
+// The channel argument is still updated in place so the caller's later
+// UpdateAbilities sees the new model list.
 func updateChannelUpstreamModelSettings(channel *model.Channel, settings dto.ChannelOtherSettings, updateModels bool) error {
+	apply := func(stored *dto.ChannelOtherSettings) bool {
+		// Exactly the UpstreamModelUpdate* group. Everything else on the struct
+		// belongs to the admin form or to the handshake probe, and must survive.
+		stored.UpstreamModelUpdateCheckEnabled = settings.UpstreamModelUpdateCheckEnabled
+		stored.UpstreamModelUpdateAutoSyncEnabled = settings.UpstreamModelUpdateAutoSyncEnabled
+		stored.UpstreamModelUpdateLastCheckTime = settings.UpstreamModelUpdateLastCheckTime
+		stored.UpstreamModelUpdateLastDetectedModels = settings.UpstreamModelUpdateLastDetectedModels
+		stored.UpstreamModelUpdateLastRemovedModels = settings.UpstreamModelUpdateLastRemovedModels
+		stored.UpstreamModelUpdateIgnoredModels = settings.UpstreamModelUpdateIgnoredModels
+		stored.UpstreamModelUpdateModelHealth = settings.UpstreamModelUpdateModelHealth
+		stored.UpstreamModelUpdateRotationCursor = settings.UpstreamModelUpdateRotationCursor
+		return true
+	}
+
+	// Keep the in-memory channel consistent with what the caller expects to have
+	// written, so code after this call reads the values it just set.
 	channel.SetOtherSettings(settings)
-	updates := map[string]interface{}{
-		"settings": channel.OtherSettings,
-	}
+
 	if updateModels {
-		updates["models"] = channel.Models
+		return model.MutateChannelSettingsWithModels(channel.Id, channel.Models, apply)
 	}
-	channelUpstreamModelPersistMu.Lock()
-	defer channelUpstreamModelPersistMu.Unlock()
-	return model.DB.Model(&model.Channel{}).Where("id = ?", channel.Id).Updates(updates).Error
+	return model.MutateChannelSettings(channel.Id, apply)
 }
 
 // upstreamModelUpdateRunContext carries the per-run state of a scheduled
