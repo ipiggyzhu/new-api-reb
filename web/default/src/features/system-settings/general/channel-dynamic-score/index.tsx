@@ -28,6 +28,7 @@ import { Label } from '@/components/ui/label'
 import { SettingsSwitchField } from '../../components/settings-form-layout'
 import { SettingsSection } from '../../components/settings-section'
 import { useUpdateOption } from '../../hooks/use-update-option'
+import { DynamicScoreTableDialog } from './score-table-dialog'
 import type { ChannelDynamicScoreSettings } from './types'
 
 interface Props {
@@ -85,6 +86,7 @@ export function ChannelDynamicScoreSection(props: Props) {
     return initial
   })
   const [saving, setSaving] = useState(false)
+  const [scoresOpen, setScoresOpen] = useState(false)
 
   const setField = (field: NumericField, value: string) => {
     setNumbers((prev) => ({ ...prev, [field]: value }))
@@ -226,12 +228,20 @@ export function ChannelDynamicScoreSection(props: Props) {
           )}
         </div>
 
-        <div className='flex justify-end'>
+        <div className='flex justify-end gap-2'>
+          <Button variant='outline' onClick={() => setScoresOpen(true)}>
+            {t('View Current Scores')}
+          </Button>
           <Button onClick={handleSave} disabled={saving}>
             {t('Save')}
           </Button>
         </div>
       </div>
+
+      <DynamicScoreTableDialog
+        open={scoresOpen}
+        onOpenChange={setScoresOpen}
+      />
     </SettingsSection>
   )
 }

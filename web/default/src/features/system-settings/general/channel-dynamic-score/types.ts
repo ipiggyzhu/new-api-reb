@@ -31,3 +31,32 @@ export interface ChannelDynamicScoreSettings {
   'channel_dynamic_score_setting.success_window_seconds': number | string
   'channel_dynamic_score_setting.idle_reset_seconds': number | string
 }
+
+/** One (channel, group, model) scoring row, mirroring pkg/channel_score.ScoreView. */
+export interface DynamicScoreRow {
+  channel_id: number
+  group: string
+  model: string
+  /** Accumulated movement in tiers; positive promotes. */
+  tier_offset: number
+  total: number
+  success: number
+  consecutive_success: number
+  fault_count: number
+  updated_at: number
+  weight_factor: number
+  /** The selection path ignores idle rows even when a tier offset is recorded. */
+  idle: boolean
+}
+
+/** Mirrors pkg/channel_score.ScoreSnapshot. */
+export interface DynamicScoreSnapshot {
+  /** The admin switch; usable additionally requires a reachable shared store. */
+  enabled: boolean
+  usable: boolean
+  redis_configured: boolean
+  /** With Redis these rows are only this process's mirror, so some fields read zero. */
+  instance_local: boolean
+  complete: boolean
+  rows: DynamicScoreRow[]
+}

@@ -2,6 +2,7 @@ package router
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
 
@@ -35,6 +36,47 @@ func TestChannelStatusRoutesRegisterWithoutConflict(t *testing.T) {
 	require.NotPanics(t, func() {
 		registerChannelRoutes(api)
 	})
+}
+
+// TestChannelReadRoutesAreRegistered guards against a handler that exists but was
+// never wired up. Nothing else catches that: the handlers are exported, so an
+// unreferenced one still compiles and still passes vet, and an unauthenticated
+// request cannot tell the difference because AdminAuth runs before routing and
+// answers 401 for unknown paths too.
+func TestChannelReadRoutesAreRegistered(t *testing.T) {
+	assertChannelRoutePermission(t, http.MethodGet, "/dynamic_score", authz.ChannelRead, controller.GetChannelDynamicScore)
+	assertChannelRoutePermission(t, http.MethodGet, "/in_flight", authz.ChannelRead, controller.GetChannelInFlight)
+}
+
+// TestStaticChannelRoutesAreNotShadowedByIDParam pins the dispatch of the static
+// GET paths that sit alongside "/:id". Registering one of them after "/:id" is the
+// easy mistake, and it would send every request for it to GetChannel with
+// id="dynamic_score" instead — a 200 with the wrong body, not an error.
+func TestStaticChannelRoutesAreNotShadowedByIDParam(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, path := range []string{"/dynamic_score", "/in_flight", "/models", "/search", "/ops"} {
+		t.Run(path, func(t *testing.T) {
+			engine := gin.New()
+			group := engine.Group("/api/channel")
+
+			// Replay the real table's order with sentinel handlers so the assertion is
+			// about routing alone, with no auth, database or controller involved.
+			for _, route := range channelPermissionRoutes {
+				matched := route.path
+				group.Handle(route.method, route.path, func(c *gin.Context) {
+					c.String(http.StatusOK, matched)
+				})
+			}
+
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/channel"+path, nil))
+
+			require.Equal(t, http.StatusOK, recorder.Code)
+			assert.Equal(t, path, recorder.Body.String(),
+				"GET %s was dispatched to %q; a static path must win over /:id", path, recorder.Body.String())
+		})
+	}
 }
 
 func assertChannelRoutePermission(t *testing.T, method string, path string, permission authz.Permission, handler any) {
