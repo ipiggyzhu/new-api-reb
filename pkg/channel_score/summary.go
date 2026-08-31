@@ -19,8 +19,9 @@ package channel_score
 // ChannelScoreSummary is one channel's scores reduced to what a list cell can
 // show without misleading the reader.
 type ChannelScoreSummary struct {
-	// Active is the number of keys the selection path is currently applying, i.e.
-	// non-idle. Total counts those plus idle ones.
+	// Active is the number of keys the selection path is currently applying. Total
+	// counts those plus fully-forgiven idle keys. An idle key with a non-zero,
+	// decayed tier offset remains Active because routing still applies it.
 	Active int `json:"active"`
 	Total  int `json:"total"`
 
@@ -38,15 +39,14 @@ type ChannelScoreSummary struct {
 	// Weighted is how many active keys carry a weight factor other than 1.0, with
 	// the range across them. Without this a channel sitting at offset 0 but
 	// scaled to 0.5x weight renders as untouched, which is the case an operator
-	// most needs to notice: its position is unchanged but it is being handed half
-	// the traffic.
+	// most needs to notice: its position is unchanged but it is handed half the
+	// traffic.
 	Weighted        int     `json:"weighted"`
 	MinWeightFactor float64 `json:"min_weight_factor"`
 	MaxWeightFactor float64 `json:"max_weight_factor"`
 
-	// Idle is Total-Active, carried explicitly so the cell can say "plus 12 idle"
-	// rather than making the reader subtract. An idle demotion is not being
-	// applied but is still evidence of what the channel did.
+	// Idle counts keys whose traffic sample window has expired. A decayed offset
+	// may still be active for such a key; its stale rate is always neutral.
 	Idle int `json:"idle"`
 }
 
@@ -77,13 +77,18 @@ func SummarizeByChannel() (map[int]ChannelScoreSummary, ScoreSnapshot) {
 		summary := summaries[row.ChannelID]
 		summary.Total++
 
-		if row.Idle {
-			// Counted in Total and Idle only. Folding an idle key's offset into the
-			// range would report an adjustment the selection path is not applying,
-			// which is the opposite of what this cell is for.
+		if row.Idle && row.TierOffset == 0 {
+			// Fully forgiven: it no longer affects routing, but the list can still
+			// say the route is idle instead of pretending it never existed.
 			summary.Idle++
 			summaries[row.ChannelID] = summary
 			continue
+		}
+		if row.Idle {
+			// The rate sample is idle, but lookup still applies this decayed tier
+			// verdict. Keeping it active prevents the UI from hiding the very
+			// demotion that is protecting requests from a dead channel.
+			summary.Idle++
 		}
 		summary.Active++
 

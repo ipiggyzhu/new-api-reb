@@ -37,10 +37,10 @@ type ScoreView struct {
 	// sanitized MinSampleForWeight, neither of which is exported.
 	WeightFactor float64 `json:"weight_factor"`
 
-	// Idle marks a row the selection path is ignoring: lookup treats a record with
-	// no traffic for IdleResetSeconds as absent. Reported rather than filtered
-	// because an operator asking "why was this channel not preferred" needs to see
-	// that a demotion exists but is no longer being applied.
+	// Idle marks a row whose traffic-derived sample window has expired. Its weight
+	// factor therefore returns to neutral, but a tier offset may still be applied in
+	// decayed form: a demotion is what stopped traffic reaching the channel, so
+	// silence must not erase that standing verdict all at once.
 	Idle bool `json:"idle"`
 }
 
@@ -178,11 +178,21 @@ func Snapshot(filter ScoreFilter) ScoreSnapshot {
 			UpdatedAt:          state.updatedAt,
 			WeightFactor:       successRateFactor(published.total, published.success, setting.MinSampleForWeight),
 		}
-		// Same rule lookup applies, so a row marked idle here is exactly a row the
-		// selection path is currently ignoring.
-		if setting.IdleResetSeconds > 0 && state.updatedAt > 0 &&
-			now-state.updatedAt >= int64(setting.IdleResetSeconds) {
-			row.Idle = true
+		// Match lookup exactly. Once the rate sample has gone idle its factor
+		// returns to neutral, while the accumulated tier verdict decays one
+		// step per idle period and remains visible until neutral. The old
+		// implementation marked the whole row inactive here, making the list
+		// say "no change" while routing was still keeping a failed channel out
+		// of the top tier.
+		if setting.IdleResetSeconds > 0 && state.updatedAt > 0 {
+			elapsed := now - state.updatedAt
+			if elapsed >= int64(setting.IdleResetSeconds) {
+				row.Idle = true
+				row.TierOffset = decayedOffset(row.TierOffset, elapsed, int64(setting.IdleResetSeconds))
+				row.Total = 0
+				row.Success = 0
+				row.WeightFactor = 1
+			}
 		}
 		result.Rows = append(result.Rows, row)
 		return true

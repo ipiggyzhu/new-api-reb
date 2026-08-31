@@ -111,30 +111,36 @@ func TestSnapshotFiltersByEveryDimension(t *testing.T) {
 	assert.Empty(t, Snapshot(ScoreFilter{Group: "gamma"}).Rows)
 }
 
-// TestSnapshotMarksIdleRowsInsteadOfHidingThem is the deliberate difference from
-// lookup: routing ignores an idle record, but an operator asking why a channel
-// was not preferred still needs to see that the demotion is there.
-func TestSnapshotMarksIdleRowsInsteadOfHidingThem(t *testing.T) {
+// TestSnapshotShowsTheSameDecayedIdleVerdictAsRouting pins the diagnostic
+// contract: the list must show the score the selector is actually applying, not
+// the stale pre-idle offset and not "nothing".
+func TestSnapshotShowsTheSameDecayedIdleVerdictAsRouting(t *testing.T) {
 	now := useScoreSettingForTest(t, func(s *operation_setting.ChannelDynamicScoreSetting) {
 		s.IdleResetSeconds = 100
+		s.MaxDemoteTiers = 3
 	})
 
+	Report(5, "default", "gpt-test", OutcomeFault)
+	Report(5, "default", "gpt-test", OutcomeFault)
 	Report(5, "default", "gpt-test", OutcomeFault)
 
 	rows := Snapshot(ScoreFilter{}).Rows
 	require.Len(t, rows, 1)
 	assert.False(t, rows[0].Idle)
-	assert.Equal(t, -1, rows[0].TierOffset)
+	assert.Equal(t, -3, rows[0].TierOffset)
 
 	*now += 100
 
 	rows = Snapshot(ScoreFilter{}).Rows
 	require.Len(t, rows, 1)
-	assert.True(t, rows[0].Idle, "row past IdleResetSeconds must be marked idle")
-	// The recorded offset is still reported: it exists, it is merely not applied.
-	assert.Equal(t, -1, rows[0].TierOffset)
-	// And the selection path agrees it is being ignored.
-	assert.Nil(t, lookup(scoreKey(5, "default", "gpt-test"), 100))
+	assert.True(t, rows[0].Idle, "the rate sample past IdleResetSeconds is idle")
+	assert.Equal(t, -2, rows[0].TierOffset,
+		"one idle period decays a three-tier demotion by exactly one tier")
+	assert.Zero(t, rows[0].Total, "stale success-rate samples must be cleared")
+	applied := lookup(scoreKey(5, "default", "gpt-test"), 100)
+	require.NotNil(t, applied, "the standing demotion must still protect routing")
+	assert.Equal(t, rows[0].TierOffset, applied.tierOffset,
+		"the diagnostic and selector must agree on the active offset")
 }
 
 // TestSnapshotDoesNotCreateEntries is the property that makes the endpoint safe to

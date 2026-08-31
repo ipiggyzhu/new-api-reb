@@ -72,6 +72,56 @@ func (s *scoreState) sampleTotals() (total int64, success int64) {
 	return s.curTotal + s.prevTotal, s.curSuccess + s.prevSuccess
 }
 
+// decayIdle applies one idle lapse: the sample window is cleared, and the tier
+// offset moves one step toward neutral per elapsed idle period rather than being
+// zeroed.
+//
+// This mirrors the same block in lua/score_update.lua, which is authoritative
+// when Redis is configured. The two must stay identical — a deployment that
+// switches Redis on would otherwise see its channels' exile lengths change.
+//
+// Why the offset survives at all: demotion is what stops traffic reaching a
+// channel, so the silence that follows a demotion is the demotion working. Zeroing
+// the offset on that silence returned every dead channel to the top tier one idle
+// period after it was demoted, where it failed the next request that landed on it,
+// forever. Decaying instead ties the exile length to how deep the demotion was,
+// and the climb back is itself the recovery probe: the channel gets one real
+// request and sinks again immediately if it is still broken.
+func (s *scoreState) decayIdle(now int64, idleResetSeconds int64) {
+	if idleResetSeconds <= 0 || s.updatedAt <= 0 {
+		return
+	}
+	periods := (now - s.updatedAt) / idleResetSeconds
+	offset := s.tierOffset
+
+	s.consecutiveSuccess = 0
+	s.faultCount = 0
+	s.curStart = 0
+	s.curTotal = 0
+	s.curSuccess = 0
+	s.prevTotal = 0
+	s.prevSuccess = 0
+
+	if periods <= 0 {
+		s.tierOffset = offset
+		return
+	}
+	switch {
+	case offset > 0:
+		offset -= int(min64(periods, int64(offset)))
+	case offset < 0:
+		offset += int(min64(periods, int64(-offset)))
+	}
+	s.tierOffset = offset
+}
+
+func min64(a int64, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // rotate advances the sliding window to now, discarding data older than two
 // halves. A gap longer than the whole window clears both halves rather than
 // shifting stale data forward.

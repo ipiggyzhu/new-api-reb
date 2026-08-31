@@ -67,34 +67,36 @@ func TestSummarizeByChannelSpansOffsetRange(t *testing.T) {
 	assert.Equal(t, 1, summary.MaxOffset, "range must reach the most promoted key")
 }
 
-// TestSummarizeByChannelExcludesIdleFromActiveAggregate is the same distinction
-// Snapshot draws: an idle demotion exists but the selection path is not applying
-// it, so reporting it as an adjustment would describe routing that is not
-// happening. It still has to be visible as a count.
-func TestSummarizeByChannelExcludesIdleFromActiveAggregate(t *testing.T) {
+// TestSummarizeByChannelShowsDecayedIdleDemotion keeps the admin list aligned
+// with routing: after a channel is demoted and then goes idle because no request
+// is sent to it, its standing tier verdict is still applied in decayed form. The
+// cell must not hide it as "idle/no effect" while selection continues keeping it
+// beneath a healthy channel.
+func TestSummarizeByChannelShowsDecayedIdleDemotion(t *testing.T) {
 	now := useScoreSettingForTest(t, func(s *operation_setting.ChannelDynamicScoreSetting) {
 		s.MinSampleForWeight = 1000
 		s.FaultsToDemote = 1
+		s.MaxDemoteTiers = 3
 		s.IdleResetSeconds = 100
 	})
 
 	Report(3, "default", "model-stale", OutcomeFault)
-
-	summaries, _ := SummarizeByChannel()
-	require.Equal(t, 1, summaries[3].Adjusted)
-	require.Equal(t, 1, summaries[3].Active)
-	require.Equal(t, 0, summaries[3].Idle)
+	Report(3, "default", "model-stale", OutcomeFault)
+	Report(3, "default", "model-stale", OutcomeFault)
 
 	*now += 100
 
-	summaries, _ = SummarizeByChannel()
+	summaries, _ := SummarizeByChannel()
 	summary := summaries[3]
-	assert.Equal(t, 1, summary.Total, "the key still exists")
-	assert.Equal(t, 1, summary.Idle)
-	assert.Equal(t, 0, summary.Active)
-	assert.Equal(t, 0, summary.Adjusted, "an idle offset is not being applied")
-	assert.Equal(t, 0, summary.MinOffset)
-	assert.Equal(t, 0, summary.MaxOffset)
+	assert.Equal(t, 1, summary.Total)
+	assert.Equal(t, 1, summary.Idle, "the rate sample has expired")
+	assert.Equal(t, 1, summary.Active,
+		"the tier verdict still applies while it decays")
+	assert.Equal(t, 1, summary.Adjusted)
+	assert.Equal(t, -2, summary.MinOffset,
+		"a three-tier demotion loses only one tier after one idle period")
+	assert.Equal(t, -2, summary.MaxOffset)
+	assert.Equal(t, 0, summary.Weighted, "the stale sample rate returns to neutral")
 }
 
 // TestSummarizeByChannelReportsWeightOnlyChange covers the case the offset

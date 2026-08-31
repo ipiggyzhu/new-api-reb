@@ -114,7 +114,16 @@ func TestOffsetsAreClampedBothWays(t *testing.T) {
 	assert.Equal(t, 1, offsetOf(t, 5), "promotion stops at MaxPromoteTiers")
 }
 
-func TestIdleResetReturnsToBaseline(t *testing.T) {
+// TestIdleDecayReturnsToBaselineOneTierAtATime pins that idleness forgives a
+// demotion gradually rather than all at once.
+//
+// This deliberately does not assert a return to baseline after a single idle
+// window, which is what it used to check. A demoted channel receives no traffic —
+// that is what demotion does — so it is idle by construction, and forgiving the
+// whole verdict on that silence meant the verdict expired every time it was
+// applied. In production that returned channels failing 100% of requests to the
+// top tier repeatedly; 208 requests spent their first attempt on one.
+func TestIdleDecayReturnsToBaselineOneTierAtATime(t *testing.T) {
 	now := useScoreSettingForTest(t, nil)
 
 	reportN(6, OutcomeFault, 2)
@@ -124,7 +133,10 @@ func TestIdleResetReturnsToBaseline(t *testing.T) {
 	assert.Equal(t, -2, offsetOf(t, 6), "still inside the idle window")
 
 	*now += 2
-	assert.Equal(t, 0, offsetOf(t, 6), "past the idle window the score is gone")
+	assert.Equal(t, -1, offsetOf(t, 6), "one idle period forgives one tier")
+
+	*now += 1800
+	assert.Equal(t, 0, offsetOf(t, 6), "a second period returns it to baseline")
 }
 
 func TestScoresAreIsolatedPerGroupAndModel(t *testing.T) {

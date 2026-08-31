@@ -23,6 +23,7 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/oauth"
+	"github.com/QuantumNous/new-api/pkg/channel_score"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/relay"
 	"github.com/QuantumNous/new-api/router"
@@ -94,6 +95,13 @@ func main() {
 		}()
 
 		go model.SyncChannelCache(common.SyncFrequency)
+	}
+
+	// Restore learned channel scores before serving traffic. Without this the
+	// mirror the selection path reads starts empty, so the first requests after a
+	// restart are routed to channels that were demoted for failing them.
+	if restored := channel_score.WarmFromShared(); restored > 0 {
+		common.SysLog(fmt.Sprintf("channel score: restored %d records from redis", restored))
 	}
 
 	// Warm pricing after channel cache initialization so Advanced Custom

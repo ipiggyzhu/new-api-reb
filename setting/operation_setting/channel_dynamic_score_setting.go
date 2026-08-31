@@ -10,10 +10,21 @@ import (
 // adjustment: a channel that keeps succeeding rises in the selection order, and
 // one that faults sinks.
 //
-// Nothing here is persisted per channel. The admin-configured priority and weight
-// on the channel remain the baseline and are never overwritten; the scores only
-// shift a channel's position within one request's candidate ranking. A restart
-// therefore returns routing to exactly what the admin configured.
+// The admin-configured priority and weight on the channel remain the baseline and
+// are never overwritten; the scores only shift a channel's position within one
+// request's candidate ranking, and every tier calculation starts from the baseline
+// again rather than from the previous result.
+//
+// What IS written down, into channels.effective_priority and effective_weight, is
+// a projection of that shift for the admin list to display — the feature was
+// otherwise invisible, since both columns kept showing the configured value however
+// far routing had moved. Those columns are derived, refreshed on
+// ProjectionIntervalMinutes, and never read by the selection path. See
+// model.RunChannelScoreProjection.
+//
+// Score state itself lives in Redis when configured, so it survives a restart;
+// without Redis it is per-process and a restart returns routing to exactly what
+// the admin configured.
 type ChannelDynamicScoreSetting struct {
 	Enabled bool `json:"enabled"`
 
@@ -46,10 +57,33 @@ type ChannelDynamicScoreSetting struct {
 	// less responsive to how it is behaving now.
 	SuccessWindowSeconds int `json:"success_window_seconds"`
 
-	// IdleResetSeconds drops a score that has seen no traffic for this long,
-	// returning the channel to the admin baseline. It is the analogue of Envoy's
-	// base_ejection_time: a demotion is not meant to be permanent.
+	// IdleResetSeconds is the length of one forgiveness period for a channel that
+	// has seen no traffic. A channel's sample window is cleared at that boundary,
+	// because an old success rate says nothing about its behaviour now. Its tier
+	// offset, however, decays ONE tier toward the configured baseline per elapsed
+	// period instead of disappearing wholesale.
+	//
+	// The distinction is essential: a demotion is what stops traffic reaching a
+	// channel, so treating that resulting silence as recovery used to return a
+	// 100%-failing channel to the top tier after one period, where it failed the
+	// next request and was demoted again forever. A deeper accumulated demotion
+	// therefore lasts longer, while a one-tier blip is forgiven after one period —
+	// the first request on return is the recovery probe, with no manual enable or
+	// scheduled test required.
 	IdleResetSeconds int `json:"idle_reset_seconds"`
+
+	// ProjectionIntervalMinutes is how often the projected priority and weight
+	// shown in the channel list are refreshed from the live scores.
+	//
+	// This is a DISPLAY cadence and nothing else. Routing recomputes the same
+	// movement from the same baseline on every request, so lengthening this never
+	// slows down how fast a failing channel is demoted — it only makes the number
+	// in the list older.
+	//
+	// It should stay well under IdleResetSeconds. A projection refreshed less often
+	// than scores expire would show adjustments that had already lapsed, which is
+	// the one way this column can actively mislead.
+	ProjectionIntervalMinutes int `json:"projection_interval_minutes"`
 }
 
 // Defaults are opt-in: Enabled is false, so an upgrade changes no routing until
@@ -63,6 +97,12 @@ var channelDynamicScoreSetting = ChannelDynamicScoreSetting{
 	MinSampleForWeight:   20,
 	SuccessWindowSeconds: 300,
 	IdleResetSeconds:     1800,
+	// Ten minutes: frequent enough that the list tracks a channel going bad within
+	// one poll of noticing it, and a third of the default idle window so a lapsed
+	// score is cleared well before an operator could act on it. The run itself is
+	// one indexed read plus a write per changed channel, so the cost of the shorter
+	// cadence is not the reason to lengthen it.
+	ProjectionIntervalMinutes: 10,
 }
 
 // publishedDynamicScoreSetting holds the snapshot the request path reads, for
@@ -127,6 +167,9 @@ func GetChannelDynamicScoreSetting() ChannelDynamicScoreSetting {
 	}
 	if setting.IdleResetSeconds <= 0 {
 		setting.IdleResetSeconds = 1800
+	}
+	if setting.ProjectionIntervalMinutes <= 0 {
+		setting.ProjectionIntervalMinutes = 10
 	}
 	return setting
 }

@@ -43,18 +43,45 @@ local prevTotal = tonumber(raw[7]) or 0
 local prevSuccess = tonumber(raw[8]) or 0
 local updatedAt = tonumber(raw[9]) or 0
 
--- Idle reset. Judged inside the script so a stale read cannot resurrect an
+-- Idle handling. Judged inside the script so a stale read cannot resurrect an
 -- expired record: a caller that decided "this is idle" seconds ago would
 -- otherwise overwrite an update another instance just made.
+--
+-- The sample window is cleared outright — a success rate measured before a long
+-- silence says nothing about now. The tier offset is NOT: it decays one tier per
+-- elapsed idle period instead.
+--
+-- Clearing the offset wholesale made demotion self-destruct precisely because it
+-- worked. Demoting a channel is what stops traffic reaching it, so the silence
+-- that follows is the demotion succeeding, not evidence of recovery. One idle
+-- period later the offset was zeroed, the channel returned to the top tier, and
+-- it failed the next request that landed on it — indefinitely, since nothing it
+-- did could keep it down. Decaying by one tier means the exile lasts as long as
+-- the demotion was deep: a channel at -3 needs three idle periods to reach
+-- neutral, while one at -1 (a single blip) is forgiven after one. That is
+-- Envoy's base_ejection_time scaled by consecutive ejections, and it is also the
+-- recovery probe — a channel that climbs back gets one real request, and demotes
+-- again immediately if it is still broken.
 if updatedAt > 0 and idleResetSeconds > 0 and (now - updatedAt) >= idleResetSeconds then
   consecutiveSuccess = 0
   faultCount = 0
-  tierOffset = 0
   curStart = 0
   curTotal = 0
   curSuccess = 0
   prevTotal = 0
   prevSuccess = 0
+
+  -- floor((now - updatedAt) / idleResetSeconds) periods have elapsed. Computing
+  -- it rather than decaying by one keeps a process that was down for hours from
+  -- holding a stale demotion for one period per subsequent request.
+  local periods = math.floor((now - updatedAt) / idleResetSeconds)
+  if periods > 0 then
+    if tierOffset > 0 then
+      tierOffset = math.max(0, tierOffset - periods)
+    elseif tierOffset < 0 then
+      tierOffset = math.min(0, tierOffset + periods)
+    end
+  end
 end
 
 -- Rotate the sliding window.

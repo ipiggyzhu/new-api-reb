@@ -173,7 +173,7 @@ func Report(channelId int, group string, model string, outcome Outcome) {
 			setting.MaxPromoteTiers,
 			setting.MaxDemoteTiers,
 			setting.IdleResetSeconds,
-			setting.IdleResetSeconds,
+			scoreKeyTTLSeconds(setting),
 		).Int64Slice()
 		if err != nil {
 			common.SysError(fmt.Sprintf("channel score redis update failed: key=%s, err=%v", key, err))
@@ -194,6 +194,34 @@ func Report(channelId int, group string, model string, outcome Outcome) {
 	applyLocal(key, outcome, now, halfWidth, setting)
 }
 
+// scoreKeyTTLSeconds is how long a score record lives in Redis without being
+// touched.
+//
+// It must outlast a full decay, not one idle period. The TTL used to equal
+// IdleResetSeconds, so a demoted channel's record was deleted exactly one idle
+// period after its last request — and since demotion is what stops traffic
+// reaching a channel, that deletion was guaranteed. The verdict was destroyed
+// before it could decay a single tier, which is the same defect the wholesale idle
+// reset had, one layer down.
+//
+// The depth is bounded by MaxDemoteTiers, so a record needs at most that many idle
+// periods to reach neutral. One extra period is added so the final decay is
+// observed rather than racing the expiry, and the promote bound is included for
+// symmetry with a positive offset.
+func scoreKeyTTLSeconds(setting operation_setting.ChannelDynamicScoreSetting) int {
+	if setting.IdleResetSeconds <= 0 {
+		return 0
+	}
+	depth := setting.MaxDemoteTiers
+	if setting.MaxPromoteTiers > depth {
+		depth = setting.MaxPromoteTiers
+	}
+	if depth < 0 {
+		depth = 0
+	}
+	return setting.IdleResetSeconds * (depth + 1)
+}
+
 // applyLocal performs the same state transition as the Lua script, in process.
 // The whole transition happens under the entry's lock, which is what makes the
 // idle-reset decision safe: reading updatedAt and acting on it cannot be split
@@ -207,7 +235,7 @@ func applyLocal(key string, outcome Outcome, now int64, halfWidth int64, setting
 
 	if e.state.updatedAt > 0 && setting.IdleResetSeconds > 0 &&
 		now-e.state.updatedAt >= int64(setting.IdleResetSeconds) {
-		e.state = scoreState{}
+		e.state.decayIdle(now, int64(setting.IdleResetSeconds))
 	}
 
 	e.state.rotate(now, halfWidth)
@@ -275,9 +303,22 @@ func entryGeneration(key string) uint64 {
 }
 
 // lookup returns the published snapshot for a key, or nil when there is none or
-// it has gone idle. Idle records are treated as absent rather than deleted here:
-// the selection path must not take a write lock, and the record is rewritten or
-// expired on the next report anyway.
+// nothing survives the idle lapse. Nothing is mutated: the selection path must not
+// take a write lock, and the record is rewritten on the next report anyway.
+//
+// An idle record is decayed on read rather than treated as absent. Reporting it
+// absent is what let a demotion vanish from routing one idle period after it was
+// applied — and since demoting a channel is what stops traffic reaching it, that
+// period always elapsed. The offset therefore had no effect beyond the first idle
+// window, no matter how deep it was, and a channel failing 100% of requests was
+// returned to the top tier over and over.
+//
+// The sample window is reported empty in the idle case even though the offset
+// survives. The two answer different questions: the offset is a standing verdict
+// about where a channel belongs, while the rate is a measurement of how it is
+// behaving right now, and a rate recorded before a long silence is not evidence
+// about the present. An empty sample yields a neutral weight factor, so weight
+// returns to the admin baseline while the demotion persists.
 func lookup(key string, idleResetSeconds int) *snapshot {
 	loaded, ok := localStore.Load(key)
 	if !ok {
@@ -288,15 +329,145 @@ func lookup(key string, idleResetSeconds int) *snapshot {
 	if snap == nil {
 		return nil
 	}
-	if idleResetSeconds > 0 {
-		e.mu.Lock()
-		updatedAt := e.state.updatedAt
-		e.mu.Unlock()
-		if updatedAt > 0 && nowFunc().Unix()-updatedAt >= int64(idleResetSeconds) {
-			return nil
-		}
+	if idleResetSeconds <= 0 {
+		return snap
 	}
-	return snap
+
+	e.mu.Lock()
+	updatedAt := e.state.updatedAt
+	e.mu.Unlock()
+	if updatedAt <= 0 {
+		return snap
+	}
+	elapsed := nowFunc().Unix() - updatedAt
+	if elapsed < int64(idleResetSeconds) {
+		return snap
+	}
+
+	decayed := decayedOffset(snap.tierOffset, elapsed, int64(idleResetSeconds))
+	if decayed == 0 {
+		// Fully forgiven: identical to never having been scored.
+		return nil
+	}
+	return &snapshot{tierOffset: decayed}
+}
+
+// decayedOffset moves offset one step toward neutral per elapsed idle period. It
+// is the read-side counterpart of scoreState.decayIdle and must agree with it and
+// with lua/score_update.lua.
+func decayedOffset(offset int, elapsed int64, idleResetSeconds int64) int {
+	if offset == 0 || idleResetSeconds <= 0 {
+		return offset
+	}
+	periods := elapsed / idleResetSeconds
+	if periods <= 0 {
+		return offset
+	}
+	if offset > 0 {
+		return offset - int(min64(periods, int64(offset)))
+	}
+	return offset + int(min64(periods, int64(-offset)))
+}
+
+// WarmFromShared repopulates the local mirror from Redis and reports how many
+// records it restored.
+//
+// lookup reads only localStore, which starts empty in a fresh process. Redis held
+// the authoritative state across the restart, but nothing put it back, so every
+// channel routed at its admin baseline until live traffic repopulated the mirror
+// one route at a time. For a demoted channel that is exactly backwards: the first
+// requests after a restart go to the upstream that was demoted for failing them,
+// and the operator sees the dead channel picked again for no visible reason.
+//
+// Idle decay is applied on read here rather than being written back: a record that
+// went stale while the process was down should be as forgiven as it would have been
+// had the process stayed up, but Redis remains the authority and the next Report
+// recomputes it there anyway.
+//
+// Failures are logged and swallowed. A gateway that cannot reach Redis at startup
+// must still serve traffic; it simply starts from the admin baseline, which is the
+// same state it had before this function existed.
+func WarmFromShared() int {
+	if !redisActive() {
+		return 0
+	}
+	setting := operation_setting.GetChannelDynamicScoreSetting()
+	if !setting.Enabled {
+		return 0
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	iter := common.RDB.Scan(ctx, 0, scoreKeyPrefix+"*", 200).Iterator()
+	keys := make([]string, 0, 64)
+	for iter.Next(ctx) {
+		keys = append(keys, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
+		common.SysError(fmt.Sprintf("channel score warm scan failed: err=%v", err))
+		return 0
+	}
+
+	restored := 0
+	for _, key := range keys {
+		raw, err := common.RDB.HMGet(ctx, key, "off", "ct", "csu", "pt", "psu", "ua").Result()
+		if err != nil {
+			common.SysError(fmt.Sprintf("channel score warm read failed: key=%s, err=%v", key, err))
+			continue
+		}
+		state := scoreState{
+			tierOffset:  int(redisFieldInt(raw, 0)),
+			curTotal:    redisFieldInt(raw, 1),
+			curSuccess:  redisFieldInt(raw, 2),
+			prevTotal:   redisFieldInt(raw, 3),
+			prevSuccess: redisFieldInt(raw, 4),
+			updatedAt:   redisFieldInt(raw, 5),
+		}
+		if state.updatedAt <= 0 {
+			continue
+		}
+		// Keep the timestamp as Redis recorded it. lookup applies the same decay
+		// when routing reads this mirror; pre-decaying here then retaining the old
+		// timestamp would make lookup decay it a second time, while updating only the
+		// local timestamp would make the next Redis Report disagree with the mirror.
+		total, success := state.sampleTotals()
+		if state.tierOffset == 0 && total == 0 {
+			// Nothing to restore: this record would read identically to no record.
+			continue
+		}
+
+		loaded, _ := localStore.LoadOrStore(key, &entry{})
+		e := loaded.(*entry)
+		e.mu.Lock()
+		e.state = state
+		e.published.Store(&snapshot{
+			tierOffset: state.tierOffset,
+			total:      total,
+			success:    success,
+		})
+		e.mu.Unlock()
+		restored++
+	}
+	return restored
+}
+
+// redisFieldInt reads one HMGET result position as an int64, treating a missing or
+// malformed field as zero. HMGET returns a nil element for an absent field, so the
+// type assertion has to tolerate it rather than indexing blindly.
+func redisFieldInt(raw []any, index int) int64 {
+	if index >= len(raw) || raw[index] == nil {
+		return 0
+	}
+	str, ok := raw[index].(string)
+	if !ok {
+		return 0
+	}
+	value, err := strconv.ParseInt(str, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return value
 }
 
 // Reset drops every score for one channel across all groups and models. Called
