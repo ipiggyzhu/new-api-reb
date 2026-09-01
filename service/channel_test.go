@@ -360,6 +360,62 @@ func TestShouldDisableChannelForResponseTime(t *testing.T) {
 	}
 }
 
+// TestIsChannelRoutingFaultErrorDemotesWithoutDisabling pins the split that lets
+// an empty response sink a channel in the routing order without ever making it
+// eligible for auto-disabling. Both halves matter: if the routing side stops
+// accepting empty_response, a channel that answers 200 with no content keeps its
+// share of traffic; if the disable side starts accepting it, a channel that hits
+// one bad stretch gets turned off and needs a manual click to come back.
+func TestIsChannelRoutingFaultErrorDemotesWithoutDisabling(t *testing.T) {
+	origEnabled := common.AutomaticDisableChannelEnabled
+	origKeywords := operation_setting.AutomaticDisableKeywords
+	origStatusCodes := operation_setting.AutomaticDisableStatusCodeRanges
+	t.Cleanup(func() {
+		common.AutomaticDisableChannelEnabled = origEnabled
+		operation_setting.AutomaticDisableKeywords = origKeywords
+		operation_setting.AutomaticDisableStatusCodeRanges = origStatusCodes
+	})
+	operation_setting.AutomaticDisableKeywords = nil
+	require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString("401"))
+	// Worst case for the disable half: the operator turned the master switch on.
+	common.AutomaticDisableChannelEnabled = true
+
+	emptyResponse := types.NewErrorWithStatusCode(
+		errString("upstream returned no output"),
+		types.ErrorCodeEmptyResponse,
+		502,
+	)
+	channelFault := types.NewErrorWithStatusCode(
+		errString("invalid api key"),
+		types.ErrorCode("authentication_error"),
+		401,
+	)
+	rateLimited := types.NewErrorWithStatusCode(
+		errString("rate limit reached"),
+		types.ErrorCode("rate_limit_error"),
+		429,
+	)
+
+	cases := []struct {
+		name        string
+		err         *types.NewAPIError
+		wantRouting bool
+		wantDisable bool
+	}{
+		{name: "nil error", err: nil, wantRouting: false, wantDisable: false},
+		{name: "empty response demotes only", err: emptyResponse, wantRouting: true, wantDisable: false},
+		{name: "channel fault does both", err: channelFault, wantRouting: true, wantDisable: true},
+		{name: "rate limit does neither", err: rateLimited, wantRouting: false, wantDisable: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.wantRouting, IsChannelRoutingFaultError(tc.err))
+			assert.Equal(t, tc.wantDisable, ShouldDisableChannel(tc.err))
+		})
+	}
+}
+
 // errString is a minimal error carrying an exact message; the keyword matcher
 // works on the rendered message, so the text has to survive verbatim.
 type errString string

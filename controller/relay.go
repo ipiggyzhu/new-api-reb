@@ -329,7 +329,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		// AutoBan is not consulted. It governs whether a channel gets disabled,
 		// which is a separate decision from whether a genuine fault should affect
 		// ordering; a channel exempted from auto-ban can still be the worse choice.
-		if service.IsChannelFaultError(newAPIError) {
+		if service.IsChannelRoutingFaultError(newAPIError) {
 			// Also tells the affinity layer that this specific channel faulted, which
 			// is what lets a pin on a broken channel be retracted instead of surviving
 			// until its TTL.

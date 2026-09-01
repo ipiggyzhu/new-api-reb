@@ -211,6 +211,9 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	if newAPIError != nil {
 		return newAPIError
 	}
+	if newAPIError = requireDeliveredOutput(usageDto); newAPIError != nil {
+		return newAPIError
+	}
 	service.PostTextConsumeQuota(c, info, usageDto, nil)
 	return nil
 }

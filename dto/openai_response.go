@@ -283,6 +283,33 @@ func (d InputTokenDetails) CacheCreationTokensTotal() int {
 	return total
 }
 
+// HasOutput reports whether the upstream delivered any output at all.
+//
+// Every text path recovers a token count from the text it accumulated when the
+// upstream reports no usage of its own (ResponseText2Usage for chat
+// completions, the equivalent recovery in the Claude and Responses handlers), so
+// delivered content always leaves a non-zero count here. Zero across every
+// output field therefore means nothing came back, not merely that usage was
+// missing.
+//
+// Each output kind is checked separately because a modality-specific reply can
+// bill entirely through its own field: an audio answer can carry its tokens in
+// CompletionTokenDetails.AudioTokens, and a reasoning model can spend the whole
+// response on ReasoningTokens.
+func (u *Usage) HasOutput() bool {
+	if u == nil {
+		return false
+	}
+	if u.CompletionTokens > 0 || u.OutputTokens > 0 {
+		return true
+	}
+	details := u.CompletionTokenDetails
+	return details.TextTokens > 0 ||
+		details.AudioTokens > 0 ||
+		details.ImageTokens > 0 ||
+		details.ReasoningTokens > 0
+}
+
 type OutputTokenDetails struct {
 	TextTokens      int `json:"text_tokens"`
 	AudioTokens     int `json:"audio_tokens"`

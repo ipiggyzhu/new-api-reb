@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -153,6 +154,35 @@ func adaptorUsage(usage any) (*dto.Usage, *types.NewAPIError) {
 		)
 	}
 	return usageDto, nil
+}
+
+// requireDeliveredOutput fails a text relay whose upstream committed to a 200 and
+// then delivered nothing.
+//
+// The shape it catches: the upstream opens an SSE stream, emits only lifecycle
+// events, and closes cleanly. The scanner sees a normal end so the stream verdict
+// is "ok", and the recovered usage carries the full prompt with zero output. No
+// layer objected, so the request was settled at full prompt price, written to the
+// log as a success, and scored as one — the channel that produced nothing was
+// rewarded for it and kept its share of the traffic.
+//
+// Raised here rather than at the retry loop's verdict point because this runs
+// before PostTextConsumeQuota. Returning an error lets controller.Relay's deferred
+// Refund return the pre-consumed quota, which is impossible once billing has
+// settled.
+//
+// Only for text generation. Transcription, embeddings, images and rerank
+// legitimately report zero completion tokens, which is why this is separate from
+// adaptorUsage rather than folded into it.
+func requireDeliveredOutput(usage *dto.Usage) *types.NewAPIError {
+	if usage.HasOutput() {
+		return nil
+	}
+	return types.NewErrorWithStatusCode(
+		errors.New("upstream returned no output"),
+		types.ErrorCodeEmptyResponse,
+		http.StatusBadGateway,
+	)
 }
 
 func GetTaskPlatform(c *gin.Context) constant.TaskPlatform {

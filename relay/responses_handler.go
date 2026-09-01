@@ -155,6 +155,9 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	if newAPIError != nil {
 		return newAPIError
 	}
+	if newAPIError = requireDeliveredOutput(usageDto); newAPIError != nil {
+		return newAPIError
+	}
 	if info.RelayMode == relayconstant.RelayModeResponsesCompact {
 		originModelName := info.OriginModelName
 		originPriceData := info.PriceData

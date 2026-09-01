@@ -89,6 +89,25 @@ func IsChannelFaultError(err *types.NewAPIError) bool {
 	return search
 }
 
+// IsChannelRoutingFaultError 判定一个错误是否应该影响路由排序（动态优先级/权重与渠道亲和）。
+// 它比 IsChannelFaultError 宽一档：后者的结论会被 ShouldDisableChannel 继续用于
+// 禁用渠道，而排序只是把一个渠道往后放，代价小得多，因此可以把"上游承诺 200 却什么
+// 都没吐"这类只影响可用性、不足以据此禁用的故障也算进来。
+//
+// 现在多出来的一项是 ErrorCodeEmptyResponse。它不带 "channel:" 前缀、也不在
+// AutomaticDisableStatusCodes 白名单里，所以 IsChannelFaultError 与
+// ShouldDisableChannel 都不会因此禁用渠道；空回渠道会因为评分下沉而被绕开，等它自己
+// 恢复后再浮回来，符合"动态调整优先级和权重、不禁用"的要求。
+func IsChannelRoutingFaultError(err *types.NewAPIError) bool {
+	if err == nil {
+		return false
+	}
+	if err.GetErrorCode() == types.ErrorCodeEmptyResponse {
+		return true
+	}
+	return IsChannelFaultError(err)
+}
+
 func ShouldDisableChannel(err *types.NewAPIError) bool {
 	if !common.AutomaticDisableChannelEnabled {
 		return false
