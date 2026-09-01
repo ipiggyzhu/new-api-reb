@@ -5282,6 +5282,18 @@
     "Run model update now": "立即运行模型更新",
     "Runs one update cycle immediately using the saved settings. Save your changes first.": "使用已保存的设置立即运行一次更新周期。请先保存你的更改。",
     "The value in the input is the configured baseline, which editing writes and scoring never overwrites.": "输入框中的值是配置的基线值；编辑写入的是该值，动态评分永不覆盖它。",
-    "Per-route detail is not available on this instance yet. It reappears once the channel serves traffic again.": "本实例上暂时没有该渠道的分路明细。渠道重新承载流量后会再次显示。"
+    "Per-route detail is not available on this instance yet. It reappears once the channel serves traffic again.": "本实例上暂时没有该渠道的分路明细。渠道重新承载流量后会再次显示。",
+    "Resize column": "调整列宽",
+    "{{count}} model(s)": "{{count}} 个模型",
+    "Please use WeChat's \"Scan QR Code\" feature to complete the binding process.": "请使用微信的 \"扫描二维码\" 功能完成绑定。",
+    "Are you sure you want to delete \"{{name}}\"? Users who authenticated with this provider will no longer be able to log in.": "确定要删除 \"{{name}}\" 吗？使用该提供商认证的用户将无法再登录。",
+    "{{count}} announcements deleted. Click \"Save Settings\" to apply.": "已删除 {{count}} 条公告。点击 \"保存设置\" 以应用。",
+    "{{count}} API entries deleted. Click \"Save Settings\" to apply.": "已删除 {{count}} 条 API 信息。点击 \"保存设置\" 以应用。",
+    "{{count}} FAQs deleted. Click \"Save Settings\" to apply.": "已删除 {{count}} 个 FAQ 条目。点击 \"保存设置\" 以应用。",
+    "{{count}} groups deleted. Click \"Save Settings\" to apply.": "已删除 {{count}} 个分组。点击 \"保存设置\" 以应用。",
+    "Always record client IP": "始终记录客户端 IP",
+    "Record the client IP on every usage and error log, overriding the per-user IP logging preference. Needed to trace abuse, since that preference is off by default.": "在每条使用日志和错误日志中记录客户端 IP，覆盖用户级的 IP 记录偏好。该偏好默认关闭，追查滥用时需要开启此项。",
+    "Configure a custom ratio for \"{{userGroup}}\" users when using a specific token group.": "配置 \"{{userGroup}}\" 用户使用特定令牌分组时的自定义倍率。",
+    "Upstream Response Body": "上游响应体"
   }
 }

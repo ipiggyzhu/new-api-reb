@@ -5282,6 +5282,18 @@
     "Run model update now": "Run model update now",
     "Runs one update cycle immediately using the saved settings. Save your changes first.": "Runs one update cycle immediately using the saved settings. Save your changes first.",
     "The value in the input is the configured baseline, which editing writes and scoring never overwrites.": "The value in the input is the configured baseline, which editing writes and scoring never overwrites.",
-    "Per-route detail is not available on this instance yet. It reappears once the channel serves traffic again.": "Per-route detail is not available on this instance yet. It reappears once the channel serves traffic again."
+    "Per-route detail is not available on this instance yet. It reappears once the channel serves traffic again.": "Per-route detail is not available on this instance yet. It reappears once the channel serves traffic again.",
+    "Resize column": "Resize column",
+    "{{count}} model(s)": "{{count}} model(s)",
+    "Please use WeChat's \"Scan QR Code\" feature to complete the binding process.": "Please use WeChat's \"Scan QR Code\" feature to complete the binding process.",
+    "Are you sure you want to delete \"{{name}}\"? Users who authenticated with this provider will no longer be able to log in.": "Are you sure you want to delete \"{{name}}\"? Users who authenticated with this provider will no longer be able to log in.",
+    "{{count}} announcements deleted. Click \"Save Settings\" to apply.": "{{count}} announcements deleted. Click \"Save Settings\" to apply.",
+    "{{count}} API entries deleted. Click \"Save Settings\" to apply.": "{{count}} API entries deleted. Click \"Save Settings\" to apply.",
+    "{{count}} FAQs deleted. Click \"Save Settings\" to apply.": "{{count}} FAQs deleted. Click \"Save Settings\" to apply.",
+    "{{count}} groups deleted. Click \"Save Settings\" to apply.": "{{count}} groups deleted. Click \"Save Settings\" to apply.",
+    "Always record client IP": "Always record client IP",
+    "Record the client IP on every usage and error log, overriding the per-user IP logging preference. Needed to trace abuse, since that preference is off by default.": "Record the client IP on every usage and error log, overriding the per-user IP logging preference. Needed to trace abuse, since that preference is off by default.",
+    "Configure a custom ratio for \"{{userGroup}}\" users when using a specific token group.": "Configure a custom ratio for \"{{userGroup}}\" users when using a specific token group.",
+    "Upstream Response Body": "Upstream Response Body"
   }
 }
