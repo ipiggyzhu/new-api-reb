@@ -651,3 +651,91 @@ func TestStreamScannerHandler_StreamStatus_ReplacesPreInitialized(t *testing.T) 
 	assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
 	assert.Equal(t, 0, info.StreamStatus.TotalErrorCount())
 }
+
+// TestStreamScannerHandler_NonStreamBody covers the shape a relay produces when
+// it fails after having already committed to 200: a streaming request answered
+// with a plain JSON error object. Every line of it is skipped as non-payload, so
+// the stream used to end as a clean EOF having delivered nothing — the caller
+// received a well-formed empty stream, the handler still wrote its terminator so
+// the request could no longer be retried elsewhere, and the upstream's reason
+// was recorded nowhere.
+func TestStreamScannerHandler_NonStreamBody(t *testing.T) {
+	t.Parallel()
+
+	upstreamError := `{"error":{"type":"<nil>","message":"Upstream request failed (request id: abc123)"},"type":"error"}`
+
+	tests := []struct {
+		name            string
+		body            string
+		wantReason      relaycommon.StreamEndReason
+		wantForwarded   int
+		wantErr         bool
+		wantErrContains string
+	}{
+		{
+			name:            "json error body instead of a stream",
+			body:            upstreamError + "\n",
+			wantReason:      relaycommon.StreamEndReasonNoStreamBody,
+			wantForwarded:   0,
+			wantErr:         true,
+			wantErrContains: "Upstream request failed (request id: abc123)",
+		},
+		{
+			name:          "healthy stream is untouched",
+			body:          buildSSEBody(3),
+			wantReason:    relaycommon.StreamEndReasonDone,
+			wantForwarded: 3,
+			wantErr:       false,
+		},
+		{
+			name: "event and blank framing lines are not a non-stream body",
+			body: "event: message_start\n\ndata: {\"type\":\"message_start\"}\n\n" +
+				"event: content_block_delta\n\ndata: {\"type\":\"content_block_delta\"}\n\n",
+			wantReason:    relaycommon.StreamEndReasonEOF,
+			wantForwarded: 2,
+			wantErr:       false,
+		},
+		{
+			name:          "framing lines alone stay an ordinary eof",
+			body:          "event: ping\n\n: keepalive comment\n\n",
+			wantReason:    relaycommon.StreamEndReasonEOF,
+			wantForwarded: 0,
+			wantErr:       false,
+		},
+		{
+			name: "garbage after real payload stays an ordinary eof",
+			body: "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n" +
+				upstreamError + "\n",
+			wantReason:    relaycommon.StreamEndReasonEOF,
+			wantForwarded: 1,
+			wantErr:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			c, resp, info := setupStreamTest(t, strings.NewReader(tt.body))
+
+			var forwarded atomic.Int64
+			StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+				forwarded.Add(1)
+			})
+
+			assert.Equal(t, tt.wantReason, info.StreamStatus.EndReason)
+			assert.Equal(t, int64(tt.wantForwarded), forwarded.Load())
+
+			streamErr := info.StreamStatus.NoStreamBodyError()
+			if !tt.wantErr {
+				assert.Nil(t, streamErr)
+				return
+			}
+			require.NotNil(t, streamErr, "a body that was never a stream must fail the relay")
+			assert.Equal(t, http.StatusBadGateway, streamErr.StatusCode)
+			// The upstream's own words have to survive: they are the only
+			// explanation the log and the caller ever get.
+			assert.Contains(t, streamErr.Error(), tt.wantErrContains)
+		})
+	}
+}

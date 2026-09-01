@@ -1,11 +1,14 @@
 package claude
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/dto"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service/relayconvert"
+	"github.com/QuantumNous/new-api/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -372,4 +375,133 @@ func TestOpenAIChatRequestToClaudeMessages_ClaudeOpus48ThinkingUsesAdaptiveHighE
 	require.Nil(t, claudeRequest.Temperature)
 	require.Nil(t, claudeRequest.TopP)
 	require.Nil(t, claudeRequest.TopK)
+}
+
+// An upstream that opens a Claude stream and then walks away sends message_start
+// and nothing else. Without a guard the caller receives a well-formed stream
+// carrying no answer at all, and the request is billed and scored as a success.
+func TestStreamProducedNoContentError(t *testing.T) {
+	t.Parallel()
+
+	text := "hi"
+	toolArgs := `{"q":`
+	messageStart := &dto.ClaudeResponse{
+		Type:    "message_start",
+		Message: &dto.ClaudeMediaMessage{Usage: &dto.ClaudeUsage{InputTokens: 49795, OutputTokens: 1}},
+	}
+
+	cases := []struct {
+		name      string
+		events    []*dto.ClaudeResponse
+		endReason relaycommon.StreamEndReason
+		wantEmpty bool
+	}{
+		{
+			name:      "message_start then nothing is an empty answer",
+			events:    []*dto.ClaudeResponse{messageStart},
+			endReason: relaycommon.StreamEndReasonEOF,
+			wantEmpty: true,
+		},
+		{
+			name:      "no frames at all is an empty answer",
+			events:    nil,
+			endReason: relaycommon.StreamEndReasonEOF,
+			wantEmpty: true,
+		},
+		{
+			name: "text delta is content",
+			events: []*dto.ClaudeResponse{
+				messageStart,
+				{Type: "content_block_delta", Delta: &dto.ClaudeMediaMessage{Text: &text}},
+			},
+			endReason: relaycommon.StreamEndReasonEOF,
+			wantEmpty: false,
+		},
+		{
+			name: "thinking delta is content",
+			events: []*dto.ClaudeResponse{
+				messageStart,
+				{Type: "content_block_delta", Delta: &dto.ClaudeMediaMessage{Thinking: &text}},
+			},
+			endReason: relaycommon.StreamEndReasonEOF,
+			wantEmpty: false,
+		},
+		{
+			// A tool call never reaches ResponseText, so partial_json has to count
+			// on its own or every truncated tool call would look like an empty answer.
+			name: "tool call partial json is content",
+			events: []*dto.ClaudeResponse{
+				messageStart,
+				{Type: "content_block_delta", Delta: &dto.ClaudeMediaMessage{PartialJson: &toolArgs}},
+			},
+			endReason: relaycommon.StreamEndReasonEOF,
+			wantEmpty: false,
+		},
+		{
+			// A tool call with no arguments has a content_block_start and no delta.
+			name: "content_block_start alone is content",
+			events: []*dto.ClaudeResponse{
+				messageStart,
+				{Type: "content_block_start", ContentBlock: &dto.ClaudeMediaMessage{Type: "tool_use", Name: "lookup"}},
+			},
+			endReason: relaycommon.StreamEndReasonEOF,
+			wantEmpty: false,
+		},
+		{
+			// message_delta closes the message off, so the upstream did answer even
+			// if this gateway found nothing in it worth counting.
+			name: "message_delta means upstream finished",
+			events: []*dto.ClaudeResponse{
+				messageStart,
+				{Type: "message_delta", Usage: &dto.ClaudeUsage{OutputTokens: 12}},
+			},
+			endReason: relaycommon.StreamEndReasonEOF,
+			wantEmpty: false,
+		},
+		{
+			// The stream ends the same way, but the caller hung up. Reporting a
+			// channel fault here would demote a channel that did nothing wrong.
+			name:      "client disconnect is not a channel fault",
+			events:    []*dto.ClaudeResponse{messageStart},
+			endReason: relaycommon.StreamEndReasonClientGone,
+			wantEmpty: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			claudeInfo := &ClaudeResponseInfo{Usage: &dto.Usage{}, ResponseText: strings.Builder{}}
+			info := &relaycommon.RelayInfo{StreamStatus: relaycommon.NewStreamStatus()}
+			for _, event := range tc.events {
+				FormatClaudeResponseInfo(event, nil, claudeInfo)
+				info.ReceivedResponseCount++
+			}
+			info.StreamStatus.SetEndReason(tc.endReason, nil)
+
+			emptyErr := StreamProducedNoContentError(info, claudeInfo)
+			if !tc.wantEmpty {
+				assert.Nil(t, emptyErr)
+				return
+			}
+
+			require.NotNil(t, emptyErr)
+			assert.Equal(t, http.StatusBadGateway, emptyErr.StatusCode)
+			// ErrorCodeEmptyResponse demotes the channel without disabling it, and
+			// is retryable when nothing has reached the client yet.
+			assert.Equal(t, types.ErrorCodeEmptyResponse, emptyErr.GetErrorCode())
+			assert.Contains(t, emptyErr.Error(), "no text, no thinking, no tool call")
+		})
+	}
+}
+
+func TestStreamProducedNoContentError_NilArgs(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, StreamProducedNoContentError(nil, &ClaudeResponseInfo{}))
+	assert.Nil(t, StreamProducedNoContentError(&relaycommon.RelayInfo{}, nil))
+	// A stream that never ran the scanner has no StreamStatus; the guard still
+	// has to answer rather than panic.
+	assert.NotNil(t, StreamProducedNoContentError(&relaycommon.RelayInfo{}, &ClaudeResponseInfo{}))
 }

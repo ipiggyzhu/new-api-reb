@@ -1,6 +1,7 @@
 package common
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -22,6 +23,9 @@ const (
 	StreamEndReasonEOF         StreamEndReason = "eof"
 	StreamEndReasonPanic       StreamEndReason = "panic"
 	StreamEndReasonPingFail    StreamEndReason = "ping_fail"
+	// StreamEndReasonNoStreamBody: the upstream answered a streaming request
+	// with a body that was never a stream, and the scanner forwarded nothing.
+	StreamEndReasonNoStreamBody StreamEndReason = "no_stream_body"
 )
 
 const maxStreamErrorEntries = 20
@@ -111,6 +115,9 @@ func (s *StreamStatus) TotalErrorCount() int {
 // produce the tokens that were delivered, so the user is charged for them; only
 // the success verdict is withdrawn.
 func (s *StreamStatus) FailureError() *types.NewAPIError {
+	if streamErr := s.NoStreamBodyError(); streamErr != nil {
+		return streamErr
+	}
 	if s == nil || s.IsNormalEnd() ||
 		s.EndReason == StreamEndReasonNone ||
 		s.EndReason == StreamEndReasonClientGone {
@@ -125,6 +132,33 @@ func (s *StreamStatus) FailureError() *types.NewAPIError {
 		types.ErrorCodeBadResponse,
 		http.StatusBadGateway,
 	)
+}
+
+// NoStreamBodyError reports an upstream that answered a streaming request with
+// a body that was never a stream — the shape a relay produces when it fails
+// after having already committed to 200, usually a bare JSON error object.
+//
+// It is split out from FailureError because it is the one abnormal end a
+// handler can still act on. Every other reason here is discovered with part of
+// the response already on the wire, so all the caller can do is withdraw the
+// success verdict. This one is discovered having forwarded nothing at all:
+// returning it before the handler writes its terminator is what keeps the
+// request retryable on another channel, instead of ending it as a clean but
+// empty stream the caller reports as an empty response.
+//
+// ErrorCodeEmptyResponse rather than ErrorCodeBadResponse: the caller sees the
+// same symptom as any other empty response, and that code is the one
+// IsChannelRoutingFaultError demotes on while leaving ShouldDisableChannel
+// unable to disable the channel over it.
+func (s *StreamStatus) NoStreamBodyError() *types.NewAPIError {
+	if s == nil || s.EndReason != StreamEndReasonNoStreamBody {
+		return nil
+	}
+	err := errors.New("upstream returned no stream")
+	if s.EndError != nil {
+		err = fmt.Errorf("upstream returned no stream: %s", s.EndError.Error())
+	}
+	return types.NewErrorWithStatusCode(err, types.ErrorCodeEmptyResponse, http.StatusBadGateway)
 }
 
 func (s *StreamStatus) IsNormalEnd() bool {

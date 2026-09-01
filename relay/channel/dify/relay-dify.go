@@ -255,6 +255,11 @@ func difyStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 			sr.Error(err)
 		}
 	})
+	// Before helper.Done: once the terminator is on the wire shouldRetry can no
+	// longer move the request to another channel.
+	if streamErr := info.StreamStatus.NoStreamBodyError(); streamErr != nil {
+		return nil, streamErr
+	}
 	helper.Done(c)
 	if usage.TotalTokens == 0 {
 		usage = service.ResponseText2Usage(c, responseText, info.UpstreamModelName, info.GetEstimatePromptTokens())

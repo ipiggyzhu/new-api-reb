@@ -36,7 +36,25 @@ const (
 	// but connected client (full TCP buffer, no server WriteTimeout) could hang
 	// the handler forever.
 	streamWriteTimeout = 30 * time.Second
+	// maxNonStreamBodyBytes bounds what is kept from a body that is not a
+	// stream. It only ever holds an error message meant for a human, and the
+	// whole point is not trusting the upstream about what it is sending, so it
+	// must not grow with the response.
+	maxNonStreamBodyBytes = 2 << 10 // 2KB
 )
+
+// isSSEFramingLine reports the lines an SSE body carries besides its payload:
+// blank separators, comments, and the fields other than data. Healthy streams
+// are full of them, so they are never evidence that a body was not a stream.
+func isSSEFramingLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, ":") {
+		return true
+	}
+	return strings.HasPrefix(trimmed, "event:") ||
+		strings.HasPrefix(trimmed, "id:") ||
+		strings.HasPrefix(trimmed, "retry:")
+}
 
 func getScannerBufferSize() int {
 	if constant.StreamScannerMaxBufferMB > 0 {
@@ -276,6 +294,18 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	// Scanner goroutine with improved error handling
 	wg.Add(1)
 	common.RelayCtxGo(ctx, func() {
+		// Body bytes that were not SSE payload. An upstream that fails after
+		// having already committed to 200 answers a streaming request with a
+		// plain body — typically one JSON error object — and every line of it
+		// lands in the skip branch below. Discarding them silently ended the
+		// stream as a clean EOF that had delivered nothing: the caller received a
+		// well-formed empty stream instead of the upstream's message, the handler
+		// went on to write its terminator so shouldRetry could no longer move the
+		// request to another channel, and the upstream's reason was recorded
+		// nowhere. Keeping a bounded prefix is what lets the stream be failed
+		// below with the upstream's own words.
+		var nonStreamBody strings.Builder
+
 		defer func() {
 			close(dataChan)
 			if r := recover(); r != nil {
@@ -308,6 +338,9 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			// client as a malformed event and ended the stream as EOF.
 			if !strings.HasPrefix(data, "[DONE]") {
 				if !strings.HasPrefix(data, "data:") {
+					if !isSSEFramingLine(data) && nonStreamBody.Len() < maxNonStreamBodyBytes {
+						nonStreamBody.WriteString(strings.TrimSpace(data))
+					}
 					continue
 				}
 				data = strings.TrimSpace(data[len("data:"):])
@@ -339,6 +372,14 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				logger.LogError(c, "scanner error: "+err.Error())
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonScannerErr, err)
 			}
+		}
+		// Only when nothing at all was forwarded. A stream that delivered payload
+		// and also carried unparsable lines is a different fault, and one the
+		// caller has already been given part of, so it stays an ordinary EOF.
+		if body := strings.TrimSpace(nonStreamBody.String()); body != "" && info.ReceivedResponseCount == 0 {
+			logger.LogError(c, "upstream sent no stream, body: "+body)
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonNoStreamBody, errors.New(body))
+			return
 		}
 		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
 	})

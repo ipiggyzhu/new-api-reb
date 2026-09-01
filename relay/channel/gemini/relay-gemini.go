@@ -173,6 +173,12 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 		}
 	})
 
+	// Before any terminator reaches the client: once something is on the wire
+	// shouldRetry can no longer move the request to another channel.
+	if streamErr := info.StreamStatus.NoStreamBodyError(); streamErr != nil {
+		return nil, streamErr
+	}
+
 	if !hasBillableUsageMetadata {
 		if info.ReceivedResponseCount > 0 {
 			usage = service.ResponseText2Usage(c, responseText.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())

@@ -290,6 +290,12 @@ func awsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (
 		}
 	}
 
+	// Before the terminator: HandleStreamFinalResponse writes it, and once
+	// anything is on the wire the request can no longer be retried elsewhere.
+	if streamErr := claude.StreamProducedNoContentError(info, claudeInfo); streamErr != nil {
+		return streamErr, nil
+	}
+
 	claude.HandleStreamFinalResponse(c, info, claudeInfo)
 	return nil, claudeInfo.Usage
 }

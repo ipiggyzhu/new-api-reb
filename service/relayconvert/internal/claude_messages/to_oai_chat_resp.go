@@ -19,6 +19,13 @@ type ClaudeResponseInfo struct {
 	ResponseText strings.Builder
 	Usage        *dto.Usage
 	Done         bool
+	// HasContent records that the stream carried an answer: text, a thinking
+	// block, or a tool call. ResponseText alone cannot answer that question,
+	// because a tool call arrives as partial_json and never reaches it, and a
+	// tool call with no arguments arrives as a content_block_start with no
+	// delta at all. Callers use it to tell an upstream that produced nothing
+	// from one that produced something the caller happens not to bill for.
+	HasContent bool
 	// Claude content_block indexes count every block type (text/thinking/tool_use),
 	// while OpenAI tool_call indexes must be zero-based over tool calls only, so
 	// FormatClaudeResponseInfo remaps them via this per-stream table.
@@ -358,10 +365,15 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 	} else if claudeResponse.Type == "content_block_delta" {
 		if claudeResponse.Delta != nil {
 			if claudeResponse.Delta.Text != nil {
+				claudeInfo.HasContent = true
 				claudeInfo.ResponseText.WriteString(*claudeResponse.Delta.Text)
 			}
 			if claudeResponse.Delta.Thinking != nil {
+				claudeInfo.HasContent = true
 				claudeInfo.ResponseText.WriteString(*claudeResponse.Delta.Thinking)
+			}
+			if claudeResponse.Delta.PartialJson != nil {
+				claudeInfo.HasContent = true
 			}
 		}
 	} else if claudeResponse.Type == "message_delta" {
@@ -391,6 +403,7 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 
 		claudeInfo.Done = true
 	} else if claudeResponse.Type == "content_block_start" {
+		claudeInfo.HasContent = true
 	} else {
 		return false
 	}

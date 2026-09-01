@@ -132,6 +132,12 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		}
 	})
 
+	// Before any terminator reaches the client: once something is on the wire
+	// shouldRetry can no longer move the request to another channel.
+	if streamErr := info.StreamStatus.NoStreamBodyError(); streamErr != nil {
+		return nil, streamErr
+	}
+
 	if usage.CompletionTokens == 0 {
 		// 计算输出文本的 token 数量
 		tempStr := responseTextBuilder.String()

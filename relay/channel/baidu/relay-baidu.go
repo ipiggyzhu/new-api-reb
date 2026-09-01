@@ -152,6 +152,9 @@ func baiduStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 	if streamErr != nil {
 		return streamErr, usage
 	}
+	if noStreamErr := info.StreamStatus.NoStreamBodyError(); noStreamErr != nil {
+		return noStreamErr, usage
+	}
 	return nil, usage
 }
 

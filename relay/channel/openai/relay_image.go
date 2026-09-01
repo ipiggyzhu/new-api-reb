@@ -139,6 +139,12 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 		}
 	})
 
+	// Before the terminator below: once something is on the wire shouldRetry can
+	// no longer move the request to another channel.
+	if streamErr := info.StreamStatus.NoStreamBodyError(); streamErr != nil {
+		return nil, streamErr
+	}
+
 	// StreamScannerHandler consumes the upstream [DONE]; re-emit it so the
 	// client still receives a terminal data: [DONE].
 	if info.StreamStatus != nil && info.StreamStatus.EndReason == relaycommon.StreamEndReasonDone {

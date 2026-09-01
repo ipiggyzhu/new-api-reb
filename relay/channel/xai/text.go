@@ -74,6 +74,12 @@ func xAIStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		}
 	})
 
+	// Before helper.Done: once the terminator is on the wire shouldRetry can no
+	// longer move the request to another channel.
+	if streamErr := info.StreamStatus.NoStreamBodyError(); streamErr != nil {
+		return nil, streamErr
+	}
+
 	if !containStreamUsage {
 		usage = service.ResponseText2Usage(c, responseTextBuilder.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 		usage.CompletionTokens += toolCount * 7

@@ -1,12 +1,14 @@
 package common
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
 	"testing"
 
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -237,4 +239,43 @@ func TestStreamStatus_FailureError_NoneAndNil(t *testing.T) {
 	assert.Nil(t, nilStatus.FailureError())
 
 	assert.Nil(t, NewStreamStatus().FailureError())
+}
+
+// A body that was never a stream is the one abnormal end a handler can act on
+// while nothing is on the wire, so it gets its own accessor. It still has to
+// behave like an abnormal end everywhere else: the TTS handler cannot return an
+// error at all, and relies entirely on FailureError picking this up in
+// controller/relay.go.
+func TestStreamStatus_NoStreamBodyError(t *testing.T) {
+	t.Parallel()
+
+	status := NewStreamStatus()
+	status.SetEndReason(StreamEndReasonNoStreamBody, errors.New(`{"error":{"message":"Upstream request failed"}}`))
+
+	assert.False(t, status.IsNormalEnd(), "a body that was never a stream is not a normal end")
+
+	streamErr := status.NoStreamBodyError()
+	require.NotNil(t, streamErr)
+	assert.Equal(t, http.StatusBadGateway, streamErr.StatusCode)
+	assert.Contains(t, streamErr.Error(), "Upstream request failed")
+	// ErrorCodeEmptyResponse is what IsChannelRoutingFaultError demotes on while
+	// ShouldDisableChannel leaves the channel enabled.
+	assert.Equal(t, types.ErrorCodeEmptyResponse, streamErr.GetErrorCode())
+
+	// FailureError must report the same thing, because that is the only path for
+	// handlers whose signature cannot return an error.
+	failure := status.FailureError()
+	require.NotNil(t, failure)
+	assert.Equal(t, types.ErrorCodeEmptyResponse, failure.GetErrorCode())
+	assert.Contains(t, failure.Error(), "Upstream request failed")
+
+	// Every other end reason must be unaffected.
+	for _, reason := range []StreamEndReason{
+		StreamEndReasonDone, StreamEndReasonEOF, StreamEndReasonHandlerStop,
+		StreamEndReasonTimeout, StreamEndReasonClientGone, StreamEndReasonNone,
+	} {
+		other := NewStreamStatus()
+		other.SetEndReason(reason, nil)
+		assert.Nil(t, other.NoStreamBodyError(), "reason %q must not report a non-stream body", reason)
+	}
 }

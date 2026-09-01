@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -170,6 +171,30 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 	}
 }
 
+// StreamProducedNoContentError reports an upstream that opened a Claude stream
+// and then ended it without ever answering: no text, no thinking, no tool call,
+// and no message_delta to close the message off.
+//
+// Left alone this is invisible. HandleStreamFinalResponse fills the missing
+// usage from the local estimate and writes the terminator, so the caller
+// receives a well-formed stream with zero content frames and the request is
+// recorded as a success — indistinguishable from a model that legitimately had
+// nothing to say. It is not the same fault as StreamEndReasonNoStreamBody: the
+// body here really was a stream, it just carried nothing but its preamble.
+//
+// A client that disconnected is excluded. The stream ends the same way, but the
+// upstream is not at fault and must not be demoted for it.
+func StreamProducedNoContentError(info *relaycommon.RelayInfo, claudeInfo *ClaudeResponseInfo) *types.NewAPIError {
+	if info == nil || claudeInfo == nil || claudeInfo.Done || claudeInfo.HasContent {
+		return nil
+	}
+	if info.StreamStatus != nil && info.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone {
+		return nil
+	}
+	err := fmt.Errorf("upstream ended the stream after %d frames without any content: no text, no thinking, no tool call", info.ReceivedResponseCount)
+	return types.NewErrorWithStatusCode(err, types.ErrorCodeEmptyResponse, http.StatusBadGateway)
+}
+
 func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (*dto.Usage, *types.NewAPIError) {
 	claudeInfo := &ClaudeResponseInfo{
 		ResponseId:   helper.GetResponseID(c),
@@ -187,6 +212,15 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	})
 	if err != nil {
 		return nil, err
+	}
+	// Before the terminator, not after: HandleStreamFinalResponse writes
+	// [DONE], and once anything is on the wire shouldRetry refuses to move the
+	// request to another channel.
+	if streamErr := info.StreamStatus.NoStreamBodyError(); streamErr != nil {
+		return nil, streamErr
+	}
+	if streamErr := StreamProducedNoContentError(info, claudeInfo); streamErr != nil {
+		return nil, streamErr
 	}
 
 	HandleStreamFinalResponse(c, info, claudeInfo)
