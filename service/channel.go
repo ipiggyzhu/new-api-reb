@@ -94,18 +94,51 @@ func IsChannelFaultError(err *types.NewAPIError) bool {
 // 禁用渠道，而排序只是把一个渠道往后放，代价小得多，因此可以把"上游承诺 200 却什么
 // 都没吐"这类只影响可用性、不足以据此禁用的故障也算进来。
 //
-// 现在多出来的一项是 ErrorCodeEmptyResponse。它不带 "channel:" 前缀、也不在
-// AutomaticDisableStatusCodes 白名单里，所以 IsChannelFaultError 与
-// ShouldDisableChannel 都不会因此禁用渠道；空回渠道会因为评分下沉而被绕开，等它自己
-// 恢复后再浮回来，符合"动态调整优先级和权重、不禁用"的要求。
+// 判据是"网关已经决定换一条渠道重试"：既然这个错误值得换渠道，那刚刚失败的这条渠道
+// 按定义就是更差的选择，应该在排序里下沉。因此这里直接复用运维可配的
+// AutomaticRetryStatusCodes，而不是另立一套状态码清单——两处结论永远一致，也不会出现
+// "被重试绕开了 15 次却从未记过一次故障"的情况。
+//
+// 这样放宽后，401 之外的上游失败终于会被计入：dead key 回 500 Failed to validate
+// API key、余额不足回 403、上游自己 502，全都算故障。它们都不带 "channel:" 前缀、也
+// 不在只有 401 的 AutomaticDisableStatusCodes 白名单里，所以 IsChannelFaultError
+// 与 ShouldDisableChannel 依然不会因此禁用渠道；这些渠道只是因为评分下沉而被绕开，等
+// 它自己恢复后再浮回来，符合"动态调整优先级和权重、不禁用"的要求。
+//
+// 被排除在外的三类，都不是渠道的问题，算进去只会让整个分组被一条条地拖下去：
+//   - 网关自身的渠道配置错误（channelConfigErrorCodes）；
+//   - 带 ErrOptionWithSkipRetry 的错误，即"根本没打算换渠道重试"的那些，其中
+//     ErrorCodeChannelsSaturated 尤其要排除：并发打满说明部署是对的、没有渠道出错；
+//   - 客户端自己的错误，靠 400/408 本就不在重试区间内自动落在这一侧——请求本身有问题
+//     时换任何一条渠道都会以同样的方式失败。
 func IsChannelRoutingFaultError(err *types.NewAPIError) bool {
 	if err == nil {
+		return false
+	}
+	if _, isConfigError := channelConfigErrorCodes[err.GetErrorCode()]; isConfigError {
 		return false
 	}
 	if err.GetErrorCode() == types.ErrorCodeEmptyResponse {
 		return true
 	}
-	return IsChannelFaultError(err)
+	// Ahead of IsChannelFaultError, which short-circuits to true on the "channel:"
+	// prefix alone. That namespace holds ErrorCodeChannelsSaturated, and every
+	// channel being at its concurrency limit is the deployment working as
+	// configured, not a channel misbehaving — demoting on it would reorder the
+	// group every time it got busy.
+	if types.IsSkipRetryError(err) {
+		return false
+	}
+	if IsChannelFaultError(err) {
+		return true
+	}
+	// 504/524 不参与重试，是因为请求已经耗掉了一整个超时预算，再换一条渠道重试只会让
+	// 客户端等第二遍——这跟"上游超时了没有"是两个问题。就排序而言超时是最没有疑问的一
+	// 类故障，所以这里明确把它算进来，而不是跟着重试判据一起漏掉。
+	if operation_setting.IsAlwaysSkipRetryStatusCode(err.StatusCode) {
+		return true
+	}
+	return operation_setting.ShouldRetryByStatusCode(err.StatusCode)
 }
 
 func ShouldDisableChannel(err *types.NewAPIError) bool {

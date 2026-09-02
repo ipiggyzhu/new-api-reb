@@ -361,22 +361,29 @@ func TestShouldDisableChannelForResponseTime(t *testing.T) {
 }
 
 // TestIsChannelRoutingFaultErrorDemotesWithoutDisabling pins the split that lets
-// an empty response sink a channel in the routing order without ever making it
-// eligible for auto-disabling. Both halves matter: if the routing side stops
-// accepting empty_response, a channel that answers 200 with no content keeps its
-// share of traffic; if the disable side starts accepting it, a channel that hits
-// one bad stretch gets turned off and needs a manual click to come back.
+// a failing channel sink in the routing order without ever becoming eligible for
+// auto-disabling. Both halves matter: if the routing side stops accepting these,
+// a channel that cannot serve a single request keeps its share of traffic — and
+// keeps leading it, when its static priority is the highest in the group; if the
+// disable side starts accepting them, a channel that hits one bad stretch gets
+// turned off and needs a manual click to come back.
 func TestIsChannelRoutingFaultErrorDemotesWithoutDisabling(t *testing.T) {
 	origEnabled := common.AutomaticDisableChannelEnabled
 	origKeywords := operation_setting.AutomaticDisableKeywords
 	origStatusCodes := operation_setting.AutomaticDisableStatusCodeRanges
+	origRetryCodes := operation_setting.AutomaticRetryStatusCodeRanges
 	t.Cleanup(func() {
 		common.AutomaticDisableChannelEnabled = origEnabled
 		operation_setting.AutomaticDisableKeywords = origKeywords
 		operation_setting.AutomaticDisableStatusCodeRanges = origStatusCodes
+		operation_setting.AutomaticRetryStatusCodeRanges = origRetryCodes
 	})
 	operation_setting.AutomaticDisableKeywords = nil
 	require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString("401"))
+	// The shipped defaults, set explicitly: routing now reads the retry ranges, so
+	// the fixture has to state them rather than inherit whatever ran before it.
+	require.NoError(t, operation_setting.AutomaticRetryStatusCodesFromString(
+		"100-199,300-399,401-407,409-499,500-503,505-523,525-599"))
 	// Worst case for the disable half: the operator turned the master switch on.
 	common.AutomaticDisableChannelEnabled = true
 
@@ -395,6 +402,49 @@ func TestIsChannelRoutingFaultErrorDemotesWithoutDisabling(t *testing.T) {
 		types.ErrorCode("rate_limit_error"),
 		429,
 	)
+	// The shape that started this: a dead key the upstream reports as its own 500
+	// with a message no keyword list has ever heard of. Nothing about it is a
+	// "channel:" code, and 500 is not in the 401-only disable allowlist, so before
+	// routing read the retry ranges this failed every request while accruing
+	// nothing — and led the group anyway, because its static priority was highest.
+	deadKey := types.NewErrorWithStatusCode(
+		errString("Failed to validate API key"),
+		types.ErrorCode("upstream_error"),
+		500,
+	)
+	upstreamGatewayFault := types.NewErrorWithStatusCode(
+		errString("Upstream request failed (request id: abc)"),
+		types.ErrorCodeBadResponseStatusCode,
+		502,
+	)
+	timedOut := types.NewErrorWithStatusCode(
+		errString("upstream timed out"),
+		types.ErrorCodeBadResponse,
+		504,
+	)
+	// Client errors sit on the other side of the line: the request itself is
+	// malformed, so every channel in the group would reject it identically.
+	badRequest := types.NewErrorWithStatusCode(
+		errString("max_tokens must be positive"),
+		types.ErrorCodeInvalidRequest,
+		400,
+	)
+	// Concurrency limits mean the deployment is right and no channel misbehaved.
+	// Only the routing half is asserted, below: this error is raised while picking
+	// a channel, so no channel is ever in hand to disable when it happens.
+	saturated := types.NewErrorWithStatusCode(
+		errString("all channels at their concurrency limit"),
+		types.ErrorCodeChannelsSaturated,
+		503,
+		types.ErrOptionWithSkipRetry(),
+	)
+	// One illegal override template fans out across every channel an affinity rule
+	// reaches, so counting it would walk the whole group down the order.
+	badOverride := types.NewErrorWithStatusCode(
+		errString("param override template is not valid json"),
+		types.ErrorCodeChannelParamOverrideInvalid,
+		500,
+	)
 
 	cases := []struct {
 		name        string
@@ -405,7 +455,12 @@ func TestIsChannelRoutingFaultErrorDemotesWithoutDisabling(t *testing.T) {
 		{name: "nil error", err: nil, wantRouting: false, wantDisable: false},
 		{name: "empty response demotes only", err: emptyResponse, wantRouting: true, wantDisable: false},
 		{name: "channel fault does both", err: channelFault, wantRouting: true, wantDisable: true},
-		{name: "rate limit does neither", err: rateLimited, wantRouting: false, wantDisable: false},
+		{name: "upstream 500 dead key demotes only", err: deadKey, wantRouting: true, wantDisable: false},
+		{name: "upstream 502 demotes only", err: upstreamGatewayFault, wantRouting: true, wantDisable: false},
+		{name: "timeout demotes only", err: timedOut, wantRouting: true, wantDisable: false},
+		{name: "rate limit demotes only", err: rateLimited, wantRouting: true, wantDisable: false},
+		{name: "client error does neither", err: badRequest, wantRouting: false, wantDisable: false},
+		{name: "bad override does neither", err: badOverride, wantRouting: false, wantDisable: false},
 	}
 
 	for _, tc := range cases {
@@ -414,6 +469,36 @@ func TestIsChannelRoutingFaultErrorDemotesWithoutDisabling(t *testing.T) {
 			assert.Equal(t, tc.wantDisable, ShouldDisableChannel(tc.err))
 		})
 	}
+
+	assert.False(t, IsChannelRoutingFaultError(saturated),
+		"every channel being busy is the deployment working as configured, not a fault to reorder on")
+}
+
+// TestIsChannelRoutingFaultErrorFollowsConfiguredRetryCodes pins routing to the
+// operator's retry configuration rather than to a second hardcoded list. An
+// operator who declares a status code not worth retrying is saying another
+// channel would not do better, and routing must not then demote on it.
+func TestIsChannelRoutingFaultErrorFollowsConfiguredRetryCodes(t *testing.T) {
+	origKeywords := operation_setting.AutomaticDisableKeywords
+	origStatusCodes := operation_setting.AutomaticDisableStatusCodeRanges
+	origRetryCodes := operation_setting.AutomaticRetryStatusCodeRanges
+	t.Cleanup(func() {
+		operation_setting.AutomaticDisableKeywords = origKeywords
+		operation_setting.AutomaticDisableStatusCodeRanges = origStatusCodes
+		operation_setting.AutomaticRetryStatusCodeRanges = origRetryCodes
+	})
+	operation_setting.AutomaticDisableKeywords = nil
+	require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString("401"))
+	// An operator who decided 429 is the client's problem, not the channel's.
+	require.NoError(t, operation_setting.AutomaticRetryStatusCodesFromString("500-503"))
+
+	rateLimited := types.NewErrorWithStatusCode(
+		errString("rate limit reached"), types.ErrorCode("rate_limit_error"), 429)
+	serverError := types.NewErrorWithStatusCode(
+		errString("internal error"), types.ErrorCodeBadResponseStatusCode, 500)
+
+	assert.False(t, IsChannelRoutingFaultError(rateLimited))
+	assert.True(t, IsChannelRoutingFaultError(serverError))
 }
 
 // errString is a minimal error carrying an exact message; the keyword matcher
