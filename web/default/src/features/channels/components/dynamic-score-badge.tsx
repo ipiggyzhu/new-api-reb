@@ -9,8 +9,11 @@ import {
 
 import {
   formatOffset,
+  hasProjection,
   hasTierEffect,
   hasWeightEffect,
+  projectedLabel,
+  projectedVariant,
   tierLabel,
   tierVariant,
   weightLabel,
@@ -40,6 +43,22 @@ export function DynamicScorePriorityBadge({ channel }: { channel: Channel }) {
   const { t } = useTranslation()
   const summary = channel.dynamic_score
 
+  // The projected column is preferred when present because it is the concrete
+  // number — `0 → -1` rather than `-1 (1/1)`. It is refreshed on an interval, so
+  // the offset rendering below still covers the window between a score changing
+  // and the next projection run.
+  if (hasProjection(channel.priority, channel.effective_priority)) {
+    const baseline = channel.priority ?? 0
+    return (
+      <ScoreBadge
+        summary={summary}
+        label={projectedLabel(baseline, channel.effective_priority)}
+        variant={projectedVariant(baseline, channel.effective_priority)}
+        ariaLabel={t('Dynamic scoring detail')}
+      />
+    )
+  }
+
   // Absent means no scored traffic, or scoring off/unusable — the table only
   // folds summaries on when both enabled and usable hold.
   if (!summary || !hasTierEffect(summary)) {
@@ -59,6 +78,18 @@ export function DynamicScorePriorityBadge({ channel }: { channel: Channel }) {
 export function DynamicScoreWeightBadge({ channel }: { channel: Channel }) {
   const { t } = useTranslation()
   const summary = channel.dynamic_score
+
+  if (hasProjection(channel.weight, channel.effective_weight)) {
+    const baseline = channel.weight ?? 0
+    return (
+      <ScoreBadge
+        summary={summary}
+        label={projectedLabel(baseline, channel.effective_weight)}
+        variant={projectedVariant(baseline, channel.effective_weight)}
+        ariaLabel={t('Dynamic scoring detail')}
+      />
+    )
+  }
 
   if (!summary || !hasWeightEffect(summary)) {
     return null
@@ -80,7 +111,14 @@ function ScoreBadge({
   variant,
   ariaLabel,
 }: {
-  summary: ChannelScoreSummary
+  // Optional because a projected value can outlive the summary that produced it:
+  // the projection is a database column refreshed on an interval, while the
+  // summary is this instance's live in-process mirror, which is empty after a
+  // restart until fresh traffic repopulates it. Showing the number without the
+  // route breakdown is better than hiding the number.
+  // Null as well as undefined: the schema field is nullish, so an explicit JSON
+  // null reaches here unchanged.
+  summary?: ChannelScoreSummary | null
   label: string
   variant: 'danger' | 'warning' | 'success' | 'info'
   ariaLabel: string
@@ -98,7 +136,7 @@ function ScoreBadge({
             variant={variant}
             size='sm'
             copyable={false}
-            className='cursor-pointer shrink-0'
+            className='shrink-0 cursor-pointer'
             tabIndex={0}
             role='button'
             aria-label={ariaLabel}
@@ -113,7 +151,11 @@ function ScoreBadge({
         align='start'
         onClick={(e) => e.stopPropagation()}
       >
-        <DynamicScoreDetail summary={summary} />
+        {summary ? (
+          <DynamicScoreDetail summary={summary} />
+        ) : (
+          <DynamicScoreProjectionOnly />
+        )}
       </PopoverContent>
     </Popover>
   )
@@ -135,7 +177,7 @@ function DynamicScoreDetail({ summary }: { summary: ChannelScoreSummary }) {
       <div className='font-medium'>{t('Dynamic scoring')}</div>
       <p className='text-muted-foreground text-xs'>
         {t(
-          'Applies to this request only. The configured priority and weight are unchanged.'
+          'The value in the input is the configured baseline, which editing writes and scoring never overwrites.'
         )}
       </p>
 
@@ -192,6 +234,36 @@ function DynamicScoreDetail({ summary }: { summary: ChannelScoreSummary }) {
       <p className='text-muted-foreground text-xs'>
         {t(
           'A tier is a position among the channels eligible for a request, not a number added to priority.'
+        )}
+      </p>
+    </div>
+  )
+}
+
+/**
+ * DynamicScoreProjectionOnly is the popover when the projected column is present
+ * but this instance has no live summary to break it down by route — the state after
+ * a restart, since the projection is stored in the database and the summary is a
+ * per-process mirror.
+ *
+ * It says what the number means and that the detail is missing, rather than
+ * rendering a zeroed breakdown that would claim the channel has one scored route at
+ * neutral.
+ */
+function DynamicScoreProjectionOnly() {
+  const { t } = useTranslation()
+
+  return (
+    <div className='space-y-2 text-sm'>
+      <div className='font-medium'>{t('Dynamic scoring')}</div>
+      <p className='text-muted-foreground text-xs'>
+        {t(
+          'The value in the input is the configured baseline, which editing writes and scoring never overwrites.'
+        )}
+      </p>
+      <p className='text-muted-foreground text-xs'>
+        {t(
+          'Per-route detail is not available on this instance yet. It reappears once the channel serves traffic again.'
         )}
       </p>
     </div>

@@ -56,6 +56,17 @@ export const channelSchema = z.object({
   model_mapping: z.string().nullish(),
   status_code_mapping: z.string().nullish(),
   priority: z.number().nullish(),
+  /**
+   * What dynamic scoring has moved this channel's priority and weight to, refreshed
+   * on the projection interval. Null means no projection is in force — scoring off,
+   * its store unreachable, or every route idle — and the cell shows `priority` /
+   * `weight` instead.
+   *
+   * Distinct from `priority`/`weight`, which stay the admin baseline: those are what
+   * an edit writes and what the tier ladder is built from. Never send these back.
+   */
+  effective_priority: z.number().nullish(),
+  effective_weight: z.number().nullish(),
   max_concurrency: z.number().nullish(),
   /**
    * Requests this channel is serving right now. Not a stored column: the list

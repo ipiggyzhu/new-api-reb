@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -643,6 +644,12 @@ func handleConfigUpdate(key, value string) bool {
 		// different rules. Starting clean keeps what the admin sees consistent with
 		// what they configured.
 		channel_score.ResetAll()
+		// The mirrors were derived from the offsets just discarded. The next
+		// projection run would rebuild them, but until it does the list would show
+		// adjustments earned under the previous thresholds.
+		if _, err := clearAllChannelProjections(); err != nil {
+			common.SysLog(fmt.Sprintf("failed to clear channel score projections after settings change: %v", err))
+		}
 	} else if configName == "billing_setting" {
 		InvalidatePricingCache()
 		ratio_setting.InvalidateExposedDataCache()

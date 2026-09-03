@@ -88,3 +88,46 @@ export function weightVariant(summary: ChannelScoreSummary): BadgeVariant {
   }
   return 'success'
 }
+
+/**
+ * projectedLabel renders the movement as the two numbers involved — `0 → -1` —
+ * rather than as the offset alone.
+ *
+ * An offset of `-1` was the original rendering and it did not answer the question
+ * an operator opens this column to ask, which is what the channel's priority is
+ * NOW. Naming both ends also makes the direction unambiguous without relying on
+ * the reader knowing that a tier offset is ordinal.
+ */
+export function projectedLabel(baseline: number, projected: number): string {
+  return `${baseline} → ${projected}`
+}
+
+/**
+ * hasProjection reports whether a projected value is worth rendering: present, and
+ * different from the baseline.
+ *
+ * Equal values are suppressed because `0 → 0` claims a movement that did not
+ * happen. The channel was measured and left where the admin put it, which for
+ * routing purposes is the same as never having been scored.
+ */
+export function hasProjection(
+  baseline: number | null | undefined,
+  projected: number | null | undefined
+): projected is number {
+  return (
+    projected !== null && projected !== undefined && projected !== (baseline ?? 0)
+  )
+}
+
+/**
+ * projectedVariant colours by direction. Unlike tierVariant this has real numbers
+ * to compare, but the magnitudes are admin-chosen and arbitrary — a drop from 100
+ * to 50 is one tier, the same as 1 to 0 — so severity keys off direction only and
+ * the tier count stays in the popover.
+ */
+export function projectedVariant(
+  baseline: number,
+  projected: number
+): BadgeVariant {
+  return projected < baseline ? 'warning' : 'success'
+}

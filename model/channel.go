@@ -44,6 +44,22 @@ type Channel struct {
 	//MaxInputTokens     *int    `json:"max_input_tokens" gorm:"default:0"`
 	StatusCodeMapping *string `json:"status_code_mapping" gorm:"type:varchar(1024);default:''"`
 	Priority          *int64  `json:"priority" gorm:"bigint;default:0"`
+	// EffectivePriority and EffectiveWeight mirror what dynamic scoring is
+	// currently doing to this channel, so the admin list can show a number that
+	// moves instead of only ever showing what was typed.
+	//
+	// Priority and Weight above stay the baseline: they are the only values an
+	// admin edits, the only ones automation may never write, and the ones the tier
+	// universe is built from. These two are derived, refreshed by the projection
+	// task, and never read by the selection path — ApplyToCandidates recomputes the
+	// same movement live from the same baseline and the same score, so routing
+	// reacts on the next request no matter how slow the projection interval is.
+	//
+	// NULL means "no projection in force" — scoring off, unreachable, or every
+	// route idle — and the UI falls back to the baseline. That is distinct from a
+	// projection that happens to equal the baseline, which is a measured result.
+	EffectivePriority *int64 `json:"effective_priority" gorm:"bigint"`
+	EffectiveWeight   *uint  `json:"effective_weight"`
 	// MaxConcurrency caps how many relay requests this channel may serve at once,
 	// 0 meaning unlimited. It sits next to Priority because it is read on the
 	// selection path for every request and is denormalized into abilities the same
@@ -557,6 +573,29 @@ func (channel *Channel) GetWeight() int {
 	return saturatingUintToInt(*channel.Weight)
 }
 
+// GetEffectivePriority returns the projected priority when one is in force and
+// the baseline otherwise.
+//
+// Deliberately NOT used by GetPriority or by either selection path. The selector
+// must keep reading the baseline: it derives its tiers from the candidates it is
+// given, and handing it already-shifted values would rebuild the tier ladder from
+// them and make the projection compound (writeback_compounds_test.go). This
+// accessor exists for display and diagnostics.
+func (channel *Channel) GetEffectivePriority() int64 {
+	if channel.EffectivePriority == nil {
+		return channel.GetPriority()
+	}
+	return *channel.EffectivePriority
+}
+
+// GetEffectiveWeight is the same for weight.
+func (channel *Channel) GetEffectiveWeight() int {
+	if channel.EffectiveWeight == nil {
+		return channel.GetWeight()
+	}
+	return saturatingUintToInt(*channel.EffectiveWeight)
+}
+
 // saturatingUintToInt keeps unsigned database/JSON values safe when the
 // selector and random number generator convert them to int.
 func saturatingUintToInt(value uint) int {
@@ -663,6 +702,10 @@ func (channel *Channel) Update() error {
 	// offset. This is the reset the "raised priority appears to do nothing"
 	// report needed.
 	channel_score.Reset(channel.Id)
+	// The projected columns were derived from the score just discarded, so they
+	// have to go with it. Waiting for the next scheduled run would leave the list
+	// showing an adjustment against a baseline that no longer exists.
+	ClearChannelProjection(channel.Id)
 	DB.Model(channel).First(channel, "id = ?", channel.Id)
 	err = channel.UpdateAbilities(nil)
 	return err
@@ -850,6 +893,7 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 	// come through here — so hooking it covers auto-ban and auto-enable without a
 	// hook in each caller.
 	channel_score.Reset(channelId)
+	ClearChannelProjection(channelId)
 	if common.MemoryCacheEnabled {
 		channelStatusLock.Lock()
 		defer channelStatusLock.Unlock()
@@ -951,6 +995,7 @@ func EnableChannelByTag(tag string) error {
 		return err
 	}
 	channel_score.ResetMany(affected)
+	ClearChannelProjections(affected)
 	err = UpdateAbilityStatusByTag(tag, true)
 	return err
 }
@@ -962,6 +1007,7 @@ func DisableChannelByTag(tag string) error {
 		return err
 	}
 	channel_score.ResetMany(affected)
+	ClearChannelProjections(affected)
 	err = UpdateAbilityStatusByTag(tag, false)
 	return err
 }
@@ -1016,6 +1062,7 @@ func EditChannelByTag(tag string, newTag *string, modelMapping *string, models *
 		// rather than stacked on the new one — otherwise raising a priority could
 		// look like it had no effect.
 		channel_score.ResetMany(scoreResetIds)
+		ClearChannelProjections(scoreResetIds)
 	}
 	if shouldReCreateAbilities {
 		channels, err := GetChannelsByTag(updatedTag, false, false)

@@ -23,6 +23,45 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(modelUpdateHandler{})
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
+	service.RegisterSystemTaskHandler(scoreProjectionHandler{})
+}
+
+// scoreProjectionHandler refreshes the effective priority and weight shown in the
+// channel list.
+//
+// It lives in the system task framework rather than in SyncChannelCache for two
+// reasons: the framework's DB lease keeps two masters from writing the same mirrors
+// at once, and SyncChannelCache only runs when the memory cache is enabled
+// (main.go), which would leave database-only deployments with a column that never
+// moved.
+type scoreProjectionHandler struct{}
+
+func (scoreProjectionHandler) Type() string { return model.SystemTaskTypeScoreProjection }
+
+// Enabled follows the scoring switch alone, not the store's reachability. A run
+// with an unreachable store is exactly when the stale mirrors must be cleared, so
+// gating on usability here would strand them.
+func (scoreProjectionHandler) Enabled() bool {
+	return operation_setting.GetChannelDynamicScoreSetting().Enabled
+}
+
+func (scoreProjectionHandler) Interval() time.Duration {
+	minutes := operation_setting.GetChannelDynamicScoreSetting().ProjectionIntervalMinutes
+	if minutes <= 0 {
+		minutes = 10
+	}
+	return time.Duration(minutes) * time.Minute
+}
+
+func (scoreProjectionHandler) NewPayload() any { return nil }
+
+func (scoreProjectionHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	result, err := model.RunChannelScoreProjection()
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, result, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, result, nil)
 }
 
 // channelTestHandler runs the scheduled "test all channels" job. Enablement and

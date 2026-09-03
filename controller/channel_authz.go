@@ -88,6 +88,11 @@ var channelReadOnlyFields = map[string]struct{}{
 	"balance":              {},
 	"balance_updated_time": {},
 	"used_quota":           {},
+	// Dynamic scoring owns these derived display mirrors. They must never be
+	// accepted from the general channel edit endpoint, otherwise a caller could
+	// forge a score or leave a stale projection after changing the baseline.
+	"effective_priority": {},
+	"effective_weight":   {},
 }
 
 func clearChannelReadOnlyFields(channel *PatchChannel, requestData map[string]any) {
@@ -108,6 +113,12 @@ func clearChannelReadOnlyFields(channel *PatchChannel, requestData map[string]an
 	}
 	if _, ok := requestData["used_quota"]; ok {
 		channel.UsedQuota = 0
+	}
+	if _, ok := requestData["effective_priority"]; ok {
+		channel.EffectivePriority = nil
+	}
+	if _, ok := requestData["effective_weight"]; ok {
+		channel.EffectiveWeight = nil
 	}
 }
 

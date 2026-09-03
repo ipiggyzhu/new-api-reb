@@ -21,6 +21,10 @@ const (
 	SystemTaskTypeModelUpdate    = "model_update"
 	SystemTaskTypeMidjourneyPoll = "midjourney_poll"
 	SystemTaskTypeAsyncTaskPoll  = "async_task_poll"
+	// SystemTaskTypeScoreProjection refreshes the displayed effective priority and
+	// weight. Scheduled like the others so the DB lease keeps two masters from
+	// writing the same mirrors concurrently.
+	SystemTaskTypeScoreProjection = "score_projection"
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")

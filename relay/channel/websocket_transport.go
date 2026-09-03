@@ -205,8 +205,8 @@ func newResponsesWebsocketDialer(info *common.RelayInfo) *websocket.Dialer {
 func isDefinitiveUpgradeRefusal(status int) bool {
 	switch status {
 	case http.StatusUpgradeRequired, // 426: reached an HTTP-only handler
-		http.StatusNotFound,      // 404: no route at the wss path
-		http.StatusNotImplemented, // 501: route exists, upgrade unimplemented
+		http.StatusNotFound,         // 404: no route at the wss path
+		http.StatusNotImplemented,   // 501: route exists, upgrade unimplemented
 		http.StatusMethodNotAllowed: // 405: path is POST-only, i.e. HTTP-only
 		return true
 	default:
