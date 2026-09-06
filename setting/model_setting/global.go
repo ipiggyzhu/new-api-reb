@@ -63,16 +63,22 @@ func GetGlobalSettings() *GlobalSettings {
 	return &globalSettings
 }
 
-// ShouldPreserveThinkingSuffix 判断模型是否配置为保留 thinking/-nothinking/-low/-high/-medium 后缀
-func ShouldPreserveThinkingSuffix(modelName string) bool {
-	target := strings.TrimSpace(modelName)
-	if target == "" {
-		return false
-	}
-
-	for _, entry := range globalSettings.ThinkingModelBlacklist {
-		if strings.TrimSpace(entry) == target {
-			return true
+// ShouldPreserveThinkingSuffix 判断模型是否配置为保留 thinking/-nothinking/-low/-high/-medium 后缀。
+//
+// 接受多个候选名，命中任意一个即保留。调用方应同时传入客户端请求的模型名和
+// model_mapping 映射后的上游模型名：当映射的目标本身带 -thinking 后缀时，
+// 只看客户端名会让适配器把后缀剥掉、把映射结果覆写回客户端名，映射等于失效。
+// 未配置映射时两者相同，多传一个名字不改变行为。
+func ShouldPreserveThinkingSuffix(modelNames ...string) bool {
+	for _, modelName := range modelNames {
+		target := strings.TrimSpace(modelName)
+		if target == "" {
+			continue
+		}
+		for _, entry := range globalSettings.ThinkingModelBlacklist {
+			if strings.TrimSpace(entry) == target {
+				return true
+			}
 		}
 	}
 	return false

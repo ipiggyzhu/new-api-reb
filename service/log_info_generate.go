@@ -137,6 +137,14 @@ func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other map[string]inter
 		"status":     status,
 		"end_reason": string(ss.EndReason),
 	}
+	// Recorded separately from end_reason, which stays "eof" for a truncated
+	// message because the connection really did close cleanly. Without this the
+	// log shows an error status with a reason that looks healthy, and the two
+	// cases the status now covers — a truncated reply and a transport fault —
+	// are indistinguishable.
+	if ss.MissingTerminator() {
+		streamInfo["missing_terminator"] = true
+	}
 	if ss.EndError != nil {
 		streamInfo["end_error"] = ss.EndError.Error()
 	}

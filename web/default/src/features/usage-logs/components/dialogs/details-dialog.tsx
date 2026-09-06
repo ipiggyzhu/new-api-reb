@@ -1109,6 +1109,16 @@ export function DetailsDialog(props: DetailsDialogProps) {
                   value={other.stream_status.end_reason}
                 />
               )}
+              {/* Without this row the section shows status "error" beside an
+                  end_reason of "eof", which reads as a contradiction: the
+                  connection did close cleanly, and the fault is that the
+                  message was never ended. */}
+              {other.stream_status.missing_terminator && (
+                <DetailRow
+                  label={t('Truncated')}
+                  value={t('Upstream closed without ending the message')}
+                />
+              )}
               {(other.stream_status.error_count ?? 0) > 0 && (
                 <DetailRow
                   label={t('Soft Errors')}

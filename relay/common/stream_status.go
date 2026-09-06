@@ -43,6 +43,16 @@ type StreamStatus struct {
 	mu         sync.Mutex
 	Errors     []StreamErrorEntry
 	ErrorCount int
+	// missingTerminator records that the upstream stopped mid-message: it sent
+	// content and then closed without the frame that ends a message
+	// (message_delta for Anthropic, which is where claudeInfo.Done is set;
+	// message_stop is a trailing frame some upstreams omit even on a complete
+	// reply, so it cannot be the signal). EndReason cannot carry this, because at the
+	// transport level the close really was a clean EOF — the fault is only
+	// visible to the protocol handler, which knows what a finished message looks
+	// like. Guarded by mu because the scanner goroutine reads the verdict
+	// through IsNormalEnd while the handler writes it.
+	missingTerminator bool
 }
 
 func NewStreamStatus() *StreamStatus {
@@ -72,6 +82,30 @@ func (s *StreamStatus) RecordError(msg string) {
 			Timestamp: time.Now(),
 		})
 	}
+}
+
+// MarkMissingTerminator records that the upstream ended the stream without
+// closing the message it had started.
+//
+// A client that hung up is refused here rather than at each call site: the
+// stream ends the same way — content delivered, no terminator — but the upstream
+// is not at fault and must not be demoted for it.
+func (s *StreamStatus) MarkMissingTerminator() {
+	if s == nil || s.EndReason == StreamEndReasonClientGone {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.missingTerminator = true
+}
+
+func (s *StreamStatus) MissingTerminator() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.missingTerminator
 }
 
 func (s *StreamStatus) HasErrors() bool {
@@ -115,10 +149,28 @@ func (s *StreamStatus) TotalErrorCount() int {
 // produce the tokens that were delivered, so the user is charged for them; only
 // the success verdict is withdrawn.
 func (s *StreamStatus) FailureError() *types.NewAPIError {
+	// Checked first, not alongside the reasons below: the calls in between are
+	// nil-safe too, so a nil check further down reads as though they were
+	// unreachable with a nil receiver when in fact they run.
+	if s == nil {
+		return nil
+	}
 	if streamErr := s.NoStreamBodyError(); streamErr != nil {
 		return streamErr
 	}
-	if s == nil || s.IsNormalEnd() ||
+	if s.MissingTerminator() {
+		// Reported separately from the reasons below because the transport-level
+		// end was clean, so naming it alone ("ended abnormally (eof)") would
+		// describe the opposite of what happened. The reason is still included:
+		// a timeout that cut a message short is a different operational problem
+		// from an upstream that closed on its own.
+		return types.NewErrorWithStatusCode(
+			fmt.Errorf("upstream ended the stream mid-message without a terminator (%s)", s.EndReason),
+			types.ErrorCodeBadResponse,
+			http.StatusBadGateway,
+		)
+	}
+	if s.IsNormalEnd() ||
 		s.EndReason == StreamEndReasonNone ||
 		s.EndReason == StreamEndReasonClientGone {
 		return nil
@@ -165,6 +217,12 @@ func (s *StreamStatus) IsNormalEnd() bool {
 	if s == nil {
 		return true
 	}
+	// A truncated message is not a normal end however cleanly the connection
+	// closed. This is what withdraws the success verdict in controller.Relay and
+	// turns the log's stream_status to "error": both read the answer from here.
+	if s.MissingTerminator() {
+		return false
+	}
 	return s.EndReason == StreamEndReasonDone ||
 		s.EndReason == StreamEndReasonEOF ||
 		s.EndReason == StreamEndReasonHandlerStop
@@ -180,6 +238,11 @@ func (s *StreamStatus) Summary() string {
 		fmt.Fprintf(b, " end_error=%q", s.EndError.Error())
 	}
 	s.mu.Lock()
+	// Read directly: mu is already held here and sync.Mutex is not reentrant, so
+	// going through MissingTerminator() would deadlock.
+	if s.missingTerminator {
+		fmt.Fprint(b, " missing_terminator=true")
+	}
 	if s.ErrorCount > 0 {
 		fmt.Fprintf(b, " soft_errors=%d", s.ErrorCount)
 	}

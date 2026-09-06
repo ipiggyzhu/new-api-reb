@@ -222,6 +222,37 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	if streamErr := StreamProducedNoContentError(info, claudeInfo); streamErr != nil {
 		return nil, streamErr
 	}
+	// Past the guard above, so the upstream did answer. If it also never sent a
+	// frame closing the message off, the caller is holding a truncated reply.
+	//
+	// SawTerminator rather than Done: Done means message_delta specifically,
+	// which is what billing needs because it is the only frame carrying
+	// stop_reason and the final usage. A message ending in message_stop alone is
+	// missing that usage but was not cut short, and demoting a channel over it
+	// would be wrong.
+	//
+	// Reaching this line also proves the flag was evaluated at all: the guard
+	// above only returns nil when Done or HasContent is set, and all three flags
+	// are written in exactly one place (FormatClaudeResponseInfo). So a relay
+	// format this handler does not decode cannot reach here and be mistaken for a
+	// truncation — it fails the guard instead.
+	//
+	// Recorded rather than returned, because the partial content is already on
+	// the wire — shouldRetry declines once anything has been written, and the
+	// caller keeps what it received. What this changes is the verdict:
+	// controller.Relay consults StreamStatus before crediting a success, so the
+	// channel no longer scores a win for cutting a reply short.
+	if !claudeInfo.SawTerminator {
+		info.StreamStatus.MarkMissingTerminator()
+		// Logged here because StreamScannerHandler already emitted its own
+		// "stream ended" line before this verdict existed, and at INFO level
+		// saying reason=eof — a truncated stream looks healthy in the server log
+		// without this. The consume log's missing_terminator field stays the
+		// authoritative record.
+		logger.LogError(c, fmt.Sprintf(
+			"stream truncated: upstream sent %d frames then closed without message_delta or message_stop (%s)",
+			info.ReceivedResponseCount, info.StreamStatus.EndReason))
+	}
 
 	HandleStreamFinalResponse(c, info, claudeInfo)
 	return claudeInfo.Usage, nil

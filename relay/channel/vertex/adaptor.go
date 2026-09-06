@@ -171,7 +171,7 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	suffix := ""
 	if a.RequestMode == RequestModeGemini {
 		if model_setting.GetGeminiSettings().ThinkingAdapterEnabled &&
-			!model_setting.ShouldPreserveThinkingSuffix(info.OriginModelName) {
+			!model_setting.ShouldPreserveThinkingSuffix(info.OriginModelName, info.UpstreamModelName) {
 			// 新增逻辑：处理 -thinking-<budget> 格式
 			if strings.Contains(info.UpstreamModelName, "-thinking-") {
 				parts := strings.Split(info.UpstreamModelName, "-thinking-")

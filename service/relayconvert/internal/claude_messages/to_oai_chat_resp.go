@@ -26,6 +26,15 @@ type ClaudeResponseInfo struct {
 	// delta at all. Callers use it to tell an upstream that produced nothing
 	// from one that produced something the caller happens not to bill for.
 	HasContent bool
+	// SawTerminator records that the upstream closed the message off, by either
+	// frame that can end one: message_delta or message_stop.
+	//
+	// Done cannot answer that question, because it means something narrower —
+	// that message_delta arrived, which is the only frame carrying stop_reason
+	// and the final usage, so billing depends on it staying that way. But a
+	// message ending in message_stop alone was still not cut short, and callers
+	// deciding whether a reply was truncated must not blame the channel for it.
+	SawTerminator bool
 	// Claude content_block indexes count every block type (text/thinking/tool_use),
 	// while OpenAI tool_call indexes must be zero-based over tool calls only, so
 	// FormatClaudeResponseInfo remaps them via this per-stream table.
@@ -345,6 +354,13 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 	}
 	if claudeInfo.Usage == nil {
 		claudeInfo.Usage = &dto.Usage{}
+	}
+	// Recorded ahead of the type chain below, because message_stop is not handled
+	// there: it falls through to the default branch, whose false return tells the
+	// OpenAI path to skip the frame. That return has to stay false, so the flag
+	// cannot be set from a branch of its own.
+	if claudeResponse.Type == "message_delta" || claudeResponse.Type == "message_stop" {
+		claudeInfo.SawTerminator = true
 	}
 	if claudeResponse.Type == "message_start" {
 		if claudeResponse.Message != nil {

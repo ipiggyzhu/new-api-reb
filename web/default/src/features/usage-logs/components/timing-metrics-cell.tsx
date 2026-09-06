@@ -198,6 +198,12 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
                     {t('Stream Status')}: {t('Error')}
                   </p>
                   <p>{props.streamStatus?.end_reason || 'unknown'}</p>
+                  {/* end_reason alone reads as 'eof' for a truncated reply,
+                      because the connection did close cleanly. Without this the
+                      tooltip flags an error and then names a healthy reason. */}
+                  {props.streamStatus?.missing_terminator && (
+                    <p>{t('Upstream closed without ending the message')}</p>
+                  )}
                   {(props.streamStatus?.error_count ?? 0) > 0 && (
                     <p>
                       {t('Soft Errors')}: {props.streamStatus?.error_count}

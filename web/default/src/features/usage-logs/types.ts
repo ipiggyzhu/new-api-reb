@@ -215,6 +215,11 @@ export interface LogOtherData {
     error_count?: number
     end_error?: string
     errors?: string[]
+    // Set when the upstream delivered content and then closed without ending
+    // the message. end_reason stays 'eof' in that case because the connection
+    // itself closed cleanly, so this is the only field that tells a truncated
+    // reply apart from a transport fault.
+    missing_terminator?: boolean
   }
   // Violation fee fields
   violation_fee?: boolean

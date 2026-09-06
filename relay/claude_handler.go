@@ -21,6 +21,27 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// resolveClaudeThinkingModelName decides which model name a request carrying a
+// "-thinking" suffix should send upstream.
+//
+// The thinking adapter treats "-thinking" as a local suffix: it turns the suffix
+// into a thinking block and then strips it, so the upstream sees the base model.
+// That is wrong when the suffix came from model_mapping rather than from the
+// client, because the mapping exists precisely to name a model the upstream
+// resolves itself — stripping it overwrites the mapped name with the client's
+// own and the mapping silently does nothing.
+//
+// Both names are offered to the blacklist for that reason: originModelName is
+// what the client asked for, requestModel is what model_mapping produced. Naming
+// either one keeps the suffix. Without a mapping the two are equal, so the
+// default behaviour is unchanged.
+func resolveClaudeThinkingModelName(originModelName, requestModel string) string {
+	if model_setting.ShouldPreserveThinkingSuffix(originModelName, requestModel) {
+		return requestModel
+	}
+	return strings.TrimSuffix(requestModel, "-thinking")
+}
+
 func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.NewAPIError) {
 
 	info.InitChannelMeta(c)
@@ -101,9 +122,7 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 				request.Temperature = common.GetPointer[float64](1.0)
 			}
 		}
-		if !model_setting.ShouldPreserveThinkingSuffix(info.OriginModelName) {
-			request.Model = strings.TrimSuffix(request.Model, "-thinking")
-		}
+		request.Model = resolveClaudeThinkingModelName(info.OriginModelName, request.Model)
 		info.UpstreamModelName = request.Model
 	}
 
