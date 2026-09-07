@@ -53,6 +53,17 @@ type StreamStatus struct {
 	// like. Guarded by mu because the scanner goroutine reads the verdict
 	// through IsNormalEnd while the handler writes it.
 	missingTerminator bool
+	// stopReason is the stop_reason the upstream declared on the frame that
+	// ended the message. Unlike EndReason, which describes how the connection
+	// ended, this describes how the *message* ended, and the two are
+	// independent: a stream can close cleanly (eof) on a reply that the upstream
+	// itself said was cut short at the output budget (max_tokens).
+	//
+	// Recorded rather than judged. Every stop_reason belongs to a
+	// protocol-complete stream, so none of them is an upstream fault and none
+	// may demote a channel — max_tokens in particular is usually the caller's
+	// own budget. What it buys is a log row that can tell the difference.
+	stopReason string
 }
 
 func NewStreamStatus() *StreamStatus {
@@ -106,6 +117,30 @@ func (s *StreamStatus) MissingTerminator() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.missingTerminator
+}
+
+// SetStopReason records the stop_reason from the frame that closed the message.
+//
+// Deliberately not a sync.Once like SetEndReason: that one guards against a
+// later, less specific reason overwriting the real cause of an abnormal end,
+// whereas a message has exactly one terminator, so there is no race to arbitrate
+// here. Empty is ignored so a terminator without the field cannot erase one.
+func (s *StreamStatus) SetStopReason(reason string) {
+	if s == nil || reason == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopReason = reason
+}
+
+func (s *StreamStatus) StopReason() string {
+	if s == nil {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopReason
 }
 
 func (s *StreamStatus) HasErrors() bool {
@@ -242,6 +277,10 @@ func (s *StreamStatus) Summary() string {
 	// going through MissingTerminator() would deadlock.
 	if s.missingTerminator {
 		fmt.Fprint(b, " missing_terminator=true")
+	}
+	// Read directly for the same reason as missingTerminator above: mu is held.
+	if s.stopReason != "" {
+		fmt.Fprintf(b, " stop_reason=%s", s.stopReason)
 	}
 	if s.ErrorCount > 0 {
 		fmt.Fprintf(b, " soft_errors=%d", s.ErrorCount)

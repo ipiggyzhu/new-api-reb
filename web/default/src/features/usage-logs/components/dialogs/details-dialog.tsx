@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { TFunction } from 'i18next'
 import {
   Copy,
   Check,
@@ -31,7 +32,6 @@ import {
   Info,
   LogIn,
 } from 'lucide-react'
-import type { TFunction } from 'i18next'
 import { useTranslation } from 'react-i18next'
 
 import { Dialog } from '@/components/dialog'
@@ -56,6 +56,7 @@ import {
   isViolationFeeLog,
   getFirstResponseTimeColor,
   getResponseTimeColor,
+  getStreamStopReasonLabel,
   renderAuditContent,
 } from '../../lib/format'
 import {
@@ -179,7 +180,9 @@ function getUsageBillingPathLabel(
   }
 }
 
-function isUsageBillingPathLocal(adminInfo: LogOtherData['admin_info']): boolean {
+function isUsageBillingPathLocal(
+  adminInfo: LogOtherData['admin_info']
+): boolean {
   if (adminInfo?.usage_billing_path) {
     return adminInfo.usage_billing_path === USAGE_BILLING_PATH.LOCAL
   }
@@ -1090,14 +1093,21 @@ export function DetailsDialog(props: DetailsDialogProps) {
         {/* Stream status details (admin only) */}
         {props.isAdmin &&
           other?.stream_status &&
-          other.stream_status.status !== 'ok' && (
+          (other.stream_status.status !== 'ok' ||
+            other.stream_status.stop_reason) && (
             <DetailSection label={t('Stream Status')}>
               <DetailRow
                 label={t('Status')}
                 value={
                   <StatusBadge
-                    label={other.stream_status.status || t('Error')}
-                    variant='red'
+                    label={
+                      other.stream_status.status === 'ok'
+                        ? t('Success')
+                        : t('Error')
+                    }
+                    variant={
+                      other.stream_status.status === 'ok' ? 'success' : 'danger'
+                    }
                     size='sm'
                     copyable={false}
                   />
@@ -1107,6 +1117,15 @@ export function DetailsDialog(props: DetailsDialogProps) {
                 <DetailRow
                   label={t('End Reason')}
                   value={other.stream_status.end_reason}
+                />
+              )}
+              {other.stream_status.stop_reason && (
+                <DetailRow
+                  label={t('Stop Reason')}
+                  value={getStreamStopReasonLabel(
+                    other.stream_status.stop_reason,
+                    t
+                  )}
                 />
               )}
               {/* Without this row the section shows status "error" beside an

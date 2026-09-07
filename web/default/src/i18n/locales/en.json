@@ -1,5 +1,13 @@
 {
   "translation": {
+    "Stop Reason": "Stop Reason",
+    "Model completed its turn": "Model completed its turn",
+    "Output token limit reached": "Output token limit reached",
+    "Tool call requested": "Tool call requested",
+    "Stop sequence matched": "Stop sequence matched",
+    "Model refused the request": "Model refused the request",
+    "Model paused its turn": "Model paused its turn",
+    "Context window limit reached": "Context window limit reached",
     "360": "360",
     "1000": "1000",
     "10000": "10000",

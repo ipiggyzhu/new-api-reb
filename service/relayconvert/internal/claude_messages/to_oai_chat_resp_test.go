@@ -56,6 +56,41 @@ func TestResponseClaude2OpenAITextWithToolUse(t *testing.T) {
 	assert.Equal(t, "get_weather", toolCalls[0].Function.Name)
 }
 
+func TestFormatClaudeResponseInfoPreservesStopReason(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		frames []string
+	}{
+		{
+			name: "empty delta preserves top-level fallback",
+			frames: []string{
+				`{"type":"message_delta","stop_reason":"max_tokens","delta":{"stop_reason":""}}`,
+			},
+		},
+		{
+			name: "later empty delta preserves recorded reason",
+			frames: []string{
+				`{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}`,
+				`{"type":"message_delta","delta":{"stop_reason":""}}`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			claudeInfo := &ClaudeResponseInfo{}
+			for _, frame := range tt.frames {
+				var event dto.ClaudeResponse
+				require.NoError(t, common.UnmarshalJsonStr(frame, &event))
+				FormatClaudeResponseInfo(&event, nil, claudeInfo)
+			}
+			assert.Equal(t, "max_tokens", claudeInfo.StopReason)
+		})
+	}
+}
+
 func TestStreamResponseClaude2OpenAIToolCallIndexIsZeroBased(t *testing.T) {
 	claudeInfo := &ClaudeResponseInfo{Usage: &dto.Usage{}}
 

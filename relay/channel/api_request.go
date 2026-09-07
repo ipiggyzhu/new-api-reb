@@ -207,6 +207,14 @@ func shouldSkipPassthroughHeader(name string) bool {
 	return false
 }
 
+func getClientHeaderValue(header http.Header, name string) string {
+	// Anthropic beta flags form a list even when sent on separate header lines.
+	if strings.EqualFold(name, "anthropic-beta") {
+		return strings.Join(header.Values(name), ",")
+	}
+	return header.Get(name)
+}
+
 func applyHeaderOverridePlaceholders(template string, c *gin.Context, apiKey string) (string, bool, error) {
 	trimmed := strings.TrimSpace(template)
 	if strings.HasPrefix(trimmed, clientHeaderPlaceholderPrefix) {
@@ -223,7 +231,7 @@ func applyHeaderOverridePlaceholders(template string, c *gin.Context, apiKey str
 		if c == nil || c.Request == nil {
 			return "", false, fmt.Errorf("missing request context for client_header placeholder")
 		}
-		clientHeaderValue := c.Request.Header.Get(name)
+		clientHeaderValue := getClientHeaderValue(c.Request.Header, name)
 		if strings.TrimSpace(clientHeaderValue) == "" {
 			return "", false, nil
 		}
@@ -350,7 +358,7 @@ func processHeaderOverride(info *common.RelayInfo, c *gin.Context) (map[string]s
 					continue
 				}
 			}
-			value := strings.TrimSpace(c.Request.Header.Get(name))
+			value := strings.TrimSpace(getClientHeaderValue(c.Request.Header, name))
 			if value == "" {
 				continue
 			}

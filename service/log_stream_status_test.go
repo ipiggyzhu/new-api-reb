@@ -48,3 +48,44 @@ func TestAppendStreamStatus_CleanStreamOmitsMissingTerminator(t *testing.T) {
 	assert.Equal(t, "ok", streamInfo["status"])
 	assert.NotContains(t, streamInfo, "missing_terminator")
 }
+
+// max_tokens is the case this field exists for: the upstream closed the message
+// properly, so every other field in the row says the request went fine, and the
+// reply still stopped mid-sentence because it ran out of output budget. The
+// status stays "ok" on purpose — the upstream did nothing wrong — which is
+// exactly why the row needs stop_reason to be answerable at all.
+func TestAppendStreamStatus_RecordsMaxTokensStopReason(t *testing.T) {
+	t.Parallel()
+
+	info := &relaycommon.RelayInfo{IsStream: true, StreamStatus: relaycommon.NewStreamStatus()}
+	info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
+	info.StreamStatus.SetStopReason("max_tokens")
+
+	other := map[string]interface{}{}
+	appendStreamStatus(info, other)
+
+	streamInfo, ok := other["stream_status"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "max_tokens", streamInfo["stop_reason"])
+	assert.Equal(t, "ok", streamInfo["status"],
+		"a budget-limited reply is a complete stream, not an upstream fault")
+	assert.NotContains(t, streamInfo, "missing_terminator",
+		"the message was closed off; only its content was cut")
+}
+
+// A stream with no stop_reason must omit the key rather than carry an empty
+// string, so that filtering on its presence in production is meaningful.
+func TestAppendStreamStatus_OmitsAbsentStopReason(t *testing.T) {
+	t.Parallel()
+
+	info := &relaycommon.RelayInfo{IsStream: true, StreamStatus: relaycommon.NewStreamStatus()}
+	info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
+	info.StreamStatus.SetStopReason("")
+
+	other := map[string]interface{}{}
+	appendStreamStatus(info, other)
+
+	streamInfo, ok := other["stream_status"].(map[string]interface{})
+	require.True(t, ok)
+	assert.NotContains(t, streamInfo, "stop_reason")
+}

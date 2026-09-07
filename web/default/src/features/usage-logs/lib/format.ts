@@ -29,6 +29,30 @@ import type { LogOtherData } from '../types'
 
 export { normalizeTierLabel }
 
+export function getStreamStopReasonLabel(
+  reason: string | undefined,
+  t: (key: string) => string
+): string {
+  switch (reason) {
+    case 'end_turn':
+      return t('Model completed its turn')
+    case 'max_tokens':
+      return t('Output token limit reached')
+    case 'tool_use':
+      return t('Tool call requested')
+    case 'stop_sequence':
+      return t('Stop sequence matched')
+    case 'refusal':
+      return t('Model refused the request')
+    case 'pause_turn':
+      return t('Model paused its turn')
+    case 'model_context_window_exceeded':
+      return t('Context window limit reached')
+    default:
+      return reason ?? ''
+  }
+}
+
 const PARAM_OVERRIDE_ACTION_MAP: Record<string, string> = {
   set: 'Set',
   delete: 'Delete',

@@ -1,5 +1,13 @@
 {
   "translation": {
+    "Stop Reason": "Motif d’arrêt",
+    "Model completed its turn": "Le modèle a terminé son tour",
+    "Output token limit reached": "Limite de tokens de sortie atteinte",
+    "Tool call requested": "Appel d’outil demandé",
+    "Stop sequence matched": "Séquence d’arrêt détectée",
+    "Model refused the request": "Le modèle a refusé la requête",
+    "Model paused its turn": "Le modèle a suspendu son tour",
+    "Context window limit reached": "Limite de la fenêtre de contexte atteinte",
     "360": "360",
     "1000": "1000",
     "10000": "10000",

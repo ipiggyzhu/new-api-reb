@@ -35,6 +35,19 @@ type ClaudeResponseInfo struct {
 	// message ending in message_stop alone was still not cut short, and callers
 	// deciding whether a reply was truncated must not blame the channel for it.
 	SawTerminator bool
+	// StopReason is the stop_reason the upstream put on its terminator, in
+	// Anthropic's vocabulary: end_turn, max_tokens, tool_use, stop_sequence or
+	// refusal.
+	//
+	// None of those values is a fault — every one of them ends a stream the
+	// protocol considers complete, which is exactly the problem. A reply the
+	// model chose to end (end_turn) and a reply cut off at the output budget
+	// (max_tokens) both arrive as a well-formed stream, so without this field
+	// they are indistinguishable to everything downstream, and "the answer
+	// stopped after two sentences" cannot be answered from a log at all.
+	// SawTerminator cannot carry it: that only records that some terminator
+	// arrived, not which ending it declared.
+	StopReason string
 	// Claude content_block indexes count every block type (text/thinking/tool_use),
 	// while OpenAI tool_call indexes must be zero-based over tool calls only, so
 	// FormatClaudeResponseInfo remaps them via this per-stream table.
@@ -361,6 +374,19 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 	// cannot be set from a branch of its own.
 	if claudeResponse.Type == "message_delta" || claudeResponse.Type == "message_stop" {
 		claudeInfo.SawTerminator = true
+		// Read here rather than from a branch below, for the same reason as the
+		// flag: message_stop has no branch there. Delta first, because that is
+		// where a streaming terminator carries the field; the top-level one is the
+		// non-stream shape, kept as a fallback for upstreams that reuse it.
+		//
+		// Both reads are conditional on being non-empty, which is what keeps the
+		// trailing message_stop — carrying neither — from erasing what message_delta
+		// declared.
+		if claudeResponse.Delta != nil && claudeResponse.Delta.StopReason != nil && *claudeResponse.Delta.StopReason != "" {
+			claudeInfo.StopReason = *claudeResponse.Delta.StopReason
+		} else if claudeResponse.StopReason != "" {
+			claudeInfo.StopReason = claudeResponse.StopReason
+		}
 	}
 	if claudeResponse.Type == "message_start" {
 		if claudeResponse.Message != nil {

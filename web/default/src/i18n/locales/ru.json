@@ -1,5 +1,13 @@
 {
   "translation": {
+    "Stop Reason": "Причина остановки",
+    "Model completed its turn": "Модель завершила ответ",
+    "Output token limit reached": "Достигнут лимит выходных токенов",
+    "Tool call requested": "Запрошен вызов инструмента",
+    "Stop sequence matched": "Обнаружена стоп-последовательность",
+    "Model refused the request": "Модель отклонила запрос",
+    "Model paused its turn": "Модель приостановила ответ",
+    "Context window limit reached": "Достигнут предел контекстного окна",
     "360": "360",
     "1000": "1000",
     "10000": "10000",

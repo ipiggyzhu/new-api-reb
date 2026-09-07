@@ -1,5 +1,13 @@
 {
   "translation": {
+    "Stop Reason": "停止理由",
+    "Model completed its turn": "モデルが今回の応答を完了しました",
+    "Output token limit reached": "出力トークンの上限に達しました",
+    "Tool call requested": "ツール呼び出しが要求されました",
+    "Stop sequence matched": "停止シーケンスに一致しました",
+    "Model refused the request": "モデルがリクエストを拒否しました",
+    "Model paused its turn": "モデルが今回の応答を一時停止しました",
+    "Context window limit reached": "コンテキストウィンドウの上限に達しました",
     "360": "360",
     "1000": "1000",
     "10000": "10000",

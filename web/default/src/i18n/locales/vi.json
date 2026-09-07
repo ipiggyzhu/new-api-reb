@@ -1,5 +1,13 @@
 {
   "translation": {
+    "Stop Reason": "Lý do dừng",
+    "Model completed its turn": "Mô hình đã hoàn tất lượt trả lời",
+    "Output token limit reached": "Đã đạt giới hạn token đầu ra",
+    "Tool call requested": "Đã yêu cầu gọi công cụ",
+    "Stop sequence matched": "Đã khớp chuỗi dừng",
+    "Model refused the request": "Mô hình đã từ chối yêu cầu",
+    "Model paused its turn": "Mô hình đã tạm dừng lượt trả lời",
+    "Context window limit reached": "Đã đạt giới hạn cửa sổ ngữ cảnh",
     "360": "360",
     "1000": "1000",
     "10000": "10000",

@@ -1,5 +1,13 @@
 {
   "translation": {
+    "Stop Reason": "停止原因",
+    "Model completed its turn": "模型已完成本輪回覆",
+    "Output token limit reached": "已達到輸出 Token 上限",
+    "Tool call requested": "已請求呼叫工具",
+    "Stop sequence matched": "已符合停止序列",
+    "Model refused the request": "模型拒絕了請求",
+    "Model paused its turn": "模型暫停了本輪回覆",
+    "Context window limit reached": "已達到上下文視窗上限",
     "360": "360",
     "1000": "1000",
     "10000": "10000",

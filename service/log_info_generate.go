@@ -145,6 +145,14 @@ func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other map[string]inter
 	if ss.MissingTerminator() {
 		streamInfo["missing_terminator"] = true
 	}
+	// Recorded even though status stays "ok": every stop_reason ends a stream the
+	// protocol considers complete, so none of them is a fault. It is here because
+	// the status alone cannot answer the question that actually gets asked — a
+	// reply that stopped after two sentences looks identical in this row whether
+	// the model was finished (end_turn) or hit the output budget (max_tokens).
+	if stopReason := ss.StopReason(); stopReason != "" {
+		streamInfo["stop_reason"] = stopReason
+	}
 	if ss.EndError != nil {
 		streamInfo["end_error"] = ss.EndError.Error()
 	}

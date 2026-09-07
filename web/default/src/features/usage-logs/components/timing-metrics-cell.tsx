@@ -33,7 +33,11 @@ import {
 import { formatUseTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
-import { getFirstResponseTimeColor, getResponseTimeColor } from '../lib/format'
+import {
+  getFirstResponseTimeColor,
+  getResponseTimeColor,
+  getStreamStopReasonLabel,
+} from '../lib/format'
 import type { LogOtherData } from '../types'
 
 /**
@@ -99,9 +103,7 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
           <span className='text-muted-foreground shrink-0'>
             {t('First token')}
           </span>
-          <span
-            className={cn('tabular-nums', textColorMap[firstTokenVariant])}
-          >
+          <span className={cn('tabular-nums', textColorMap[firstTokenVariant])}>
             {firstTokenLabel}
           </span>
         </div>
@@ -116,9 +118,7 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
             )}
           />
         )}
-        <span className='text-muted-foreground shrink-0'>
-          {t('Duration')}
-        </span>
+        <span className='text-muted-foreground shrink-0'>{t('Duration')}</span>
         <span className={cn('tabular-nums', textColorMap[totalTimeVariant])}>
           {totalTimeLabel}
         </span>
@@ -128,9 +128,7 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
 
   if (indicator === 'dot') {
     return (
-      <div className={cn('flex items-stretch', props.className)}>
-        {labels}
-      </div>
+      <div className={cn('flex items-stretch', props.className)}>{labels}</div>
     )
   }
 
@@ -166,6 +164,14 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
   const { t } = useTranslation()
   const showStreamError =
     props.isStream && props.streamStatus && props.streamStatus.status !== 'ok'
+  const hitTokenLimit =
+    props.isStream &&
+    (props.streamStatus?.stop_reason === 'max_tokens' ||
+      props.streamStatus?.stop_reason === 'model_context_window_exceeded')
+  const stopReasonLabel = getStreamStopReasonLabel(
+    props.streamStatus?.stop_reason,
+    t
+  )
   const tpsLabel =
     props.tokensPerSecond != null
       ? `${Math.round(props.tokensPerSecond)} t/s`
@@ -186,18 +192,45 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
         )}
       >
         {streamLabel}
-        {showStreamError && (
+        {(showStreamError || hitTokenLimit) && (
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger
-                render={<CircleAlert className='text-destructive size-3' />}
+                render={
+                  <button
+                    type='button'
+                    className='inline-flex'
+                    aria-label={
+                      showStreamError
+                        ? `${t('Stream Status')}: ${t('Error')}`
+                        : stopReasonLabel
+                    }
+                  >
+                    <CircleAlert
+                      aria-hidden
+                      className={cn(
+                        'size-3',
+                        showStreamError ? 'text-destructive' : 'text-warning'
+                      )}
+                    />
+                  </button>
+                }
               />
               <TooltipContent>
                 <div className='space-y-0.5 text-xs'>
-                  <p>
-                    {t('Stream Status')}: {t('Error')}
-                  </p>
-                  <p>{props.streamStatus?.end_reason || 'unknown'}</p>
+                  {showStreamError && (
+                    <>
+                      <p>
+                        {t('Stream Status')}: {t('Error')}
+                      </p>
+                      <p>{props.streamStatus?.end_reason || 'unknown'}</p>
+                    </>
+                  )}
+                  {stopReasonLabel && (
+                    <p>
+                      {t('Stop Reason')}: {stopReasonLabel}
+                    </p>
+                  )}
                   {/* end_reason alone reads as 'eof' for a truncated reply,
                       because the connection did close cleanly. Without this the
                       tooltip flags an error and then names a healthy reason. */}

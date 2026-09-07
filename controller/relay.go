@@ -255,7 +255,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
 			logger.LogError(c, channelErr.Error())
-			newAPIError = channelErr
+			// Exhausting the candidates must not hide the last attempt's failure.
+			// Preserve other selection errors, such as saturation, and errors
+			// raised before any attempt has run.
+			if newAPIError == nil || channelErr.GetErrorCode() != types.ErrorCodeGetChannelFailed {
+				newAPIError = channelErr
+			}
 			break
 		}
 

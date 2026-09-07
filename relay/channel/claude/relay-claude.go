@@ -222,6 +222,18 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	if streamErr := StreamProducedNoContentError(info, claudeInfo); streamErr != nil {
 		return nil, streamErr
 	}
+	// Recorded independently of the verdict below: the two answer different
+	// questions. missing_terminator says the upstream never closed the message
+	// off; stop_reason says how it closed one it did. A truncated stream has no
+	// stop_reason to carry, and SetStopReason ignores the empty string, so the two
+	// are never both set.
+	//
+	// Set here rather than in FormatClaudeResponseInfo, where the value is read:
+	// that function runs per frame and has no RelayInfo, and this handler is the
+	// one place both formats funnel through — RelayFormatClaude and
+	// RelayFormatOpenAI share claudeInfo, so one call covers both.
+	info.StreamStatus.SetStopReason(claudeInfo.StopReason)
+
 	// Past the guard above, so the upstream did answer. If it also never sent a
 	// frame closing the message off, the caller is holding a truncated reply.
 	//
