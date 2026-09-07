@@ -31,6 +31,7 @@ func TestRelayRetryExhaustionPreservesUpstreamError(t *testing.T) {
 	cases := []struct {
 		name              string
 		upstreamStatus    int
+		upstreamBody      string
 		channelCount      int
 		saturateFallback  bool
 		wantStatus        int
@@ -42,6 +43,12 @@ func TestRelayRetryExhaustionPreservesUpstreamError(t *testing.T) {
 			name: "only channel returns 503", upstreamStatus: http.StatusServiceUnavailable,
 			channelCount: 1, wantStatus: http.StatusServiceUnavailable,
 			wantType: "upstream_unavailable", wantMessage: "Service Unavailable", wantUpstreamCalls: 1,
+		},
+		{
+			name: "only channel returns 503 without error code", upstreamStatus: http.StatusServiceUnavailable,
+			upstreamBody: `{"error":{"message":"Service Unavailable","type":"error"}}`,
+			channelCount: 1, wantStatus: http.StatusServiceUnavailable,
+			wantType: "error", wantMessage: "Service Unavailable", wantUpstreamCalls: 1,
 		},
 		{
 			name: "only channel returns 520", upstreamStatus: 520,
@@ -113,6 +120,10 @@ func TestRelayRetryExhaustionPreservesUpstreamError(t *testing.T) {
 			}
 			reservations := make(chan reservation, common.RetryTimes+1)
 			var upstreamCalls atomic.Int32
+			upstreamBody := tc.upstreamBody
+			if upstreamBody == "" {
+				upstreamBody = `{"error":{"message":"Service Unavailable","type":"upstream_error","code":"upstream_unavailable"}}`
+			}
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				upstreamCalls.Add(1)
 				var currentUser model.User
@@ -122,7 +133,7 @@ func TestRelayRetryExhaustionPreservesUpstreamError(t *testing.T) {
 				reservations <- reservation{currentUser.Quota, currentToken.RemainQuota, walletErr, tokenErr}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(tc.upstreamStatus)
-				_, _ = io.WriteString(w, `{"error":{"message":"Service Unavailable","type":"upstream_error","code":"upstream_unavailable"}}`)
+				_, _ = io.WriteString(w, upstreamBody)
 			}))
 			t.Cleanup(upstream.Close)
 			for id := 1; id <= tc.channelCount; id++ {

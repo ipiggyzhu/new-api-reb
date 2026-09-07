@@ -257,9 +257,16 @@ func (e *NewAPIError) ToClaudeError() ClaudeError {
 	switch e.errorType {
 	case ErrorTypeOpenAIError:
 		if openAIError, ok := e.RelayError.(OpenAIError); ok {
+			code := ""
+			if openAIError.Code != nil {
+				code = fmt.Sprintf("%v", openAIError.Code)
+			}
+			if code == "" {
+				code = openAIError.Type
+			}
 			result = ClaudeError{
 				Message: e.Error(),
-				Type:    fmt.Sprintf("%v", openAIError.Code),
+				Type:    code,
 			}
 		}
 	case ErrorTypeClaudeError:
