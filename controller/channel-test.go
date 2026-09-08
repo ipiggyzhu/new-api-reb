@@ -167,8 +167,8 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 
 	//c.Request.Header.Set("Authorization", "Bearer "+channel.Key)
 	c.Request.Header.Set("Content-Type", "application/json")
-	// Dress the synthetic request as the client this channel type actually
-	// serves. Upstreams that gate on the client shape — the relay sites that
+	// Dress the synthetic request as the configured client, falling back to the
+	// channel type's default. Upstreams that gate on the client shape — sites that
 	// only answer Claude Code, the ones that expect an official SDK — reject a
 	// bare request with a 4xx that tells us nothing about the model. Channels
 	// with request passthrough are the ones that need this most: they exist
@@ -176,7 +176,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	// client request to forward. Set before any override is resolved so an
 	// explicitly configured header still wins.
 	testAPIType, _ := common.ChannelType2APIType(channel.Type)
-	applyTestClientHeaders(c.Request.Header, testAPIType, isStream)
+	applyTestClientHeaders(c.Request.Header, testAPIType, channel.GetSetting().SyntheticClientHeadersProfile, isStream)
 	c.Set("channel", channel.Type)
 	c.Set("base_url", channel.GetBaseURL())
 	group, _ := model.GetUserGroup(testUserID, false)

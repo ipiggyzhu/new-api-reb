@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func OaiResponsesCompactionHandler(c *gin.Context, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
@@ -27,10 +28,13 @@ func OaiResponsesCompactionHandler(c *gin.Context, resp *http.Response) (*dto.Us
 	if oaiError := compactResp.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
+	if !responsesResponseHasOutput(gjson.ParseBytes(responseBody)) {
+		return nil, emptyOutputError()
+	}
 
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 
-	usage := dto.Usage{}
+	usage := dto.Usage{ResponseValidated: true}
 	if compactResp.Usage != nil {
 		usage.PromptTokens = compactResp.Usage.InputTokens
 		usage.CompletionTokens = compactResp.Usage.OutputTokens

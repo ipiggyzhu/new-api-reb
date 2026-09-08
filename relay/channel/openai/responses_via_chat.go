@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/service/relayconvert"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func OaiChatToResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
@@ -33,6 +34,9 @@ func OaiChatToResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	}
 	if oaiError := chatResp.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
+	}
+	if !chatResponseHasOutput(gjson.ParseBytes(body)) {
+		return nil, emptyOutputError()
 	}
 
 	if responseID := helper.GetResponseID(c); responseID != "" {
@@ -57,6 +61,10 @@ func OaiChatToResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
 	}
+	if !responsesResponseHasOutput(gjson.ParseBytes(responseBody)) {
+		return nil, emptyOutputError()
+	}
+	usage.ResponseValidated = true
 
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 	return usage, nil
@@ -77,6 +85,10 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
 	}
 	streamErr := (*types.NewAPIError)(nil)
+	var output chatOutputState
+	var convertedOutput convertedOutputState
+	var preamble outputPreamble
+	var pending []relayconvert.ResponseResult
 
 	sendEvent := func(event relayconvert.ChatToResponsesStreamEvent) bool {
 		data, err := common.Marshal(event.Payload)
@@ -109,6 +121,7 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			sr.Error(err)
 			return
 		}
+		output.observe(gjson.Parse(data))
 
 		results, err := relayconvert.ConvertStreamResponseChunk(c, info, state, &chunk)
 		if err != nil {
@@ -116,6 +129,25 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			sr.Stop(streamErr)
 			return
 		}
+		for _, result := range results {
+			if err := convertedOutput.observe(result); err != nil {
+				streamErr = types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
+				sr.Stop(streamErr)
+				return
+			}
+		}
+		if !convertedOutput.hasOutput {
+			if !output.hasOutput && !preamble.add(data) {
+				streamErr = emptyOutputError()
+				sr.Stop(streamErr)
+				return
+			}
+			pending = append(pending, results...)
+			return
+		}
+		results = append(pending, results...)
+		pending = nil
+		preamble = outputPreamble{}
 		for _, result := range results {
 			event, ok := result.Value.(relayconvert.ChatToResponsesStreamEvent)
 			if !ok {
@@ -136,17 +168,40 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 	if noStreamErr := info.StreamStatus.NoStreamBodyError(); noStreamErr != nil {
 		return nil, noStreamErr
 	}
+	if !output.hasOutput {
+		return nil, emptyOutputError()
+	}
 
 	usage := state.Usage()
 	if usage == nil || usage.TotalTokens == 0 {
 		usage = service.ResponseText2Usage(c, state.UsageText(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 		state.SetUsage(usage)
 	}
+	usage.ResponseValidated = true
+	sawTerminator := output.finished() || info.StreamStatus.EndReason == relaycommon.StreamEndReasonDone
+	if !sawTerminator {
+		info.StreamStatus.MarkMissingTerminator()
+	}
+	if !sawTerminator || info.StreamStatus.FailureError() != nil {
+		if !convertedOutput.hasOutput {
+			return nil, emptyOutputError()
+		}
+		return usage, nil
+	}
 
 	finalResults, err := relayconvert.FinalizeStreamResponse(c, info, state)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
 	}
+	for _, result := range finalResults {
+		if err := convertedOutput.observe(result); err != nil {
+			return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
+		}
+	}
+	if !convertedOutput.hasOutput {
+		return nil, emptyOutputError()
+	}
+	finalResults = append(pending, finalResults...)
 	for _, result := range finalResults {
 		event, ok := result.Value.(relayconvert.ChatToResponsesStreamEvent)
 		if !ok {

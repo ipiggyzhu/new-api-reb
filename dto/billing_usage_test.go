@@ -49,6 +49,41 @@ func TestNewOpenAIChatBillingUsageRequiresTokenContent(t *testing.T) {
 	assert.Equal(t, 1, billingUsage.OpenAIUsage.PromptTokens)
 }
 
+func TestOpenAIBillingUsagePreservesResponsesOutputDetails(t *testing.T) {
+	source := &Usage{OutputTokensDetails: &OutputTokenDetails{ReasoningTokens: 9}}
+	billingUsage := NewOpenAIResponsesBillingUsage(source)
+	require.NotNil(t, billingUsage)
+	require.NotNil(t, billingUsage.OpenAIUsage)
+	require.NotNil(t, billingUsage.OpenAIUsage.OutputTokensDetails)
+	assert.Equal(t, BillingUsageSourceOAIResponses, billingUsage.Source)
+	assert.Equal(t, 9, billingUsage.OpenAIUsage.OutputTokensDetails.ReasoningTokens)
+
+	source.OutputTokensDetails.ReasoningTokens = 3
+	assert.Equal(t, 9, billingUsage.OpenAIUsage.OutputTokensDetails.ReasoningTokens)
+
+	clone := CloneBillingUsage(billingUsage)
+	require.NotNil(t, clone)
+	require.NotNil(t, clone.OpenAIUsage)
+	require.NotNil(t, clone.OpenAIUsage.OutputTokensDetails)
+	assert.Equal(t, 9, clone.OpenAIUsage.OutputTokensDetails.ReasoningTokens)
+	clone.OpenAIUsage.OutputTokensDetails.ReasoningTokens = 1
+	assert.Equal(t, 9, billingUsage.OpenAIUsage.OutputTokensDetails.ReasoningTokens)
+}
+
+func TestOpenAIBillingUsageCanonicalZeroOverridesLegacyDetails(t *testing.T) {
+	usage := &Usage{
+		OutputTokensDetails:    &OutputTokenDetails{},
+		CompletionTokenDetails: OutputTokenDetails{ReasoningTokens: 7},
+	}
+	assert.False(t, HasOpenAIUsageTokens(usage))
+	assert.Nil(t, NewOpenAIResponsesBillingUsage(usage))
+	assert.Nil(t, NewOpenAIChatBillingUsage(usage))
+
+	usage.OutputTokensDetails = nil
+	assert.True(t, HasOpenAIUsageTokens(usage))
+	assert.NotNil(t, NewOpenAIResponsesBillingUsage(usage))
+}
+
 func TestNewEstimatedGeminiChatBillingUsage(t *testing.T) {
 	billingUsage := NewEstimatedGeminiChatBillingUsage(&Usage{
 		PromptTokens:     11,

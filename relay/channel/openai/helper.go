@@ -2,6 +2,7 @@ package openai
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -14,10 +15,44 @@ import (
 	"github.com/QuantumNous/new-api/service/relayconvert"
 	"github.com/QuantumNous/new-api/types"
 
-	"github.com/samber/lo"
-
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
+
+// Formatting uses conversion DTOs, which do not model every native output kind.
+// Preserve those output fields while retaining the requested content/reasoning
+// transformation and the DTO's normalization of the remaining envelope.
+func marshalChatResponsePreservingOutput(response any, original []byte) ([]byte, error) {
+	formatted, err := common.Marshal(response)
+	if err != nil {
+		return nil, err
+	}
+	for index, choice := range gjson.GetBytes(original, "choices").Array() {
+		base := "choices." + strconv.Itoa(index) + "."
+		for _, path := range []string{
+			"text",
+			"message.refusal", "message.function_call", "message.audio", "message.reasoning_details", "message.images", "message.tool_calls",
+			"delta.refusal", "delta.function_call", "delta.audio", "delta.reasoning_details", "delta.images", "delta.tool_calls",
+		} {
+			if value := choice.Get(path); value.Exists() {
+				formatted, err = sjson.SetRawBytes(formatted, base+path, common.StringToByteSlice(value.Raw))
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	return formatted, nil
+}
+
+func sendFormattedChatData(c *gin.Context, response any, original string) error {
+	formatted, err := marshalChatResponsePreservingOutput(response, common.StringToByteSlice(original))
+	if err != nil {
+		return err
+	}
+	return helper.StringData(c, string(formatted))
+}
 
 // 辅助函数
 func HandleStreamFormat(c *gin.Context, info *relaycommon.RelayInfo, data string, forceFormat bool, thinkToContent bool) error {
@@ -144,9 +179,9 @@ func processCompletionsStreamResponse(streamResponse dto.CompletionsStreamRespon
 //
 // Suppression requires a chunk carrying usage, so the "usage" substring is a
 // conservative filter: a chunk without it can never be suppressed and goes out
-// at once, which covers every content delta — the entire visible response. A
-// false positive (a model literally emitting `"usage"` in its text) merely falls
-// back to the old buffered behaviour for that one chunk.
+// at once, which covers every content delta — the entire visible response.
+// If usage is present, inspect the output too: a chunk carrying text, a tool
+// call, or another output cannot be suppressed and must not delay delivery.
 func canForwardChunkImmediately(info *relaycommon.RelayInfo, data string) bool {
 	if info.RelayFormat != types.RelayFormatOpenAI {
 		// Claude and Gemini rebuild the tail chunk in HandleFinalResponse using
@@ -157,7 +192,12 @@ func canForwardChunkImmediately(info *relaycommon.RelayInfo, data string) bool {
 		// The caller asked for usage, so nothing is ever suppressed.
 		return true
 	}
-	return !strings.Contains(data, `"usage"`)
+	if !strings.Contains(data, `"usage"`) {
+		return true
+	}
+	var output chatOutputState
+	output.observe(gjson.Parse(data))
+	return output.hasOutput
 }
 
 func handleLastResponse(lastStreamData string, responseId *string, createAt *int64,
@@ -179,9 +219,9 @@ func handleLastResponse(lastStreamData string, responseId *string, createAt *int
 		*containStreamUsage = true
 		*usage = lastStreamResponse.Usage
 		if !info.ShouldIncludeUsage {
-			*shouldSendLastResp = lo.SomeBy(lastStreamResponse.Choices, func(choice dto.ChatCompletionsStreamResponseChoice) bool {
-				return choice.Delta.GetContentString() != "" || choice.Delta.GetReasoningContent() != ""
-			})
+			// Only a genuinely usage-only chunk is suppressible. Non-text output
+			// and choice finish reasons must survive even without visible text.
+			*shouldSendLastResp = len(lastStreamResponse.Choices) > 0
 		}
 	}
 

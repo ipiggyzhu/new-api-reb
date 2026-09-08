@@ -3,7 +3,9 @@ package dto
 import (
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestUsageHasOutput pins the predicate that decides whether a text relay
@@ -67,4 +69,16 @@ func TestUsageHasOutput(t *testing.T) {
 			assert.Equal(t, tc.want, tc.usage.HasOutput())
 		})
 	}
+}
+
+func TestUsageResponseValidatedIsInternal(t *testing.T) {
+	var usage Usage
+	require.NoError(t, common.UnmarshalJsonStr(`{"ResponseValidated":true,"response_validated":true}`, &usage))
+	assert.False(t, usage.ResponseValidated)
+
+	usage.ResponseValidated = true
+	data, err := common.Marshal(usage)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "ResponseValidated")
+	assert.NotContains(t, string(data), "response_validated")
 }

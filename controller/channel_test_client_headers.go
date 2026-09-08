@@ -12,8 +12,7 @@ import (
 // credentials) from reaching upstream. Duplicating the table here would let the
 // two copies drift.
 //
-// These thin aliases keep the controller-side call sites and their tests
-// unchanged.
+// These thin aliases keep the controller-side call sites on the shared profiles.
 
 const (
 	clientHeaderFamilyClaude  = relaychannel.ClientHeaderFamilyClaude
@@ -46,9 +45,9 @@ func clientHeaderProfileForAPIType(apiType int) clientHeaderProfile {
 }
 
 // applyTestClientHeaders dresses the synthetic channel-test request as the
-// client that channel type normally serves. Without it a test sends a shape no
-// real caller ever sends, and upstreams that gate on the client reject it with a
-// 4xx that says nothing about whether the model works.
-func applyTestClientHeaders(header http.Header, apiType int, isStream bool) {
-	relaychannel.ApplyClientHeaderProfile(header, apiType, isStream)
+// configured client, or the channel type's default when no family is selected.
+// Without it a test sends a shape no real caller ever sends, and upstreams that
+// gate on the client reject it with a 4xx unrelated to whether the model works.
+func applyTestClientHeaders(header http.Header, apiType int, profile string, isStream bool) {
+	relaychannel.ApplyClientHeaderProfile(header, apiType, profile, isStream)
 }

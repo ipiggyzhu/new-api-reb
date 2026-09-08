@@ -215,10 +215,10 @@ func buildFetchModelsHeaders(channel *model.Channel, key string) (http.Header, e
 
 	// 部分上游（agentrouter 等）按客户端身份放行：裸的 Go 默认 UA 会被当成
 	// 未授权客户端拒掉（401 "unauthorized client detected"）。复用渠道测试的
-	// 客户端画像，让拉取请求看起来像该渠道类型对应的真实客户端；画像只填
-	// 空缺，不会覆盖上面已设置的认证头。
+	// 客户端画像，优先采用渠道显式选择的客户端，否则按渠道类型生成；画像
+	// 只填空缺，不会覆盖上面已设置的认证头。
 	if apiType, ok := common.ChannelType2APIType(channel.Type); ok {
-		applyTestClientHeaders(headers, apiType, false)
+		applyTestClientHeaders(headers, apiType, channel.GetSetting().SyntheticClientHeadersProfile, false)
 	}
 
 	headerOverride := channel.GetHeaderOverride()

@@ -3,10 +3,47 @@ package oairesponses
 import (
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestResponsesUsageConvertsCanonicalOutputDetails(t *testing.T) {
+	var response dto.OpenAIResponsesResponse
+	require.NoError(t, common.UnmarshalJsonStr(`{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[],"usage":{"input_tokens":10,"output_tokens":9,"total_tokens":19,"output_tokens_details":{"reasoning_tokens":9}}}`, &response))
+
+	chat, usage, err := ResponsesResponseToChatCompletionsResponse(&response, "chat-reasoning")
+	require.NoError(t, err)
+	require.NotNil(t, usage)
+	assert.Equal(t, 9, usage.CompletionTokenDetails.ReasoningTokens)
+	assert.Equal(t, 9, chat.Usage.CompletionTokenDetails.ReasoningTokens)
+	assert.Equal(t, "length", chat.Choices[0].FinishReason)
+
+	data, err := common.Marshal(chat)
+	require.NoError(t, err)
+	var wire struct {
+		Usage struct {
+			Details dto.OutputTokenDetails `json:"completion_tokens_details"`
+		} `json:"usage"`
+	}
+	require.NoError(t, common.Unmarshal(data, &wire))
+	assert.Equal(t, 9, wire.Usage.Details.ReasoningTokens)
+}
+
+func TestResponsesUsageCanonicalZeroOverridesLegacyDetails(t *testing.T) {
+	var usage dto.Usage
+	require.NoError(t, common.UnmarshalJsonStr(`{"output_tokens_details":{"reasoning_tokens":0},"completion_tokens_details":{"reasoning_tokens":7}}`, &usage))
+
+	converted := UsageFromResponsesUsage(&usage)
+	assert.Zero(t, converted.CompletionTokenDetails.ReasoningTokens)
+}
+
+func TestResponsesUsagePreservesLegacyOutputDetails(t *testing.T) {
+	details := dto.OutputTokenDetails{ReasoningTokens: 7, TextTokens: 2, AudioTokens: 3, ImageTokens: 4}
+	converted := UsageFromResponsesUsage(&dto.Usage{CompletionTokenDetails: details})
+	assert.Equal(t, details, converted.CompletionTokenDetails)
+}
 
 func TestResponsesResponseToChatCompletionsPreservesTextAndToolCalls(t *testing.T) {
 	resp := &dto.OpenAIResponsesResponse{

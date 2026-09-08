@@ -3,11 +3,36 @@ package oaichat
 import (
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestChatUsageSerializesCanonicalOutputDetails(t *testing.T) {
+	var chat dto.OpenAITextResponse
+	require.NoError(t, common.UnmarshalJsonStr(`{"choices":[{"message":{"role":"assistant","content":null},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":9,"total_tokens":19,"completion_tokens_details":{"reasoning_tokens":9}}}`, &chat))
+
+	response, usage, err := ChatCompletionsResponseToResponsesResponse(&chat, "resp-reasoning")
+	require.NoError(t, err)
+	require.NotNil(t, usage)
+	assert.Equal(t, 9, usage.CompletionTokenDetails.ReasoningTokens, "internal usage retains the Chat-compatible detail")
+	assert.Equal(t, `"incomplete"`, string(response.Status))
+	require.NotNil(t, response.IncompleteDetails)
+	assert.Equal(t, "max_output_tokens", response.IncompleteDetails.Reason)
+
+	data, err := common.Marshal(response)
+	require.NoError(t, err)
+	var wire struct {
+		Usage struct {
+			Details *dto.OutputTokenDetails `json:"output_tokens_details"`
+		} `json:"usage"`
+	}
+	require.NoError(t, common.Unmarshal(data, &wire))
+	require.NotNil(t, wire.Usage.Details)
+	assert.Equal(t, 9, wire.Usage.Details.ReasoningTokens)
+}
 
 func TestChatCompletionsResponseToResponsesPreservesTextToolCallsAndUsage(t *testing.T) {
 	chat := &dto.OpenAITextResponse{

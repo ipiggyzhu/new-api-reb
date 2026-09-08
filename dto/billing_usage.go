@@ -94,10 +94,11 @@ func HasOpenAIUsageTokens(usage *Usage) bool {
 		usage.PromptTokensDetails.AudioTokens != 0 {
 		return true
 	}
-	if usage.CompletionTokenDetails.ReasoningTokens != 0 ||
-		usage.CompletionTokenDetails.TextTokens != 0 ||
-		usage.CompletionTokenDetails.ImageTokens != 0 ||
-		usage.CompletionTokenDetails.AudioTokens != 0 {
+	details := usage.GetOutputTokenDetails()
+	if details.ReasoningTokens != 0 ||
+		details.TextTokens != 0 ||
+		details.ImageTokens != 0 ||
+		details.AudioTokens != 0 {
 		return true
 	}
 	return usage.InputTokensDetails != nil
@@ -158,6 +159,10 @@ func cloneOpenAIUsage(usage *Usage) *Usage {
 	if usage.InputTokensDetails != nil {
 		inputTokensDetails := *usage.InputTokensDetails
 		clone.InputTokensDetails = &inputTokensDetails
+	}
+	if usage.OutputTokensDetails != nil {
+		outputTokensDetails := *usage.OutputTokensDetails
+		clone.OutputTokensDetails = &outputTokensDetails
 	}
 	return &clone
 }

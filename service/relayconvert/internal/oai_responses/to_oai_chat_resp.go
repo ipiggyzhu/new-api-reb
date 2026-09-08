@@ -161,15 +161,7 @@ func UsageFromResponsesUsage(src *dto.Usage) *dto.Usage {
 		usage.PromptTokensDetails.ImageTokens = src.InputTokensDetails.ImageTokens
 		usage.PromptTokensDetails.AudioTokens = src.InputTokensDetails.AudioTokens
 	}
-	if src.CompletionTokenDetails.ReasoningTokens != 0 ||
-		src.CompletionTokenDetails.TextTokens != 0 ||
-		src.CompletionTokenDetails.AudioTokens != 0 ||
-		src.CompletionTokenDetails.ImageTokens != 0 {
-		usage.CompletionTokenDetails.ReasoningTokens = src.CompletionTokenDetails.ReasoningTokens
-		usage.CompletionTokenDetails.TextTokens = src.CompletionTokenDetails.TextTokens
-		usage.CompletionTokenDetails.AudioTokens = src.CompletionTokenDetails.AudioTokens
-		usage.CompletionTokenDetails.ImageTokens = src.CompletionTokenDetails.ImageTokens
-	}
+	usage.CompletionTokenDetails = src.GetOutputTokenDetails()
 	usage.ClaudeCacheCreation5mTokens = src.ClaudeCacheCreation5mTokens
 	usage.ClaudeCacheCreation1hTokens = src.ClaudeCacheCreation1hTokens
 	return usage

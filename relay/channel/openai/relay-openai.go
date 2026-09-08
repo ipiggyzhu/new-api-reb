@@ -12,12 +12,14 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/channel/openrouter"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/relayconvert"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, forceFormat bool, thinkToContent bool) error {
@@ -35,7 +37,7 @@ func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, fo
 	}
 
 	if !thinkToContent {
-		return helper.ObjectData(c, lastStreamResponse)
+		return sendFormattedChatData(c, lastStreamResponse, data)
 	}
 
 	hasThinkingContent := false
@@ -63,12 +65,12 @@ func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, fo
 			}
 			info.ThinkingContentInfo.IsFirstThinkingContent = false
 			info.ThinkingContentInfo.HasSentThinkingContent = true
-			return helper.ObjectData(c, response)
+			return sendFormattedChatData(c, response, data)
 		}
 	}
 
 	if lastStreamResponse.Choices == nil || len(lastStreamResponse.Choices) == 0 {
-		return helper.ObjectData(c, lastStreamResponse)
+		return sendFormattedChatData(c, lastStreamResponse, data)
 	}
 
 	// Process each choice
@@ -98,7 +100,7 @@ func sendStreamData(c *gin.Context, info *relaycommon.RelayInfo, data string, fo
 		}
 	}
 
-	return helper.ObjectData(c, lastStreamResponse)
+	return sendFormattedChatData(c, lastStreamResponse, data)
 }
 
 func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
@@ -120,11 +122,46 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var lastStreamData string
 	var lastStreamDataSent bool
 	var secondLastStreamData string // 存储倒数第二个stream data，用于音频模型
+	validateOutput := info.RelayFormat == types.RelayFormatOpenAI &&
+		(info.RelayMode == relayconstant.RelayModeChatCompletions || info.RelayMode == relayconstant.RelayModeCompletions)
+	var output chatOutputState
+	var preamble outputPreamble
+	var outputErr *types.NewAPIError
 
 	// 检查是否为音频模型
 	isAudioModel := strings.Contains(strings.ToLower(model), "audio")
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+		if validateOutput {
+			if !gjson.Valid(data) {
+				sr.Error(fmt.Errorf("invalid JSON in upstream stream"))
+				return
+			}
+			chunk := gjson.Parse(data)
+			output.observe(chunk)
+			// Usage may precede the final choice, including hidden reasoning at
+			// the token limit. Retain reported usage independently of delivery.
+			if rawUsage := chunk.Get("usage"); rawUsage.IsObject() {
+				var reportedUsage dto.Usage
+				if err := common.UnmarshalJsonStr(rawUsage.Raw, &reportedUsage); err == nil && service.ValidUsage(&reportedUsage) {
+					usage = &reportedUsage
+					containStreamUsage = true
+				}
+			}
+			if !output.hasOutput {
+				if !preamble.add(data) {
+					outputErr = emptyOutputError()
+					sr.Stop(outputErr)
+				}
+				return
+			}
+			for _, pending := range preamble.chunks {
+				if err := HandleStreamFormat(c, info, pending, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
+					sr.Error(err)
+				}
+			}
+			preamble = outputPreamble{}
+		}
 		// Only chunks that canForwardChunkImmediately held back are still pending
 		// here; forwarding them now is what the one-chunk lookahead exists for.
 		if lastStreamData != "" && !lastStreamDataSent {
@@ -161,9 +198,22 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	if streamErr := info.StreamStatus.NoStreamBodyError(); streamErr != nil {
 		return nil, streamErr
 	}
+	if outputErr != nil {
+		return nil, outputErr
+	}
+	streamComplete := true
+	if validateOutput {
+		if !output.hasOutput {
+			return nil, emptyOutputError()
+		}
+		streamComplete = info.StreamStatus.EndReason == relaycommon.StreamEndReasonDone || output.finished()
+		if !streamComplete {
+			info.StreamStatus.MarkMissingTerminator()
+		}
+	}
 
 	// 对音频模型，从倒数第二个stream data中提取usage信息
-	if isAudioModel && secondLastStreamData != "" {
+	if !validateOutput && isAudioModel && secondLastStreamData != "" {
 		var streamResp struct {
 			Usage *dto.Usage `json:"usage"`
 		}
@@ -199,6 +249,14 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	}
 
 	applyUsagePostProcessing(info, usage, common.StringToByteSlice(lastStreamData))
+	if validateOutput {
+		usage.ResponseValidated = true
+		// The controller settles delivered output before reporting truncation.
+		// Do not put a successful terminator ahead of that error.
+		if !streamComplete || info.StreamStatus.FailureError() != nil {
+			return usage, nil
+		}
+	}
 
 	HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
 
@@ -238,6 +296,11 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	if oaiError := simpleResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
+	validateOutput := info.RelayFormat == types.RelayFormatOpenAI &&
+		(info.RelayMode == relayconstant.RelayModeChatCompletions || info.RelayMode == relayconstant.RelayModeCompletions)
+	if validateOutput && !chatResponseHasOutput(gjson.ParseBytes(responseBody)) {
+		return nil, emptyOutputError()
+	}
 
 	for _, choice := range simpleResponse.Choices {
 		if choice.FinishReason == constant.FinishReasonContentFilter {
@@ -261,14 +324,16 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 			}
 		}
 		simpleResponse.Usage = dto.Usage{
-			PromptTokens:     info.GetEstimatePromptTokens(),
-			CompletionTokens: completionTokens,
-			TotalTokens:      info.GetEstimatePromptTokens() + completionTokens,
+			PromptTokens:           info.GetEstimatePromptTokens(),
+			CompletionTokens:       completionTokens,
+			TotalTokens:            info.GetEstimatePromptTokens() + completionTokens,
+			CompletionTokenDetails: simpleResponse.Usage.CompletionTokenDetails,
 		}
 		usageModified = true
 	}
 
 	applyUsagePostProcessing(info, &simpleResponse.Usage, responseBody)
+	simpleResponse.Usage.ResponseValidated = validateOutput
 
 	switch info.RelayFormat {
 	case types.RelayFormatOpenAI:
@@ -282,7 +347,7 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 			responseBody, _ = common.Marshal(bodyMap)
 		}
 		if forceFormat {
-			responseBody, err = common.Marshal(simpleResponse)
+			responseBody, err = marshalChatResponsePreservingOutput(simpleResponse, responseBody)
 			if err != nil {
 				return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 			}

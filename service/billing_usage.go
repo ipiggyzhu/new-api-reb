@@ -102,6 +102,11 @@ func usageFromBillingUsage(usage *dto.Usage) (*dto.Usage, bool) {
 
 func usageFromOpenAIBillingUsage(billingUsage *dto.BillingUsage) *dto.Usage {
 	usage := *billingUsage.OpenAIUsage
+	if usage.OutputTokensDetails != nil {
+		details := *usage.OutputTokensDetails
+		usage.OutputTokensDetails = &details
+		usage.CompletionTokenDetails = details
+	}
 	if usage.PromptTokens == 0 && usage.InputTokens > 0 {
 		usage.PromptTokens = usage.InputTokens
 	}

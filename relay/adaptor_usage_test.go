@@ -54,3 +54,12 @@ func TestAdaptorUsageRejectsUnusableUsage(t *testing.T) {
 		})
 	}
 }
+
+func TestRequireDeliveredOutputAcceptsProtocolValidatedResponse(t *testing.T) {
+	assert.Nil(t, requireDeliveredOutput(&dto.Usage{ResponseValidated: true}),
+		"valid tools, refusals and queued jobs need not report output tokens")
+
+	apiErr := requireDeliveredOutput(&dto.Usage{})
+	require.NotNil(t, apiErr, "unvalidated adaptors retain the existing empty-output guard")
+	assert.Equal(t, types.ErrorCodeEmptyResponse, apiErr.GetErrorCode())
+}

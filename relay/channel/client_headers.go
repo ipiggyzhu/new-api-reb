@@ -172,15 +172,20 @@ func EffectiveClientHeaders(family string) ClientHeaderProfile {
 	return effective
 }
 
-// ApplyClientHeaderProfile fills header with the profile for apiType, then the
-// admin's overrides. Existing headers are never overwritten, so callers may set
-// anything they need first and it survives.
-func ApplyClientHeaderProfile(header http.Header, apiType int, isStream bool) {
+// ApplyClientHeaderProfile fills header with the selected profile, then the
+// admin's overrides. Management requests always have a generated identity:
+// auto, off and unrecognized profiles retain the API type's default family.
+// Existing headers are never overwritten, so explicit values survive.
+func ApplyClientHeaderProfile(header http.Header, apiType int, profile string, isStream bool) {
 	if header == nil {
 		return
 	}
 
-	for name, value := range EffectiveClientHeaders(ClientHeaderFamilyForAPIType(apiType)) {
+	family := profile
+	if !constant.IsClientHeaderFamily(family) {
+		family = ClientHeaderFamilyForAPIType(apiType)
+	}
+	for name, value := range EffectiveClientHeaders(family) {
 		if header.Get(name) == "" {
 			header.Set(name, value)
 		}

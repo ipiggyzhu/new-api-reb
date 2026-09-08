@@ -1,11 +1,20 @@
 package controller
 
 import (
+	"context"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -55,7 +64,7 @@ func TestApplyTestClientHeadersSetsProfileAndAccept(t *testing.T) {
 	t.Parallel()
 
 	header := http.Header{}
-	applyTestClientHeaders(header, constant.APITypeAnthropic, false)
+	applyTestClientHeaders(header, constant.APITypeAnthropic, "", false)
 
 	assert.Contains(t, header.Get("user-agent"), "claude-cli/")
 	assert.Equal(t, "2023-06-01", header.Get("anthropic-version"))
@@ -66,7 +75,7 @@ func TestApplyTestClientHeadersUsesSSEForStream(t *testing.T) {
 	t.Parallel()
 
 	header := http.Header{}
-	applyTestClientHeaders(header, constant.APITypeOpenAI, true)
+	applyTestClientHeaders(header, constant.APITypeOpenAI, "", true)
 
 	assert.Equal(t, acceptSSE, header.Get("accept"))
 	assert.Equal(t, "python", header.Get("x-stainless-lang"))
@@ -83,7 +92,7 @@ func TestApplyTestClientHeadersNeverOverwritesExistingValues(t *testing.T) {
 	header.Set("anthropic-version", "2099-01-01")
 	header.Set("accept", "application/xml")
 
-	applyTestClientHeaders(header, constant.APITypeAnthropic, false)
+	applyTestClientHeaders(header, constant.APITypeAnthropic, "", false)
 
 	assert.Equal(t, "my-own-agent/9", header.Get("user-agent"))
 	assert.Equal(t, "2099-01-01", header.Get("anthropic-version"))
@@ -94,8 +103,82 @@ func TestApplyTestClientHeadersNilHeaderDoesNotPanic(t *testing.T) {
 	t.Parallel()
 
 	assert.NotPanics(t, func() {
-		applyTestClientHeaders(nil, constant.APITypeOpenAI, false)
+		applyTestClientHeaders(nil, constant.APITypeOpenAI, "", false)
 	})
+}
+
+func TestChannelTestSendsSelectedClientProfile(t *testing.T) {
+	originalDB, originalLogDB := model.DB, model.LOG_DB
+	originalMode, originalRedis := gin.Mode(), common.RedisEnabled
+	originalMainType, originalLogType := common.MainDatabaseType(), common.LogDatabaseType()
+	originalLogConsume, originalCountToken := common.LogConsumeEnabled, constant.CountToken
+	originalRatios := ratio_setting.ModelRatio2JSONString()
+	t.Cleanup(func() {
+		model.DB, model.LOG_DB = originalDB, originalLogDB
+		gin.SetMode(originalMode)
+		common.RedisEnabled = originalRedis
+		common.SetDatabaseTypes(originalMainType, originalLogType)
+		common.LogConsumeEnabled, constant.CountToken = originalLogConsume, originalCountToken
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(originalRatios))
+	})
+	initModelListColumnNames(t)
+	db := setupErrorLogTestDB(t)
+	common.LogConsumeEnabled, constant.CountToken = false, false
+	ratios := ratio_setting.GetModelRatioCopy()
+	ratios["gpt-4o"] = 1
+	ratioJSON, err := common.Marshal(ratios)
+	require.NoError(t, err)
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(string(ratioJSON)))
+	service.InitHttpClient()
+	user := model.User{Id: 7, Username: "channel-header-test", Group: "default", Quota: 100_000, Status: common.UserStatusEnabled}
+	require.NoError(t, db.Create(&user).Error)
+	withChannelTestClientHeaderOverrides(t, map[string]map[string]string{
+		clientHeaderFamilyCodex: {"user-agent": "codex_cli_rs/9.9.9"},
+	})
+
+	for _, tc := range []struct {
+		name      string
+		overrides string
+		wantAgent string
+	}{
+		{"selected family uses global version override", "", "codex_cli_rs/9.9.9"},
+		{
+			"static override wins and caller header rules stay inactive",
+			`{"user-agent":"static-client/1","*":"","regex:^x-":"","x-copied":"{client_header:x-auth-token}"}`,
+			"static-client/1",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			captured := make(chan http.Header, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				captured <- r.Header.Clone()
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"test-completion","object":"chat.completion","model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+			}))
+			t.Cleanup(upstream.Close)
+			channel := &model.Channel{
+				Id: 25, Type: constant.ChannelTypeOpenAI, Key: "sk-upstream", BaseURL: &upstream.URL,
+				HeaderOverride: &tc.overrides,
+			}
+			channel.SetSetting(dto.ChannelSettings{SyntheticClientHeadersProfile: constant.ClientHeaderFamilyCodex})
+
+			result := testChannel(context.Background(), channel, user.Id, "gpt-4o", string(constant.EndpointTypeOpenAI), false)
+			require.NoError(t, result.localErr)
+			require.Nil(t, result.newAPIError)
+			select {
+			case headers := <-captured:
+				assert.Equal(t, tc.wantAgent, headers.Get("User-Agent"))
+				assert.Equal(t, "codex_cli_rs", headers.Get("Originator"))
+				assert.Empty(t, headers.Get("X-Stainless-Lang"))
+				assert.Equal(t, "Bearer sk-upstream", headers.Get("Authorization"))
+				assert.Equal(t, acceptJSON, headers.Get("Accept"))
+				assert.Empty(t, headers.Get("X-Copied"))
+				assert.Empty(t, headers.Get("X-Auth-Token"))
+			default:
+				t.Fatal("channel test did not send its request upstream")
+			}
+		})
+	}
 }
 
 // withChannelTestClientHeaderOverrides sets the admin override and restores it,
@@ -115,7 +198,7 @@ func TestApplyTestClientHeadersOverrideReplacesBuiltinValue(t *testing.T) {
 	})
 
 	header := http.Header{}
-	applyTestClientHeaders(header, constant.APITypeAnthropic, false)
+	applyTestClientHeaders(header, constant.APITypeAnthropic, "", false)
 
 	assert.Equal(t, "claude-cli/9.9.9 (external, cli)", header.Get("user-agent"))
 	// Untouched entries of the profile must survive a partial override.
@@ -128,7 +211,7 @@ func TestApplyTestClientHeadersOverrideAddsNewHeader(t *testing.T) {
 	})
 
 	header := http.Header{}
-	applyTestClientHeaders(header, constant.APITypeOpenAI, false)
+	applyTestClientHeaders(header, constant.APITypeOpenAI, "", false)
 
 	assert.Equal(t, "let-me-in", header.Get("x-custom-gate"))
 }
@@ -141,7 +224,7 @@ func TestApplyTestClientHeadersEmptyOverrideRemovesBuiltinHeader(t *testing.T) {
 	})
 
 	header := http.Header{}
-	applyTestClientHeaders(header, constant.APITypeAnthropic, false)
+	applyTestClientHeaders(header, constant.APITypeAnthropic, "", false)
 
 	// Get() returns "" both when the key is absent and when it is present with
 	// an empty value, and those are not the same thing: an empty header is still
@@ -156,7 +239,7 @@ func TestApplyTestClientHeadersOverrideNameIsCaseInsensitive(t *testing.T) {
 	})
 
 	header := http.Header{}
-	applyTestClientHeaders(header, constant.APITypeAnthropic, false)
+	applyTestClientHeaders(header, constant.APITypeAnthropic, "", false)
 
 	assert.Equal(t, "my-agent/1", header.Get("user-agent"))
 }
@@ -170,7 +253,7 @@ func TestApplyTestClientHeadersOverrideDoesNotLeakAcrossFamilies(t *testing.T) {
 	})
 
 	openAIHeader := http.Header{}
-	applyTestClientHeaders(openAIHeader, constant.APITypeOpenAI, false)
+	applyTestClientHeaders(openAIHeader, constant.APITypeOpenAI, "", false)
 	assert.Contains(t, openAIHeader.Get("user-agent"), "OpenAI/Python")
 	assert.NotContains(t, openAIHeader.Get("user-agent"), "claude-cli")
 }
@@ -182,7 +265,7 @@ func TestApplyTestClientHeadersWildcardAppliesToEveryFamily(t *testing.T) {
 
 	for _, apiType := range []int{constant.APITypeOpenAI, constant.APITypeAnthropic, constant.APITypeGemini} {
 		header := http.Header{}
-		applyTestClientHeaders(header, apiType, false)
+		applyTestClientHeaders(header, apiType, "", false)
 		assert.Equal(t, "yes", header.Get("x-gateway-probe"))
 	}
 }
@@ -196,11 +279,11 @@ func TestApplyTestClientHeadersFamilyBeatsWildcard(t *testing.T) {
 	})
 
 	claudeHeader := http.Header{}
-	applyTestClientHeaders(claudeHeader, constant.APITypeAnthropic, false)
+	applyTestClientHeaders(claudeHeader, constant.APITypeAnthropic, "", false)
 	assert.Equal(t, "specific/2", claudeHeader.Get("user-agent"))
 
 	geminiHeader := http.Header{}
-	applyTestClientHeaders(geminiHeader, constant.APITypeGemini, false)
+	applyTestClientHeaders(geminiHeader, constant.APITypeGemini, "", false)
 	assert.Equal(t, "blanket/1", geminiHeader.Get("user-agent"))
 }
 
@@ -247,7 +330,7 @@ func TestPresetHeadersApplyThroughOverride(t *testing.T) {
 	})
 
 	header := http.Header{}
-	applyTestClientHeaders(header, constant.APITypeCodex, false)
+	applyTestClientHeaders(header, constant.APITypeCodex, "", false)
 	assert.Equal(t, codexPresetHeaders["user-agent"], header.Get("user-agent"))
 	assert.Equal(t, "codex_cli_rs", header.Get("originator"))
 }

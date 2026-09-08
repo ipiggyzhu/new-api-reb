@@ -142,11 +142,10 @@ func UsageFromChatUsage(src *dto.Usage) *dto.Usage {
 		details := src.PromptTokensDetails
 		usage.InputTokensDetails = &details
 	}
-	if src.CompletionTokenDetails.ReasoningTokens != 0 ||
-		src.CompletionTokenDetails.TextTokens != 0 ||
-		src.CompletionTokenDetails.AudioTokens != 0 ||
-		src.CompletionTokenDetails.ImageTokens != 0 {
-		usage.CompletionTokenDetails = src.CompletionTokenDetails
+	details := src.GetOutputTokenDetails()
+	usage.CompletionTokenDetails = details
+	if src.OutputTokensDetails != nil || details != (dto.OutputTokenDetails{}) {
+		usage.OutputTokensDetails = &details
 	}
 	usage.ClaudeCacheCreation5mTokens = src.ClaudeCacheCreation5mTokens
 	usage.ClaudeCacheCreation1hTokens = src.ClaudeCacheCreation1hTokens

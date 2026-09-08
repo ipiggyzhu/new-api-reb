@@ -221,6 +221,10 @@ type CompletionsStreamResponse struct {
 }
 
 type Usage struct {
+	// ResponseValidated is set only by an adaptor that has checked the protocol
+	// output, including legal responses such as tool calls or queued jobs.
+	// Stream completion is checked separately through RelayInfo.StreamStatus.
+	ResponseValidated    bool          `json:"-"`
 	PromptTokens         int           `json:"prompt_tokens"`
 	CompletionTokens     int           `json:"completion_tokens"`
 	TotalTokens          int           `json:"total_tokens"`
@@ -229,11 +233,12 @@ type Usage struct {
 	UsageSource          string        `json:"usage_source,omitempty"`
 	BillingUsage         *BillingUsage `json:"billing_usage,omitempty"`
 
-	PromptTokensDetails    InputTokenDetails  `json:"prompt_tokens_details"`
-	CompletionTokenDetails OutputTokenDetails `json:"completion_tokens_details"`
-	InputTokens            int                `json:"input_tokens"`
-	OutputTokens           int                `json:"output_tokens"`
-	InputTokensDetails     *InputTokenDetails `json:"input_tokens_details"`
+	PromptTokensDetails    InputTokenDetails   `json:"prompt_tokens_details"`
+	CompletionTokenDetails OutputTokenDetails  `json:"completion_tokens_details"`
+	InputTokens            int                 `json:"input_tokens"`
+	OutputTokens           int                 `json:"output_tokens"`
+	InputTokensDetails     *InputTokenDetails  `json:"input_tokens_details"`
+	OutputTokensDetails    *OutputTokenDetails `json:"output_tokens_details,omitempty"`
 
 	// claude cache 1h
 	ClaudeCacheCreation5mTokens int `json:"claude_cache_creation_5_m_tokens"`
@@ -283,14 +288,9 @@ func (d InputTokenDetails) CacheCreationTokensTotal() int {
 	return total
 }
 
-// HasOutput reports whether the upstream delivered any output at all.
-//
-// Every text path recovers a token count from the text it accumulated when the
-// upstream reports no usage of its own (ResponseText2Usage for chat
-// completions, the equivalent recovery in the Claude and Responses handlers), so
-// delivered content always leaves a non-zero count here. Zero across every
-// output field therefore means nothing came back, not merely that usage was
-// missing.
+// HasOutput reports whether usage contains output tokens. It is a fallback for
+// adaptors that do not validate their protocol output: absent usage does not
+// prove an empty response, and positive usage does not prove output was sent.
 //
 // Each output kind is checked separately because a modality-specific reply can
 // bill entirely through its own field: an audio answer can carry its tokens in
@@ -303,11 +303,23 @@ func (u *Usage) HasOutput() bool {
 	if u.CompletionTokens > 0 || u.OutputTokens > 0 {
 		return true
 	}
-	details := u.CompletionTokenDetails
+	details := u.GetOutputTokenDetails()
 	return details.TextTokens > 0 ||
 		details.AudioTokens > 0 ||
 		details.ImageTokens > 0 ||
 		details.ReasoningTokens > 0
+}
+
+// GetOutputTokenDetails prefers the Responses field when present, including an
+// explicit zero. Older callers populate only the Chat-compatible detail field.
+func (u *Usage) GetOutputTokenDetails() OutputTokenDetails {
+	if u == nil {
+		return OutputTokenDetails{}
+	}
+	if u.OutputTokensDetails != nil {
+		return *u.OutputTokensDetails
+	}
+	return u.CompletionTokenDetails
 }
 
 type OutputTokenDetails struct {

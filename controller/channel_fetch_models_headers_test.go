@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,4 +33,74 @@ func TestBuildFetchModelsHeadersDefaultUsesBearerOnly(t *testing.T) {
 	assert.Equal(t, "Bearer sk-test", headers.Get("Authorization"))
 	assert.Empty(t, headers.Get("x-api-key"))
 	assert.NotEmpty(t, headers.Get("User-Agent"))
+}
+
+func TestBuildFetchModelsHeadersHonorsChannelProfile(t *testing.T) {
+	cases := []struct {
+		name       string
+		settings   dto.ChannelSettings
+		wantClient string
+		wantOrigin string
+		wantLang   string
+	}{
+		{
+			name:       "explicit codex replaces the API type default",
+			settings:   dto.ChannelSettings{SyntheticClientHeadersProfile: constant.ClientHeaderFamilyCodex},
+			wantClient: "codex_cli_rs/", wantOrigin: "codex_cli_rs",
+		},
+		{
+			name:       "auto keeps the API type default",
+			settings:   dto.ChannelSettings{SyntheticClientHeadersProfile: dto.SyntheticClientHeadersProfileAuto},
+			wantClient: "OpenAI/Python", wantLang: "python",
+		},
+		{
+			name:       "off keeps management requests synthesized",
+			wantClient: "OpenAI/Python", wantLang: "python",
+		},
+		{
+			name:       "legacy enabled keeps the API type default",
+			settings:   dto.ChannelSettings{SyntheticClientHeaders: true},
+			wantClient: "OpenAI/Python", wantLang: "python",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			channel := &model.Channel{Type: constant.ChannelTypeOpenAI}
+			channel.SetSetting(tc.settings)
+
+			headers, err := buildFetchModelsHeaders(channel, "sk-upstream")
+			require.NoError(t, err)
+
+			assert.Contains(t, headers.Get("User-Agent"), tc.wantClient)
+			assert.Equal(t, tc.wantOrigin, headers.Get("Originator"))
+			assert.Equal(t, tc.wantLang, headers.Get("X-Stainless-Lang"))
+			assert.Equal(t, "Bearer sk-upstream", headers.Get("Authorization"))
+			assert.Equal(t, acceptJSON, headers.Get("Accept"))
+		})
+	}
+}
+
+func TestBuildFetchModelsHeadersSelectedProfileKeepsOverridePriority(t *testing.T) {
+	withChannelTestClientHeaderOverrides(t, map[string]map[string]string{
+		clientHeaderFamilyAll:   {"user-agent": "global-client/1", "x-managed-probe": "enabled"},
+		clientHeaderFamilyCodex: {"user-agent": "codex_cli_rs/9.9.9"},
+	})
+	channel := &model.Channel{Type: constant.ChannelTypeOpenAI}
+	channel.SetSetting(dto.ChannelSettings{SyntheticClientHeadersProfile: constant.ClientHeaderFamilyCodex})
+
+	headers, err := buildFetchModelsHeaders(channel, "sk-upstream")
+	require.NoError(t, err)
+	assert.Equal(t, "codex_cli_rs/9.9.9", headers.Get("User-Agent"))
+	assert.Equal(t, "enabled", headers.Get("X-Managed-Probe"))
+
+	overrides := `{"user-agent":"static-client/1","originator":"static-origin","x-upstream-key":"{api_key}","*":"","regex:^x-":""}`
+	channel.HeaderOverride = &overrides
+	headers, err = buildFetchModelsHeaders(channel, "sk-upstream")
+	require.NoError(t, err)
+	assert.Equal(t, "static-client/1", headers.Get("User-Agent"))
+	assert.Equal(t, "static-origin", headers.Get("Originator"))
+	assert.Equal(t, "sk-upstream", headers.Get("X-Upstream-Key"))
+	assert.Equal(t, "Bearer sk-upstream", headers.Get("Authorization"))
+	assert.NotContains(t, headers, "*")
+	assert.NotContains(t, headers, "Regex:^x-")
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
@@ -39,6 +40,9 @@ func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 
 	if oaiError := responsesResp.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
+	}
+	if !responsesResponseHasOutput(gjson.ParseBytes(body)) {
+		return nil, emptyOutputError()
 	}
 
 	chatResult, err := relayconvert.ConvertResponse(c, info, types.RelayFormatOpenAI, &responsesResp)
@@ -72,6 +76,10 @@ func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
 	}
+	if !convertedResponseHasOutput(gjson.ParseBytes(responseBody), info.RelayFormat, usage) {
+		return nil, emptyOutputError()
+	}
+	usage.ResponseValidated = true
 
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 	return usage, nil
@@ -86,6 +94,7 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 	accumulator := relayconvert.NewResponsesBufferedAccumulator()
 	var finalResponse *dto.OpenAIResponsesResponse
 	var streamErr *types.NewAPIError
+	var hasOutput, sawTerminator bool
 
 	scanner := helper.NewStreamScanner(resp.Body)
 	scanner.Split(bufio.ScanLines)
@@ -109,9 +118,11 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 			streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 			break
 		}
+		hasOutput = hasOutput || responsesStreamEventHasOutput(gjson.Parse(data))
 		accumulator.ProcessEvent(&streamResp)
 		switch streamResp.Type {
 		case "response.completed", "response.done", "response.incomplete":
+			sawTerminator = true
 			finalResponse = streamResp.Response
 			if streamResp.Type == "response.incomplete" {
 				if finalResponse == nil {
@@ -139,6 +150,12 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
+	}
+	if !hasOutput {
+		return nil, emptyOutputError()
+	}
+	if !sawTerminator {
+		return nil, types.NewOpenAIError(fmt.Errorf("upstream ended the buffered response without a terminator"), types.ErrorCodeBadResponse, http.StatusBadGateway)
 	}
 	if finalResponse == nil {
 		finalResponse = &dto.OpenAIResponsesResponse{
@@ -180,6 +197,10 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
 	}
+	if !convertedResponseHasOutput(gjson.ParseBytes(responseBody), info.RelayFormat, usage) {
+		return nil, emptyOutputError()
+	}
+	usage.ResponseValidated = true
 
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 	return usage, nil
@@ -203,6 +224,10 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError)
 	}
 	streamErr := (*types.NewAPIError)(nil)
+	var hasOutput, sawTerminator bool
+	var convertedOutput convertedOutputState
+	var preamble outputPreamble
+	var pending []relayconvert.ResponseResult
 
 	if info.RelayFormat == types.RelayFormatClaude && info.ClaudeConvertInfo == nil {
 		info.ClaudeConvertInfo = &relaycommon.ClaudeConvertInfo{LastMessagesType: relaycommon.LastMessageTypeNone}
@@ -292,6 +317,20 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			sr.Stop(streamErr)
 			return
 		}
+		hasOutput = hasOutput || responsesStreamEventHasOutput(gjson.Parse(data))
+		if isResponsesTerminalEvent(streamResp.Type) {
+			sawTerminator = true
+			if !hasOutput {
+				streamErr = emptyOutputError()
+				sr.Stop(streamErr)
+				return
+			}
+			if info.RelayFormat == types.RelayFormatClaude && streamResp.Response != nil {
+				// Claude's final stop reason is emitted with usage. Make it
+				// available before converting a refusal-only terminal event.
+				info.ClaudeConvertInfo.Usage = relayconvert.UsageFromResponsesUsage(streamResp.Response.Usage)
+			}
+		}
 
 		results, err := relayconvert.ConvertStreamResponseChunk(c, info, state, &streamResp)
 		if err != nil {
@@ -299,6 +338,32 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			sr.Stop(streamErr)
 			return
 		}
+		for _, result := range results {
+			if err := convertedOutput.observe(result); err != nil {
+				streamErr = types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
+				sr.Stop(streamErr)
+				return
+			}
+		}
+		if !convertedOutput.hasOutput {
+			// Some converters buffer real tool arguments until completion.
+			// Only a stream with no source output is a metadata preamble.
+			if sawTerminator || (!hasOutput && !preamble.add(data)) {
+				streamErr = emptyOutputError()
+				sr.Stop(streamErr)
+				return
+			}
+			pending = append(pending, results...)
+			return
+		}
+		for _, result := range pending {
+			if !sendStreamResult(result) {
+				sr.Stop(streamErr)
+				return
+			}
+		}
+		pending = nil
+		preamble = outputPreamble{}
 		for _, result := range results {
 			if !sendStreamResult(result) {
 				sr.Stop(streamErr)
@@ -313,11 +378,21 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 	if noStreamErr := info.StreamStatus.NoStreamBodyError(); noStreamErr != nil {
 		return nil, noStreamErr
 	}
+	if !convertedOutput.hasOutput {
+		return nil, emptyOutputError()
+	}
 
 	usage := state.Usage()
 	if usage == nil || usage.TotalTokens == 0 {
 		usage = service.ResponseText2Usage(c, state.UsageText(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 		state.SetUsage(usage)
+	}
+	usage.ResponseValidated = true
+	if !sawTerminator {
+		info.StreamStatus.MarkMissingTerminator()
+	}
+	if !sawTerminator || info.StreamStatus.FailureError() != nil {
+		return usage, nil
 	}
 
 	if info.RelayFormat == types.RelayFormatClaude && info.ClaudeConvertInfo != nil {

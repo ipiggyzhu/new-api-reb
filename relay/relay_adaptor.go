@@ -175,6 +175,9 @@ func adaptorUsage(usage any) (*dto.Usage, *types.NewAPIError) {
 // legitimately report zero completion tokens, which is why this is separate from
 // adaptorUsage rather than folded into it.
 func requireDeliveredOutput(usage *dto.Usage) *types.NewAPIError {
+	if usage != nil && usage.ResponseValidated {
+		return nil
+	}
 	if usage.HasOutput() {
 		return nil
 	}
