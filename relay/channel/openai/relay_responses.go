@@ -165,6 +165,8 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 				return
 			}
 			streamComplete = true
+			// Record completion before the client can close on the terminal event.
+			sr.Done()
 		}
 		if !hasOutput {
 			if !preamble.add(data) {
