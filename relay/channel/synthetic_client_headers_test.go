@@ -48,7 +48,6 @@ func newHeaderOverrideTestContext(t *testing.T) *gin.Context {
 }
 
 func newHeaderOverrideRelayInfo(setting dto.ChannelSettings) *common.RelayInfo {
-	setting.Normalize()
 	return &common.RelayInfo{
 		ChannelMeta: &common.ChannelMeta{
 			ApiType:        constant.APITypeOpenAI,
@@ -105,7 +104,7 @@ func TestStaleSendOriginalRequestKeyIsInert(t *testing.T) {
 func TestSyntheticClientHeadersBlocksEveryLeak(t *testing.T) {
 	c := newHeaderOverrideTestContext(t)
 	info := wildcardPassthroughInfo(dto.ChannelSettings{
-		SyntheticClientHeadersProfile: dto.SyntheticClientHeadersProfileAuto,
+		SyntheticClientHeadersProfile: constant.ClientHeaderFamilyOpenAI,
 	})
 
 	got, err := processHeaderOverride(info, c)
@@ -120,7 +119,7 @@ func TestSyntheticClientHeadersBlocksEveryLeak(t *testing.T) {
 	require.NotEmpty(t, got["user-agent"])
 	assert.NotContains(t, got["user-agent"], "MySecretInternalTool")
 	assert.Contains(t, got["user-agent"], "OpenAI/Python",
-		"an OpenAI-type channel should look like the official SDK")
+		"the selected SDK profile must supply the client identity")
 }
 
 // TestLegacySyntheticClientHeadersBoolStillApplies covers channels saved before
@@ -158,10 +157,8 @@ func TestSyntheticClientHeadersForcedFamilyOverridesChannelType(t *testing.T) {
 	assert.Equal(t, "2023-06-01", got["anthropic-version"])
 }
 
-// TestSyntheticClientHeadersUnknownFamilyFallsBackToAuto: a typo must not be a
-// silent downgrade. Normalize rewrites it to auto, so the worst case is the
-// wrong user-agent — never the caller's headers reaching upstream again.
-func TestSyntheticClientHeadersUnknownFamilyFallsBackToAuto(t *testing.T) {
+// Unknown legacy values retain the former default without enabling passthrough.
+func TestSyntheticClientHeadersUnknownFamilyKeepsLegacyDefault(t *testing.T) {
 	c := newHeaderOverrideTestContext(t)
 	info := wildcardPassthroughInfo(dto.ChannelSettings{
 		SyntheticClientHeadersProfile: "claud",
@@ -174,7 +171,7 @@ func TestSyntheticClientHeadersUnknownFamilyFallsBackToAuto(t *testing.T) {
 		assert.NotEqual(t, value, got[name], "a typo'd family must not reopen %q", name)
 	}
 	assert.Contains(t, got["user-agent"], "OpenAI/Python",
-		"auto resolves from the channel's API type")
+		"unknown legacy values keep the former client profile")
 }
 
 // TestSyntheticClientHeadersBlocksClientHeaderPlaceholder closes the way back in:
@@ -184,7 +181,7 @@ func TestSyntheticClientHeadersUnknownFamilyFallsBackToAuto(t *testing.T) {
 func TestSyntheticClientHeadersBlocksClientHeaderPlaceholder(t *testing.T) {
 	c := newHeaderOverrideTestContext(t)
 	info := newHeaderOverrideRelayInfo(dto.ChannelSettings{
-		SyntheticClientHeadersProfile: dto.SyntheticClientHeadersProfileAuto,
+		SyntheticClientHeadersProfile: constant.ClientHeaderFamilyOpenAI,
 	})
 	info.ChannelMeta.HeadersOverride = map[string]any{
 		"x-smuggled": "{client_header:x-auth-token}",
@@ -205,7 +202,7 @@ func TestSyntheticClientHeadersBlocksClientHeaderPlaceholder(t *testing.T) {
 func TestSyntheticClientHeadersKeepsStaticOverrides(t *testing.T) {
 	c := newHeaderOverrideTestContext(t)
 	info := newHeaderOverrideRelayInfo(dto.ChannelSettings{
-		SyntheticClientHeadersProfile: dto.SyntheticClientHeadersProfileAuto,
+		SyntheticClientHeadersProfile: constant.ClientHeaderFamilyOpenAI,
 	})
 	info.ChannelMeta.HeadersOverride = map[string]any{
 		"x-upstream-tag": "my-static-value",
@@ -217,9 +214,8 @@ func TestSyntheticClientHeadersKeepsStaticOverrides(t *testing.T) {
 	assert.Equal(t, "my-static-value", got["x-upstream-tag"])
 }
 
-// TestSyntheticClientHeadersUsesChannelFamily checks auto follows the channel's
-// API type, so an Anthropic channel is not dressed as a Python SDK.
-func TestSyntheticClientHeadersUsesChannelFamily(t *testing.T) {
+// Directly constructed relay metadata can still carry a legacy "auto" value.
+func TestLegacySyntheticClientHeadersRetainsChannelFamily(t *testing.T) {
 	c := newHeaderOverrideTestContext(t)
 	info := newHeaderOverrideRelayInfo(dto.ChannelSettings{
 		SyntheticClientHeadersProfile: dto.SyntheticClientHeadersProfileAuto,
@@ -233,12 +229,30 @@ func TestSyntheticClientHeadersUsesChannelFamily(t *testing.T) {
 	assert.Equal(t, "2023-06-01", got["anthropic-version"])
 }
 
+func TestMigratedClientProfileStaysFixedWhenChannelTypeChanges(t *testing.T) {
+	c := newHeaderOverrideTestContext(t)
+	settings := dto.ChannelSettings{SyntheticClientHeadersProfile: dto.SyntheticClientHeadersProfileAuto}
+	settings.Normalize(constant.APITypeCodex)
+	require.Equal(t, constant.ClientHeaderFamilyCodex, settings.SyntheticClientHeadersProfile)
+	info := wildcardPassthroughInfo(settings)
+	info.ChannelMeta.ApiType = constant.APITypeAnthropic
+
+	got, err := processHeaderOverride(info, c)
+	require.NoError(t, err)
+	assert.Contains(t, got["user-agent"], "codex_cli_rs/")
+	assert.Equal(t, "codex_cli_rs", got["originator"])
+	assert.NotContains(t, got, "anthropic-version")
+	for name, value := range leakyClientHeaders {
+		assert.NotEqual(t, value, got[name], "an explicit profile must not forward caller header %q", name)
+	}
+}
+
 // TestChannelTestIgnoresSyntheticClientHeaders keeps the channel-test path
 // unchanged: its request is synthetic already and applyTestClientHeaders owns it.
 func TestChannelTestIgnoresSyntheticClientHeaders(t *testing.T) {
 	c := newHeaderOverrideTestContext(t)
 	info := newHeaderOverrideRelayInfo(dto.ChannelSettings{
-		SyntheticClientHeadersProfile: dto.SyntheticClientHeadersProfileAuto,
+		SyntheticClientHeadersProfile: constant.ClientHeaderFamilyCodex,
 	})
 	info.IsChannelTest = true
 

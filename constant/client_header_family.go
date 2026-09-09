@@ -45,3 +45,21 @@ func IsClientHeaderFamily(family string) bool {
 	}
 	return false
 }
+
+// ClientHeaderFamilyForAPIType preserves the former automatic defaults for
+// legacy channel settings and management requests without an explicit profile.
+// A channel's chosen client profile is independent of its protocol type.
+func ClientHeaderFamilyForAPIType(apiType int) string {
+	switch apiType {
+	case APITypeAnthropic, APITypeAws, APITypeVertexAi:
+		return ClientHeaderFamilyClaude
+	case APITypeCodex:
+		return ClientHeaderFamilyCodex
+	case APITypeOpenAI:
+		return ClientHeaderFamilyOpenAI
+	case APITypeGemini:
+		return ClientHeaderFamilyGemini
+	default:
+		return ClientHeaderFamilyGeneric
+	}
+}

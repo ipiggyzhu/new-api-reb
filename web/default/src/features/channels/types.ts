@@ -126,7 +126,7 @@ export interface ChannelSettings {
   pass_through_body_enabled?: boolean
   /** @deprecated superseded by synthetic_client_headers_profile; kept in sync by the backend */
   synthetic_client_headers?: boolean
-  /** '' off, 'auto' to follow the channel type, or a client family name */
+  /** '' off, or an explicit client family; legacy 'auto' is normalized on read/save */
   synthetic_client_headers_profile?: string
   system_prompt?: string
   system_prompt_override?: boolean

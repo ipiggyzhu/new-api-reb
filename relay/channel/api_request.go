@@ -12,7 +12,6 @@ import (
 	"time"
 
 	common2 "github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/constant"
@@ -274,20 +273,9 @@ func processHeaderOverride(info *common.RelayInfo, c *gin.Context) (map[string]s
 	// still satisfies upstreams that gate on the client's shape.
 	syntheticFamily := ""
 	if info.ChannelMeta != nil && !info.IsChannelTest {
-		profile := info.ChannelSetting.SyntheticClientHeadersProfile
-		if profile == "" && info.ChannelSetting.SyntheticClientHeaders {
-			// Normalize maps the legacy bool to auto. Repeating it here means a
-			// RelayInfo assembled without Normalize still gets the profile rather
-			// than silently falling back to forwarding the caller's headers.
-			profile = dto.SyntheticClientHeadersProfileAuto
-		}
-		switch profile {
-		case "":
-		case dto.SyntheticClientHeadersProfileAuto:
-			syntheticFamily = ClientHeaderFamilyForAPIType(info.ChannelMeta.ApiType)
-		default:
-			syntheticFamily = profile
-		}
+		settings := info.ChannelSetting
+		settings.Normalize(info.ChannelMeta.ApiType)
+		syntheticFamily = settings.SyntheticClientHeadersProfile
 	}
 	syntheticHeaders := syntheticFamily != ""
 	if syntheticHeaders {

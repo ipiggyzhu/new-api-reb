@@ -227,12 +227,9 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 	if ok {
 		channelMeta.ChannelSetting = channelSetting
 	}
-	// "Send original request" is a one-click superset of body passthrough:
-	// it forwards the original request body untouched (implies PassThroughBodyEnabled)
-	// and the original client headers (handled in relay/channel/api_request.go).
-	// Normalize() derives the implied flags; GetSetting() already normalizes the
-	// context-stored copy, this guards paths that populate ChannelSetting otherwise.
-	channelMeta.ChannelSetting.Normalize()
+	// GetSetting already resolves legacy client profiles. Also normalize paths
+	// that populate the context directly, without mutating the shared channel.
+	channelMeta.ChannelSetting.Normalize(apiType)
 
 	channelOtherSettings, ok := common.GetContextKeyType[dto.ChannelOtherSettings](c, constant.ContextKeyChannelOtherSetting)
 	if ok {

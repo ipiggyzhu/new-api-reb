@@ -4242,11 +4242,6 @@ export function ChannelMutateDrawer({
                                           <SelectItem value='off'>
                                             {t('Off — send no client profile')}
                                           </SelectItem>
-                                          <SelectItem value='auto'>
-                                            {t(
-                                              'Auto — match the channel type (recommended)'
-                                            )}
-                                          </SelectItem>
                                           <SelectItem value='claude'>
                                             {t('Claude Code CLI')}
                                           </SelectItem>
@@ -4267,7 +4262,7 @@ export function ChannelMutateDrawer({
                                     </Select>
                                     <FormDescription>
                                       {t(
-                                        'Send generated client headers instead of forwarding the caller’s, so no caller credential, IP or user-agent reaches upstream. Auto follows the channel type — an Anthropic channel looks like Claude Code. Pick a family only when the upstream expects a different client than the channel type implies. Client versions come from the header presets in system settings.'
+                                        'Choose the client accepted by the upstream. The gateway generates its User-Agent and other client headers. Client versions can be updated in the header presets in system settings.'
                                       )}
                                     </FormDescription>
                                   </FormItem>

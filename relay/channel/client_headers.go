@@ -8,8 +8,8 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 )
 
-// Synthesized client profiles: the set of headers a real client of a given
-// channel type sends.
+// Synthesized client profiles: the set of headers a client family sends,
+// selected independently of the channel's protocol type.
 //
 // Two callers need these, which is why they live here rather than in
 // controller:
@@ -67,8 +67,7 @@ var openAIClientHeaders = ClientHeaderProfile{
 	"accept-language":             "*",
 }
 
-// codexClientHeaders mirrors the Codex CLI, a distinct client from the Python
-// SDK and the one that talks to /v1/responses.
+// codexClientHeaders mirrors the Codex CLI, a distinct client from the Python SDK.
 var codexClientHeaders = ClientHeaderProfile{
 	"user-agent":      "codex_cli_rs/0.146.0 (Linux 6.8.0; x86_64) terminal",
 	"originator":      "codex_cli_rs",
@@ -101,24 +100,10 @@ const (
 	ClientHeaderFamilyAll     = constant.ClientHeaderFamilyAll
 )
 
-// ClientHeaderFamilyForAPIType names the client family a channel type serves.
-// Dispatching on APIType rather than ChannelType means the Claude and Codex
-// variants land on the right family without enumerating every vendor.
+// ClientHeaderFamilyForAPIType retains the defaults used by legacy settings and
+// management requests without an explicit profile.
 func ClientHeaderFamilyForAPIType(apiType int) string {
-	switch apiType {
-	case constant.APITypeAnthropic, constant.APITypeAws, constant.APITypeVertexAi:
-		return ClientHeaderFamilyClaude
-	case constant.APITypeCodex:
-		// Codex is its own client and its own endpoint (/v1/responses); giving it
-		// the Python SDK's headers would misrepresent both.
-		return ClientHeaderFamilyCodex
-	case constant.APITypeOpenAI:
-		return ClientHeaderFamilyOpenAI
-	case constant.APITypeGemini:
-		return ClientHeaderFamilyGemini
-	default:
-		return ClientHeaderFamilyGeneric
-	}
+	return constant.ClientHeaderFamilyForAPIType(apiType)
 }
 
 func ClientHeaderProfileForFamily(family string) ClientHeaderProfile {

@@ -40,10 +40,8 @@ import {
  * Which client a channel's upstream requests are dressed as.
  *
  * 'off' is the form-level stand-in for the backend's empty string: Radix Select
- * reserves '' as a value, so it cannot be a SelectItem. 'auto' resolves from the
- * channel's own type at request time — an Anthropic channel wears Claude Code's
- * headers — and the named families force one when the channel type cannot say
- * what upstream actually expects.
+ * reserves '' as a value, so it cannot be a SelectItem. Named profiles select
+ * the client the upstream accepts, independently of the channel's API type.
  *
  * The family names are a stored contract shared with the backend
  * (constant.ClientHeaderFamily*) and the channel-test header presets; renaming
@@ -51,7 +49,6 @@ import {
  */
 export const SYNTHETIC_CLIENT_HEADER_PROFILES = [
   'off',
-  'auto',
   'claude',
   'openai',
   'codex',
@@ -63,22 +60,65 @@ export type SyntheticClientHeaderProfile =
   (typeof SYNTHETIC_CLIENT_HEADER_PROFILES)[number]
 
 function parseSyntheticClientHeaderProfile(
-  parsed: Record<string, unknown>
+  parsed: Record<string, unknown>,
+  channelType: number
 ): SyntheticClientHeaderProfile {
   const stored = parsed.synthetic_client_headers_profile
   if (typeof stored === 'string' && stored !== '') {
     const known = SYNTHETIC_CLIENT_HEADER_PROFILES.find(
       (profile) => profile === stored
     )
-    // An unrecognized value means the backend is newer than this bundle, or the
-    // settings blob was hand-edited. Show 'auto' rather than 'off': the backend
-    // normalizes an unknown family to auto too, and rendering 'off' would make
-    // a save silently disable protection the channel actually has.
-    return known ?? 'auto'
+    if (known) return known
+  } else if (!parsed.synthetic_client_headers) {
+    return 'off'
   }
-  // Channels saved before the profile existed carry only the boolean, which
-  // always meant "follow the channel type".
-  return parsed.synthetic_client_headers ? 'auto' : 'off'
+
+  // Compatibility for unmigrated responses: materialize the former default
+  // once when loading the form. Changing the channel type must not change it.
+  // Mirrors common.ChannelType2APIType and constant.ClientHeaderFamilyForAPIType.
+  switch (channelType) {
+    case 14:
+    case 33:
+    case 41:
+      return 'claude'
+    case 57:
+      return 'codex'
+    case 24:
+      return 'gemini'
+    case 4:
+    case 11:
+    case 15:
+    case 16:
+    case 17:
+    case 18:
+    case 20:
+    case 21:
+    case 23:
+    case 25:
+    case 26:
+    case 27:
+    case 34:
+    case 35:
+    case 37:
+    case 38:
+    case 39:
+    case 40:
+    case 42:
+    case 43:
+    case 44:
+    case 45:
+    case 46:
+    case 47:
+    case 48:
+    case 49:
+    case 51:
+    case 53:
+    case 56:
+    case 58:
+      return 'generic'
+    default:
+      return 'openai'
+  }
 }
 
 function parseOptionalJson(value: string | undefined): unknown {
@@ -445,8 +485,10 @@ export function transformChannelToFormDefaults(
         pass_through_body_enabled: parsed.pass_through_body_enabled || false,
         websocket_transport: parsed.websocket_transport || false,
         synthetic_client_headers: parsed.synthetic_client_headers || false,
-        synthetic_client_headers_profile:
-          parseSyntheticClientHeaderProfile(parsed),
+        synthetic_client_headers_profile: parseSyntheticClientHeaderProfile(
+          parsed,
+          channel.type
+        ),
         system_prompt: parsed.system_prompt || '',
         system_prompt_override: parsed.system_prompt_override || false,
       }
@@ -570,7 +612,7 @@ function buildSettingJSON(formData: ChannelFormValues): string {
     // Both fields are written together, always. The backend reads the profile
     // and only falls back to the boolean for rows saved before the profile
     // existed — so writing an empty profile while leaving the boolean set would
-    // resurrect the setting as 'auto' instead of turning it off. Writing the
+    // resurrect the old default profile instead of turning it off. Writing the
     // pair also keeps a rollback to the previous image reading the same state.
     synthetic_client_headers: syntheticProfile !== 'off',
     synthetic_client_headers_profile:
@@ -643,12 +685,15 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     settingsObj.allow_inference_geo = formData.allow_inference_geo === true
   } else {
     if ('disable_store' in settingsObj) delete settingsObj.disable_store
-    if ('allow_safety_identifier' in settingsObj)
+    if ('allow_safety_identifier' in settingsObj) {
       delete settingsObj.allow_safety_identifier
-    if ('allow_include_obfuscation' in settingsObj)
+    }
+    if ('allow_include_obfuscation' in settingsObj) {
       delete settingsObj.allow_include_obfuscation
-    if (formData.type !== 14 && 'allow_inference_geo' in settingsObj)
+    }
+    if (formData.type !== 14 && 'allow_inference_geo' in settingsObj) {
       delete settingsObj.allow_inference_geo
+    }
   }
 
   // Anthropic (type 14): claude_beta_query, allow_inference_geo, allow_speed
@@ -671,14 +716,14 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     settingsObj.upstream_model_update_auto_sync_enabled =
       settingsObj.upstream_model_update_check_enabled === true &&
       formData.upstream_model_update_auto_sync_enabled === true
-    settingsObj.upstream_model_update_ignored_models = Array.from(
-      new Set(
+    settingsObj.upstream_model_update_ignored_models = [
+      ...new Set(
         String(formData.upstream_model_update_ignored_models || '')
           .split(',')
           .map((model) => model.trim())
           .filter(Boolean)
-      )
-    )
+      ),
+    ]
     if (
       !Array.isArray(settingsObj.upstream_model_update_last_detected_models) ||
       settingsObj.upstream_model_update_check_enabled !== true

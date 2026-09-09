@@ -53,13 +53,13 @@ func TestChannelSettingsNormalize(t *testing.T) {
 		{
 			// Channels saved before the profile could be chosen carry only the bool.
 			// Reading it as "off" would drop the protection they were saved with.
-			name: "legacy synthetic bool reads as auto",
+			name: "legacy synthetic bool reads as an explicit profile",
 			input: dto.ChannelSettings{
 				SyntheticClientHeaders: true,
 			},
 			expected: dto.ChannelSettings{
 				SyntheticClientHeaders:        true,
-				SyntheticClientHeadersProfile: dto.SyntheticClientHeadersProfileAuto,
+				SyntheticClientHeadersProfile: constant.ClientHeaderFamilyOpenAI,
 			},
 		},
 		{
@@ -74,20 +74,19 @@ func TestChannelSettingsNormalize(t *testing.T) {
 		},
 		{
 			// A typo must degrade to the wrong user-agent, never to forwarding the
-			// caller's headers again — an unknown family would otherwise fall through
-			// to the generic profile and look like it worked.
-			name: "unknown family falls back to auto",
+			// caller's headers again. Preserve the former default as an explicit family.
+			name: "unknown family keeps the legacy default",
 			input: dto.ChannelSettings{
 				SyntheticClientHeadersProfile: "claud",
 			},
 			expected: dto.ChannelSettings{
 				SyntheticClientHeaders:        true,
-				SyntheticClientHeadersProfile: dto.SyntheticClientHeadersProfileAuto,
+				SyntheticClientHeadersProfile: constant.ClientHeaderFamilyOpenAI,
 			},
 		},
 		{
 			// Turning it off means clearing both fields. Writing an empty profile
-			// while leaving the deprecated bool set would resurrect it as auto, which
+			// while leaving the deprecated bool set would resurrect the default, which
 			// is why buildSettingJSON on the frontend always writes the pair.
 			name: "both synthetic fields cleared stays off",
 			input: dto.ChannelSettings{
@@ -101,10 +100,10 @@ func TestChannelSettingsNormalize(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			settings := testCase.input
-			settings.Normalize()
+			settings.Normalize(constant.APITypeOpenAI)
 			require.Equal(t, testCase.expected, settings)
 
-			settings.Normalize()
+			settings.Normalize(constant.APITypeOpenAI)
 			assert.Equal(t, testCase.expected, settings, "Normalize must be idempotent")
 		})
 	}

@@ -428,12 +428,18 @@ func (channel *Channel) GetAutoBan() bool {
 }
 
 func (channel *Channel) Save() error {
+	if _, err := channel.normalizeClientHeaderProfile(DB); err != nil && !errors.Is(err, errInvalidChannelClientSettings) {
+		return err
+	}
 	return DB.Save(channel).Error
 }
 
 func (channel *Channel) SaveWithoutKey() error {
 	if channel.Id == 0 {
 		return errors.New("channel ID is 0")
+	}
+	if _, err := channel.normalizeClientHeaderProfile(DB); err != nil && !errors.Is(err, errInvalidChannelClientSettings) {
+		return err
 	}
 	return DB.Omit("key").Save(channel).Error
 }
@@ -511,6 +517,11 @@ func GetChannelById(id int, selectAll bool) (*Channel, error) {
 func BatchInsertChannels(channels []Channel) error {
 	if len(channels) == 0 {
 		return nil
+	}
+	for i := range channels {
+		if _, err := channels[i].normalizeClientHeaderProfile(DB); err != nil && !errors.Is(err, errInvalidChannelClientSettings) {
+			return err
+		}
 	}
 	tx := DB.Begin()
 	if tx.Error != nil {
@@ -642,6 +653,9 @@ func (channel *Channel) GetStatusCodeMapping() string {
 }
 
 func (channel *Channel) Insert() error {
+	if _, err := channel.normalizeClientHeaderProfile(DB); err != nil && !errors.Is(err, errInvalidChannelClientSettings) {
+		return err
+	}
 	var err error
 	err = DB.Create(channel).Error
 	if err != nil {
@@ -652,6 +666,9 @@ func (channel *Channel) Insert() error {
 }
 
 func (channel *Channel) Update() error {
+	if _, err := channel.normalizeClientHeaderProfile(DB); err != nil && !errors.Is(err, errInvalidChannelClientSettings) {
+		return err
+	}
 	// If this is a multi-key channel, recalculate MultiKeySize based on the current key list to avoid inconsistency after editing keys
 	if channel.ChannelInfo.IsMultiKey {
 		var keyStr string
@@ -1213,11 +1230,14 @@ func (channel *Channel) GetSetting() dto.ChannelSettings {
 			setting = dto.ChannelSettings{}
 		}
 	}
-	setting.Normalize()
+	apiType, _ := common.ChannelType2APIType(channel.Type)
+	setting.Normalize(apiType)
 	return setting
 }
 
 func (channel *Channel) SetSetting(setting dto.ChannelSettings) {
+	apiType, _ := common.ChannelType2APIType(channel.Type)
+	setting.Normalize(apiType)
 	settingBytes, err := common.Marshal(setting)
 	if err != nil {
 		common.SysLog(fmt.Sprintf("failed to marshal setting: channel_id=%d, error=%v", channel.Id, err))

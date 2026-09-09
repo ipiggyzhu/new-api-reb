@@ -28,8 +28,8 @@ type ChannelSettings struct {
 
 	// SyntheticClientHeaders is the pre-profile form of the setting below: a
 	// plain on/off that always meant "follow the channel type". Kept for channels
-	// saved before the profile could be chosen, and kept in sync by Normalize so
-	// anything still reading the bool sees the truth.
+	// saved before the profile could be chosen. Normalize resolves those old
+	// settings to an explicit profile and keeps the bool in sync.
 	//
 	// Deprecated: read SyntheticClientHeadersProfile.
 	SyntheticClientHeaders bool `json:"synthetic_client_headers,omitempty"`
@@ -49,12 +49,10 @@ type ChannelSettings struct {
 	// upstream sees only the synthesized profile. It still satisfies the reason
 	// passthrough existed — upstreams that gate on looking like a real client.
 	//
-	// Values: "" (off), SyntheticClientHeadersProfileAuto to follow the channel's
-	// own API type, or a constant.ClientHeaderFamily* value to force one. Auto is
-	// what an operator normally wants, since an Anthropic channel should look
-	// like Claude Code rather than the Python SDK. Forcing a family covers what
-	// the channel type cannot express — an OpenAI-compatible endpoint that is
-	// really a Claude relay and gates on claude-cli's user-agent.
+	// Values: "" (off), or a constant.ClientHeaderFamily* value chosen for the
+	// client the upstream accepts. The channel's API type describes its protocol,
+	// not which client identity its provider allows. Legacy "auto" values are
+	// resolved to their former default before storage and use.
 	SyntheticClientHeadersProfile string `json:"synthetic_client_headers_profile,omitempty"`
 
 	// WebsocketTransport opts this channel's /v1/responses traffic onto the
@@ -73,28 +71,25 @@ type ChannelSettings struct {
 	WebsocketTransport bool `json:"websocket_transport,omitempty"`
 }
 
-// SyntheticClientHeadersProfileAuto derives the profile from the channel's API
-// type at request time. It is not a family name: resolving it needs the
-// APIType -> family mapping, which lives in relay/channel.
+// SyntheticClientHeadersProfileAuto is accepted only for legacy configuration.
+// Normalize materializes it as an explicit client family; it is no longer a
+// selectable profile.
 const SyntheticClientHeadersProfileAuto = "auto"
 
 // Normalize derives implied flags so every copy of ChannelSettings is
 // self-consistent regardless of where it is read from. Call this at the source
 // (Channel.GetSetting) so both the context-stored copy and the RelayInfo copy
 // agree.
-func (s *ChannelSettings) Normalize() {
-	// The profile setting used to be a bool that always meant "auto". Channels
-	// saved then must not lose their protection on the next read.
-	if s.SyntheticClientHeadersProfile == "" && s.SyntheticClientHeaders {
-		s.SyntheticClientHeadersProfile = SyntheticClientHeadersProfileAuto
+func (s *ChannelSettings) Normalize(apiType int) {
+	if s.SyntheticClientHeadersProfile == "off" {
+		s.SyntheticClientHeadersProfile = ""
+		s.SyntheticClientHeaders = false
 	}
-	// An unrecognized family would fall through to the generic profile, which
-	// looks like it worked. Fall back to auto instead: the failure mode of a typo
-	// should be "wrong user-agent", never "caller headers reach upstream again".
-	if profile := s.SyntheticClientHeadersProfile; profile != "" &&
-		profile != SyntheticClientHeadersProfileAuto &&
-		!constant.IsClientHeaderFamily(profile) {
-		s.SyntheticClientHeadersProfile = SyntheticClientHeadersProfileAuto
+	// Old booleans, "auto", and unknown values retain the client headers they
+	// generated before removal. Never turn a configured profile into passthrough.
+	if (s.SyntheticClientHeadersProfile != "" || s.SyntheticClientHeaders) &&
+		!constant.IsClientHeaderFamily(s.SyntheticClientHeadersProfile) {
+		s.SyntheticClientHeadersProfile = constant.ClientHeaderFamilyForAPIType(apiType)
 	}
 	// Keep the deprecated bool in step so a reader of either field agrees.
 	s.SyntheticClientHeaders = s.SyntheticClientHeadersProfile != ""
