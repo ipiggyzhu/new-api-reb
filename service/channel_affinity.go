@@ -967,8 +967,26 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 		// channel that stays saturated does eventually lose the key.
 		return
 	}
-	if setting.SwitchOnSuccess {
-		if successChannelID := c.GetInt("channel_id"); successChannelID > 0 {
+	// channelID is the channel the distributor picked *before* the relay ran, so on
+	// a request that failed over it names a channel that did not serve anything.
+	// "channel_id" is re-stamped by SetupContextForSelectedChannel on every retry
+	// and therefore names the channel that actually answered.
+	//
+	// Which of the two to pin depends on whether there was a pin in play at all:
+	//
+	//   - Affinity chose this request's channel (pinned channel recorded). Moving
+	//     the key to the channel that absorbed the failure is exactly what
+	//     SwitchOnSuccess governs, so it decides. With it off the pin stays on its
+	//     channel and this write only refreshes the TTL.
+	//   - Affinity did not choose it (cache miss, or no entry yet). There is no pin
+	//     to stay loyal to and nothing for SwitchOnSuccess to switch away from; the
+	//     key is being established now. Pinning the pre-relay pick here writes a
+	//     channel that just failed, and the next request with this key walks
+	//     straight into it, fails, releases the pin, and the key never settles —
+	//     "affinity is enabled but does nothing". The successful channel wins
+	//     regardless of the setting.
+	if successChannelID := c.GetInt("channel_id"); successChannelID > 0 {
+		if setting.SwitchOnSuccess || c.GetInt(ginKeyChannelAffinityPinnedChannel) <= 0 {
 			channelID = successChannelID
 		}
 	}

@@ -172,8 +172,7 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 }
 
 // StreamProducedNoContentError reports an upstream that opened a Claude stream
-// and then ended it without ever answering: no text, no thinking, no tool call,
-// and no message_delta to close the message off.
+// and then ended it without ever answering: no text, no thinking, no tool call.
 //
 // Left alone this is invisible. HandleStreamFinalResponse fills the missing
 // usage from the local estimate and writes the terminator, so the caller
@@ -182,10 +181,28 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 // nothing to say. It is not the same fault as StreamEndReasonNoStreamBody: the
 // body here really was a stream, it just carried nothing but its preamble.
 //
+// A closing message_delta does not count as an answer. It used to: the guard
+// exempted it on the reasoning that an upstream which closed the message off
+// had finished saying whatever it had to say, even if this gateway decoded
+// nothing worth counting. Production disproved that. A channel whose upstream
+// credit had run out replied to 14 consecutive requests with the complete
+// envelope and nothing inside it — message_start, message_delta carrying
+// stop_reason=end_turn and a fabricated output_tokens=1, message_stop — which
+// satisfied every check at once: this guard through Done, the truncation
+// verdict through SawTerminator, and requireDeliveredOutput through that
+// invented token. All 14 were billed at full prompt price, scored as wins, and
+// refreshed the affinity pin that kept sending the next request back.
+//
+// The signal that separates the two cases is the content block, not the
+// terminator. Every Claude content block opens with content_block_start, so an
+// upstream that transmitted anything at all — including a block type this
+// gateway does not decode — sets HasContent there. Zero content blocks means
+// zero content, whatever the message_delta claims about how it ended.
+//
 // A client that disconnected is excluded. The stream ends the same way, but the
 // upstream is not at fault and must not be demoted for it.
 func StreamProducedNoContentError(info *relaycommon.RelayInfo, claudeInfo *ClaudeResponseInfo) *types.NewAPIError {
-	if info == nil || claudeInfo == nil || claudeInfo.Done || claudeInfo.HasContent {
+	if info == nil || claudeInfo == nil || claudeInfo.HasContent {
 		return nil
 	}
 	if info.StreamStatus != nil && info.StreamStatus.EndReason == relaycommon.StreamEndReasonClientGone {

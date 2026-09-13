@@ -426,3 +426,66 @@ func TestRecordChannelAffinityRepinsWhenTheChannelWasNotSaturated(t *testing.T) 
 	require.True(t, found)
 	assert.Equal(t, succeededChannel, preferred, "SwitchOnSuccess must still follow a real channel switch")
 }
+
+// A cold key is established by whichever channel actually answered, no matter how
+// SwitchOnSuccess is set. The distributor passes the channel it picked before the
+// relay ran, so on a request that failed over to another channel that argument
+// names a channel which served nothing; pinning it made the next request with this
+// key walk into the failing channel, fault, release the pin, and start over — an
+// affinity cache that is enabled and never accumulates anything.
+//
+// SwitchOnSuccess is off here because that is the configuration where the old code
+// took the pre-relay pick verbatim, and it is the one running in production.
+func TestRecordChannelAffinityPinsTheSucceedingChannelOnAColdKey(t *testing.T) {
+	const (
+		model            = "claude-opus-5"
+		userID           = "user-affinity-cold-key-failover"
+		firstPick        = 91
+		succeededChannel = 92
+	)
+
+	useChannelAffinityRulesForTest(t, false, claudeCliTraceRuleForTest())
+
+	// Cache miss: affinity selected nothing, so MarkChannelAffinityUsed never runs
+	// and no pinned channel is recorded on the request.
+	cold := newClaudeMessagesRequestForTest(t, model, userID)
+	_, found := GetPreferredChannelByAffinity(cold, model, "default")
+	require.False(t, found, "precondition: the key is cold")
+
+	// The relay failed over from firstPick to succeededChannel, which re-stamps
+	// "channel_id"; the distributor still calls RecordChannelAffinity with firstPick.
+	cold.Set("channel_id", succeededChannel)
+	SetChannelAffinityRelayOutcome(cold, true)
+	RecordChannelAffinity(cold, firstPick)
+
+	assert.Equal(t, succeededChannel, affinityPinnedChannelForTest(t, model, userID),
+		"a cold key must be pinned to the channel that answered, not to the failed first pick")
+}
+
+// The counterpart: once a pin exists and affinity actually used it, walking the key
+// to another channel is exactly what SwitchOnSuccess governs. With it off the pin
+// must stay where it is even though a fallback channel is what succeeded.
+func TestRecordChannelAffinityKeepsAnExistingPinWhenSwitchOnSuccessIsOff(t *testing.T) {
+	const (
+		model            = "claude-opus-5"
+		userID           = "user-affinity-no-switch"
+		pinnedChannel    = 93
+		succeededChannel = 94
+	)
+
+	useChannelAffinityRulesForTest(t, false, claudeCliTraceRuleForTest())
+	pinChannelByAffinityForTest(t, model, userID, pinnedChannel)
+
+	switched := newClaudeMessagesRequestForTest(t, model, userID)
+	preferred, found := GetPreferredChannelByAffinity(switched, model, "default")
+	require.True(t, found)
+	require.Equal(t, pinnedChannel, preferred)
+	MarkChannelAffinityUsed(switched, "default", preferred)
+
+	switched.Set("channel_id", succeededChannel)
+	SetChannelAffinityRelayOutcome(switched, true)
+	RecordChannelAffinity(switched, pinnedChannel)
+
+	assert.Equal(t, pinnedChannel, affinityPinnedChannelForTest(t, model, userID),
+		"with SwitchOnSuccess off an established pin must not follow the fallback channel")
+}

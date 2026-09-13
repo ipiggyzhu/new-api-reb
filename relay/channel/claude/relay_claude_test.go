@@ -385,6 +385,7 @@ func TestStreamProducedNoContentError(t *testing.T) {
 
 	text := "hi"
 	toolArgs := `{"q":`
+	stopEndTurn := "end_turn"
 	messageStart := &dto.ClaudeResponse{
 		Type:    "message_start",
 		Message: &dto.ClaudeMediaMessage{Usage: &dto.ClaudeUsage{InputTokens: 49795, OutputTokens: 1}},
@@ -448,12 +449,28 @@ func TestStreamProducedNoContentError(t *testing.T) {
 			wantEmpty: false,
 		},
 		{
-			// message_delta closes the message off, so the upstream did answer even
-			// if this gateway found nothing in it worth counting.
-			name: "message_delta means upstream finished",
+			// The shape an upstream out of credit returns: the whole envelope and
+			// nothing inside it. It closed the message off and even declared a
+			// token it never sent, which is exactly why the terminator cannot be
+			// what decides this — the content block is.
+			name: "message_delta without any content block is still empty",
 			events: []*dto.ClaudeResponse{
 				messageStart,
-				{Type: "message_delta", Usage: &dto.ClaudeUsage{OutputTokens: 12}},
+				{Type: "message_delta", Delta: &dto.ClaudeMediaMessage{StopReason: &stopEndTurn}, Usage: &dto.ClaudeUsage{OutputTokens: 1}},
+				{Type: "message_stop"},
+			},
+			endReason: relaycommon.StreamEndReasonEOF,
+			wantEmpty: true,
+		},
+		{
+			// The counterpart: a content block did arrive before the terminator, so
+			// the upstream answered and the message is complete.
+			name: "content before message_delta is a complete answer",
+			events: []*dto.ClaudeResponse{
+				messageStart,
+				{Type: "content_block_delta", Delta: &dto.ClaudeMediaMessage{Text: &text}},
+				{Type: "message_delta", Delta: &dto.ClaudeMediaMessage{StopReason: &stopEndTurn}, Usage: &dto.ClaudeUsage{OutputTokens: 12}},
+				{Type: "message_stop"},
 			},
 			endReason: relaycommon.StreamEndReasonEOF,
 			wantEmpty: false,
