@@ -143,6 +143,13 @@ export function useChannelUpstreamUpdates(refresh: () => Promise<void>) {
             }
           )
         )
+        if (data?.rejected_models?.length) {
+          toast.warning(
+            t('{{rejected}} models failed validation and remain pending', {
+              rejected: data.rejected_models.length,
+            })
+          )
+        }
         closeModal()
         await refresh()
       } catch (e: unknown) {
@@ -188,6 +195,13 @@ export function useChannelUpstreamUpdates(refresh: () => Promise<void>) {
           }
         )
       )
+      if (data?.rejected_models) {
+        toast.warning(
+          t('{{rejected}} models failed validation and remain pending', {
+            rejected: data.rejected_models,
+          })
+        )
+      }
       await refresh()
     } catch (e: unknown) {
       const err = e as {

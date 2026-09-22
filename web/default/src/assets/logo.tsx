@@ -30,14 +30,15 @@ export function Logo({ className, ...props }: SVGProps<SVGSVGElement>) {
       width='24'
       fill='none'
       stroke='currentColor'
-      strokeWidth='2'
+      strokeWidth='1.5'
       strokeLinecap='round'
       strokeLinejoin='round'
       className={cn('size-6', className)}
       {...props}
     >
-      <title>New API</title>
-      <path d='M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3' />
+      <title>Aurum</title>
+      <path d='M12 2.5 20.2 7.25v9.5L12 21.5 3.8 16.75v-9.5Z' />
+      <path d='m8.5 16 3.5-8 3.5 8M9.9 13h4.2' />
     </svg>
   )
 }

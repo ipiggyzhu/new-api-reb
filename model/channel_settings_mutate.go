@@ -97,11 +97,17 @@ func MutateChannelSettings(channelId int, mutate func(*dto.ChannelOtherSettings)
 // same models forever. models is passed as a value rather than mutated, because
 // the caller computes it from the diff it has already validated.
 //
+// modelMapping is the same story for the `model_mapping` column: a model adopted
+// under a name that differs from the upstream id is only usable together with
+// the mapping that turns it back, so the two land together. nil leaves the
+// column untouched.
+//
 // Abilities are NOT rebuilt here. The caller does that after this returns, since
 // it owns the transaction semantics that rebuild needs.
 func MutateChannelSettingsWithModels(
 	channelId int,
 	models string,
+	modelMapping *string,
 	mutate func(*dto.ChannelOtherSettings) bool,
 ) error {
 	if channelId <= 0 {
@@ -123,13 +129,18 @@ func MutateChannelSettingsWithModels(
 	}
 	channel.SetOtherSettings(settings)
 	channel.Models = models
+	columns := map[string]interface{}{
+		"settings": channel.OtherSettings,
+		"models":   models,
+	}
+	if modelMapping != nil {
+		channel.ModelMapping = modelMapping
+		columns["model_mapping"] = *modelMapping
+	}
 
 	if err := DB.Model(&Channel{}).
 		Where("id = ?", channelId).
-		Updates(map[string]interface{}{
-			"settings": channel.OtherSettings,
-			"models":   models,
-		}).Error; err != nil {
+		Updates(columns).Error; err != nil {
 		return fmt.Errorf("persist settings and models for channel %d: %w", channelId, err)
 	}
 

@@ -261,3 +261,32 @@ func TestMarkChannelAffinityChannelFaultIgnoresInvalidInput(t *testing.T) {
 	_, exists := ctx.Get(ginKeyChannelAffinityFaultChannel)
 	assert.False(t, exists, "an invalid channel id must not be recorded as a fault")
 }
+
+// TestChannelAffinityReleasedWhenPinnedChannelFaultsAndFallbackSucceeds pins
+// the SwitchOnSuccess=false interaction: the pinned channel faulted, a fallback
+// answered, and the request as a whole succeeded. Keeping the pin here would
+// refresh its TTL on a channel that just failed, so the next request walks
+// straight back into it. The pin must be released, not kept and not moved.
+func TestChannelAffinityReleasedWhenPinnedChannelFaultsAndFallbackSucceeds(t *testing.T) {
+	const (
+		model            = "claude-opus-5"
+		userID           = "user-fault-then-fallback"
+		pinnedChannel    = 93
+		succeededChannel = 94
+	)
+	useChannelAffinityRulesForTest(t, false, claudeCliTraceRuleForTest())
+	pinChannelByAffinityForTest(t, model, userID, pinnedChannel)
+
+	ctx := newClaudeMessagesRequestForTest(t, model, userID)
+	preferred, found := GetPreferredChannelByAffinity(ctx, model, "default")
+	require.True(t, found)
+	require.Equal(t, pinnedChannel, preferred)
+	MarkChannelAffinityUsed(ctx, "default", preferred)
+	MarkChannelAffinityChannelFault(ctx, preferred)
+	ctx.Set("channel_id", succeededChannel)
+	SetChannelAffinityRelayOutcome(ctx, true)
+	RecordChannelAffinity(ctx, pinnedChannel)
+
+	assert.Zero(t, affinityPinnedChannelForTest(t, model, userID),
+		"a pinned channel that faulted must lose its pin even when a fallback made the request succeed")
+}

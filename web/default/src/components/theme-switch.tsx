@@ -34,10 +34,12 @@ export function ThemeSwitch() {
   const { t } = useTranslation()
   const { theme, setTheme } = useTheme()
 
-  /* Update theme-color meta tag
-   * when theme is updated */
+  /* Update theme-color meta tag when theme is updated.
+   * Both values are dark because Aurum keeps a black canvas in both modes —
+   * `light` is the charcoal tier, `dark` the reference obsidian tier.
+   * These hex values mirror `--background` in styles/theme.css. */
   useEffect(() => {
-    const themeColor = theme === 'dark' ? '#020817' : '#fff'
+    const themeColor = theme === 'light' ? '#121214' : '#0a0a0b'
     const metaThemeColor = document.querySelector("meta[name='theme-color']")
     if (metaThemeColor) metaThemeColor.setAttribute('content', themeColor)
   }, [theme])

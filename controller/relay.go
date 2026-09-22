@@ -322,6 +322,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 		errorLogged = true
+		// The upstream request is bound to the caller's context, so a caller that
+		// hung up surfaces here as a do_request_failed 500 from whichever channel
+		// happened to be serving it. That is not the channel's fault, and there is
+		// nobody left to retry for: reporting it would demote a healthy channel and
+		// release its affinity pin, and each retry would fail the same way on the
+		// next channel and fault that one too.
+		if c.Request.Context().Err() != nil {
+			break
+		}
 		// Report this attempt, not just the request's final outcome. The
 		// distributor's post-c.Next() hook only ever sees the last channel, so
 		// without a report here a channel that failed and was retried away from

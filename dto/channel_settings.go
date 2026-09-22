@@ -128,6 +128,10 @@ type ChannelOtherSettings struct {
 	UpstreamModelUpdateLastDetectedModels []string      `json:"upstream_model_update_last_detected_models,omitempty"` // 上次检测到的可加入模型
 	UpstreamModelUpdateLastRemovedModels  []string      `json:"upstream_model_update_last_removed_models,omitempty"`  // 上次检测到的可删除模型
 	UpstreamModelUpdateIgnoredModels      []string      `json:"upstream_model_update_ignored_models,omitempty"`       // 手动忽略的模型
+	// 检测到的候选模型里，哪些是从带厂商前缀的上游 id 归一化来的：键是加入渠道
+	// 的裸名（gpt-4o），值是上游原名（openai/gpt-4o）。应用时据此写入模型映射，
+	// 让请求转回上游原名；候选被加入或忽略后对应条目即删除。
+	UpstreamModelUpdatePendingModelMapping map[string]string `json:"upstream_model_update_pending_model_mapping,omitempty"`
 	// 模型验证健康度。仅记录当前处于失败状态的模型，验证成功即删除条目，
 	// 所以正常情况下为空，不会撑大 settings 列。
 	UpstreamModelUpdateModelHealth map[string]ModelHealthState `json:"upstream_model_update_model_health,omitempty"`

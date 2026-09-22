@@ -103,7 +103,7 @@ export function PerformanceOverview() {
 
   if (!loading && !hasData) {
     return (
-      <div className='text-muted-foreground overflow-hidden rounded-lg border px-4 py-3 text-center text-xs'>
+      <div className='text-muted-foreground overflow-hidden rounded-lg border px-4 py-3 text-center text-xs sm:py-3.5'>
         {t('No performance data available')}
       </div>
     )

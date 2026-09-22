@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -11,14 +12,19 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 	"gorm.io/gorm"
 )
 
@@ -112,29 +118,332 @@ func TestNormalizeChannelModelMapping(t *testing.T) {
 }
 
 func TestCollectPendingUpstreamModelChangesFromModels_WithModelMapping(t *testing.T) {
-	pendingAddModels, pendingRemoveModels := collectPendingUpstreamModelChangesFromModels(
+	pendingAddModels, pendingRemoveModels, pendingMapping := collectPendingUpstreamModelChangesFromModels(
 		[]string{"alias-model", "gpt-4o", "stale-model"},
 		[]string{"gpt-4o", "gpt-4.1", "mapped-target"},
 		[]string{"gpt-4.1"},
 		map[string]string{
 			"alias-model": "mapped-target",
 		},
+		true,
 	)
 
 	require.Equal(t, []string{}, pendingAddModels)
 	require.Equal(t, []string{"stale-model"}, pendingRemoveModels)
+	assert.Nil(t, pendingMapping)
 }
 
 func TestCollectPendingUpstreamModelChangesFromModels_WithIgnoredRegexPatterns(t *testing.T) {
-	pendingAddModels, pendingRemoveModels := collectPendingUpstreamModelChangesFromModels(
+	pendingAddModels, pendingRemoveModels, _ := collectPendingUpstreamModelChangesFromModels(
 		[]string{"gpt-4o"},
 		[]string{"gpt-4o", "claude-3-5-sonnet", "sora-video", "gpt-4.1"},
 		[]string{"regex:^sora-.*$", "gpt-4.1"},
 		nil,
+		true,
 	)
 
 	require.Equal(t, []string{"claude-3-5-sonnet"}, pendingAddModels)
 	require.Equal(t, []string{}, pendingRemoveModels)
+}
+
+// TestCollectPendingUpstreamModelChangesFromModels_StripsVendorPrefixes is the
+// user-facing contract for aggregator upstreams: openai/gpt-4o is adopted as
+// gpt-4o with a mapping back to the upstream id, ambiguous names keep their
+// prefix, and an admin who already serves the prefixed spelling is left alone.
+func TestCollectPendingUpstreamModelChangesFromModels_StripsVendorPrefixes(t *testing.T) {
+	upstream := []string{
+		"openai/gpt-4o",
+		"anthropic/claude-sonnet-4-20250514",
+		"openai/gpt-4o-mini",
+		"gpt-4o-mini", // bare id also listed: the prefixed one keeps its prefix
+		"openai/o3",
+		"azure/o3", // two vendors collapse to o3: neither is stripped
+		"google/gemini-2.5-pro:free",
+		"deepseek/deepseek-chat",
+		"already/served",
+	}
+
+	t.Run("enabled", func(t *testing.T) {
+		add, remove, mapping := collectPendingUpstreamModelChangesFromModels(
+			[]string{"already/served", "deepseek-chat"},
+			upstream,
+			[]string{"google/gemini-2.5-pro:free"},
+			nil,
+			true,
+		)
+		assert.Equal(t, []string{
+			"gpt-4o",
+			"claude-sonnet-4-20250514",
+			"openai/gpt-4o-mini",
+			"gpt-4o-mini",
+			"openai/o3",
+			"azure/o3",
+		}, add)
+		assert.Equal(t, map[string]string{
+			"gpt-4o":                   "openai/gpt-4o",
+			"claude-sonnet-4-20250514": "anthropic/claude-sonnet-4-20250514",
+		}, mapping, "only stripped candidates carry a mapping entry")
+		assert.Equal(t, []string{}, remove,
+			"deepseek-chat is covered by deepseek/deepseek-chat and already/served is listed verbatim")
+	})
+
+	t.Run("ignore rules match the bare name too", func(t *testing.T) {
+		add, _, _ := collectPendingUpstreamModelChangesFromModels(
+			nil, []string{"openai/gpt-4o", "openai/gpt-4.1"}, []string{"gpt-4o"}, nil, true,
+		)
+		assert.Equal(t, []string{"gpt-4.1"}, add)
+	})
+
+	t.Run("disabled keeps upstream ids verbatim", func(t *testing.T) {
+		add, _, mapping := collectPendingUpstreamModelChangesFromModels(
+			nil, []string{"openai/gpt-4o"}, nil, nil, false,
+		)
+		assert.Equal(t, []string{"openai/gpt-4o"}, add)
+		assert.Nil(t, mapping)
+	})
+}
+
+// TestMergeChannelModelMappingKeepsAdminEntries pins that the task only ever adds
+// mapping entries: an admin's own redirect for the same name wins, and a
+// hand-edited column that does not parse is left exactly as it is.
+func TestMergeChannelModelMappingKeepsAdminEntries(t *testing.T) {
+	existing := `{"gpt-4o":"admin/gpt-4o","alias":"target"}`
+	channel := &model.Channel{Id: 1, ModelMapping: &existing}
+
+	merged, ok := mergeChannelModelMapping(channel, map[string]string{
+		"gpt-4o":  "openai/gpt-4o",
+		"gpt-4.1": "openai/gpt-4.1",
+	})
+	require.True(t, ok)
+	var parsed map[string]string
+	require.NoError(t, common.UnmarshalJsonStr(*merged, &parsed))
+	assert.Equal(t, map[string]string{
+		"gpt-4o":  "admin/gpt-4o",
+		"alias":   "target",
+		"gpt-4.1": "openai/gpt-4.1",
+	}, parsed)
+
+	_, ok = mergeChannelModelMapping(channel, map[string]string{"gpt-4o": "openai/gpt-4o"})
+	assert.False(t, ok, "nothing new to add must not rewrite the column")
+
+	broken := `{"gpt-4o": `
+	channel.ModelMapping = &broken
+	_, ok = mergeChannelModelMapping(channel, map[string]string{"gpt-4.1": "openai/gpt-4.1"})
+	assert.False(t, ok, "an unparseable admin mapping must not be replaced")
+}
+
+// upstreamValidationFixture stands up everything a real validation request
+// needs — SQLite tables, a root user, model ratios, the HTTP client — plus a fake
+// upstream whose /v1/models lists two prefixed ids and whose chat endpoint only
+// answers one of them with content. It records the model names the chat
+// endpoint was asked for, which is how the tests see the mapping being applied.
+type upstreamValidationFixture struct {
+	db             *gorm.DB
+	server         *httptest.Server
+	mu             sync.Mutex
+	requestedModel []string
+}
+
+func newUpstreamValidationFixture(t *testing.T) *upstreamValidationFixture {
+	t.Helper()
+	originalMode, originalRedis := gin.Mode(), common.RedisEnabled
+	originalLogConsume, originalCountToken := common.LogConsumeEnabled, constant.CountToken
+	originalRatios := ratio_setting.ModelRatio2JSONString()
+	originalMemoryCache := common.MemoryCacheEnabled
+	t.Cleanup(func() {
+		gin.SetMode(originalMode)
+		common.RedisEnabled = originalRedis
+		common.LogConsumeEnabled, constant.CountToken = originalLogConsume, originalCountToken
+		common.MemoryCacheEnabled = originalMemoryCache
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(originalRatios))
+	})
+	initModelListColumnNames(t)
+	db := setupErrorLogTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
+	common.LogConsumeEnabled, constant.CountToken = false, false
+	common.MemoryCacheEnabled = false
+	ratios := ratio_setting.GetModelRatioCopy()
+	ratios["gpt-4o"] = 1
+	ratios["broken"] = 1
+	ratioJSON, err := common.Marshal(ratios)
+	require.NoError(t, err)
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(string(ratioJSON)))
+	service.InitHttpClient()
+	root := model.User{Id: 1, Username: "root", Role: common.RoleRootUser, Group: "default", Quota: 100_000, Status: common.UserStatusEnabled}
+	require.NoError(t, db.Create(&root).Error)
+
+	f := &upstreamValidationFixture{db: db}
+	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"openai/gpt-4o"},{"id":"openai/broken"}]}`)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		requested := gjson.GetBytes(body, "model").String()
+		f.mu.Lock()
+		f.requestedModel = append(f.requestedModel, requested)
+		f.mu.Unlock()
+		// The broken model answers 200 with a well-formed, empty reply and a
+		// padded token count: the shape that used to pass as a working model.
+		content := "ok"
+		if requested == "openai/broken" {
+			content = ""
+		}
+		_, _ = io.WriteString(w, `{"id":"probe","object":"chat.completion","model":"`+requested+`","choices":[{"index":0,"message":{"role":"assistant","content":"`+content+`"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	t.Cleanup(f.server.Close)
+	return f
+}
+
+func (f *upstreamValidationFixture) createChannel(t *testing.T, settings dto.ChannelOtherSettings) *model.Channel {
+	t.Helper()
+	channel := &model.Channel{
+		Id:      31,
+		Name:    "aggregator",
+		Type:    constant.ChannelTypeOpenAI,
+		Key:     "sk-upstream",
+		Status:  common.ChannelStatusEnabled,
+		BaseURL: &f.server.URL,
+		Models:  "gpt-3.5-turbo",
+		Group:   "default",
+	}
+	channel.SetOtherSettings(settings)
+	require.NoError(t, f.db.Create(channel).Error)
+	return channel
+}
+
+func (f *upstreamValidationFixture) requested() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.requestedModel...)
+}
+
+// TestApplyChannelUpstreamModelUpdatesValidatesSelectedModels is the fix for
+// "models nobody can use get added": the manual apply endpoint now probes each
+// selected candidate, through the mapping it will be adopted with, and only
+// adopts the ones that answer with content. The rejected one stays staged with
+// its mapping so the admin can see it and retry.
+func TestApplyChannelUpstreamModelUpdatesValidatesSelectedModels(t *testing.T) {
+	f := newUpstreamValidationFixture(t)
+	channel := f.createChannel(t, dto.ChannelOtherSettings{
+		UpstreamModelUpdateCheckEnabled:       true,
+		UpstreamModelUpdateLastDetectedModels: []string{"gpt-4o", "broken"},
+		UpstreamModelUpdatePendingModelMapping: map[string]string{
+			"gpt-4o": "openai/gpt-4o",
+			"broken": "openai/broken",
+		},
+	})
+	monitor := &operation_setting.MonitorSetting{
+		UpstreamModelUpdateValidate:             true,
+		UpstreamModelUpdateMaxValidationsPerRun: 10,
+	}
+	run := newUpstreamModelUpdateRunContext(context.Background(), nil, monitor, true)
+	require.NotNil(t, run)
+	require.True(t, run.validationEnabled(), "root user must be resolved without a request context")
+
+	applied, err := applyChannelUpstreamModelUpdates(channel, []string{"gpt-4o", "broken"}, nil, nil, run)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"gpt-4o"}, applied.addedModels)
+	assert.Equal(t, []string{"broken"}, applied.rejectedModels)
+	assert.Equal(t, []string{"broken"}, applied.remainingModels)
+	assert.True(t, applied.modelsChanged)
+	assert.ElementsMatch(t, []string{"openai/gpt-4o", "openai/broken"}, f.requested(),
+		"probes must go upstream under the upstream's own id, not the bare name")
+
+	stored, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-3.5-turbo,gpt-4o", stored.Models)
+	require.NotNil(t, stored.ModelMapping)
+	var mapping map[string]string
+	require.NoError(t, common.UnmarshalJsonStr(*stored.ModelMapping, &mapping))
+	assert.Equal(t, map[string]string{"gpt-4o": "openai/gpt-4o"}, mapping)
+	storedSettings := stored.GetOtherSettings()
+	assert.Equal(t, []string{"broken"}, storedSettings.UpstreamModelUpdateLastDetectedModels)
+	assert.Equal(t, map[string]string{"broken": "openai/broken"}, storedSettings.UpstreamModelUpdatePendingModelMapping,
+		"the mapping entry must outlive its candidate exactly as long as the candidate stays staged")
+
+	var abilities []model.Ability
+	require.NoError(t, f.db.Where("channel_id = ?", channel.Id).Find(&abilities).Error)
+	assert.ElementsMatch(t, []string{"gpt-3.5-turbo", "gpt-4o"}, lo.Map(abilities, func(a model.Ability, _ int) string { return a.Model }))
+}
+
+// TestCheckAndPersistValidatesChannelLevelAutoSync pins the precedence the user
+// asked for: a channel with its own auto-sync flag on adopts models even when the
+// global auto-update switch is off — and those adds are validated all the same.
+// Before this, the global switch off meant run == nil and the channel adopted
+// the upstream list on trust.
+func TestCheckAndPersistValidatesChannelLevelAutoSync(t *testing.T) {
+	f := newUpstreamValidationFixture(t)
+	restore := operation_setting.SetMonitorSettingForTest(operation_setting.MonitorSetting{
+		UpstreamModelUpdateStripVendorPrefix: true,
+	})
+	t.Cleanup(restore)
+	channel := f.createChannel(t, dto.ChannelOtherSettings{
+		UpstreamModelUpdateCheckEnabled:    true,
+		UpstreamModelUpdateAutoSyncEnabled: true,
+	})
+	monitor := &operation_setting.MonitorSetting{
+		UpstreamModelUpdateEnabled:              false,
+		UpstreamModelUpdateValidate:             true,
+		UpstreamModelUpdateStripVendorPrefix:    true,
+		UpstreamModelUpdateMaxValidationsPerRun: 10,
+		UpstreamModelUpdateRotationSampleSize:   5,
+	}
+	run := newUpstreamModelUpdateRunContext(context.Background(), nil, monitor, false)
+	require.NotNil(t, run, "validation alone is reason enough to build a run")
+	assert.False(t, run.autoSyncAll)
+	assert.True(t, run.candidatesOnly, "without the global switch, existing models are never re-tested")
+
+	settings := channel.GetOtherSettings()
+	modelsChanged, autoAdded, autoRemoved, err := checkAndPersistChannelUpstreamModelUpdates(channel, &settings, true, true, run)
+	require.NoError(t, err)
+	assert.True(t, modelsChanged)
+	assert.Equal(t, 1, autoAdded)
+	assert.Zero(t, autoRemoved)
+	assert.ElementsMatch(t, []string{"openai/gpt-4o", "openai/broken"}, f.requested(),
+		"only the two candidates are probed; gpt-3.5-turbo is not re-tested on this path")
+
+	stored, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-3.5-turbo,gpt-4o", stored.Models)
+	require.NotNil(t, stored.ModelMapping)
+	var mapping map[string]string
+	require.NoError(t, common.UnmarshalJsonStr(*stored.ModelMapping, &mapping))
+	assert.Equal(t, map[string]string{"gpt-4o": "openai/gpt-4o"}, mapping)
+	assert.Equal(t, 1, run.rejectedModels)
+}
+
+// TestCheckAndPersistStagesWithoutAutoSync pins the other half of the precedence:
+// with neither the channel flag nor the global switch on, nothing is adopted and
+// nothing is probed. The diff is staged with its mapping for manual review.
+func TestCheckAndPersistStagesWithoutAutoSync(t *testing.T) {
+	f := newUpstreamValidationFixture(t)
+	restore := operation_setting.SetMonitorSettingForTest(operation_setting.MonitorSetting{
+		UpstreamModelUpdateStripVendorPrefix: true,
+	})
+	t.Cleanup(restore)
+	channel := f.createChannel(t, dto.ChannelOtherSettings{UpstreamModelUpdateCheckEnabled: true})
+	monitor := &operation_setting.MonitorSetting{
+		UpstreamModelUpdateValidate:             true,
+		UpstreamModelUpdateMaxValidationsPerRun: 10,
+	}
+	run := newUpstreamModelUpdateRunContext(context.Background(), nil, monitor, false)
+
+	settings := channel.GetOtherSettings()
+	modelsChanged, autoAdded, _, err := checkAndPersistChannelUpstreamModelUpdates(channel, &settings, true, true, run)
+	require.NoError(t, err)
+	assert.False(t, modelsChanged)
+	assert.Zero(t, autoAdded)
+	assert.Empty(t, f.requested(), "a detect-only channel must not spend validation requests")
+	assert.Equal(t, []string{"gpt-4o", "broken"}, settings.UpstreamModelUpdateLastDetectedModels)
+	assert.Equal(t, map[string]string{"gpt-4o": "openai/gpt-4o", "broken": "openai/broken"}, settings.UpstreamModelUpdatePendingModelMapping)
+
+	stored, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-3.5-turbo", stored.Models)
+	assert.Nil(t, stored.ModelMapping)
 }
 
 func TestBuildUpstreamModelUpdateTaskNotificationContent_OmitOverflowDetails(t *testing.T) {
@@ -552,4 +861,45 @@ func TestConsumeValidationBudgetSharedAcrossWorkers(t *testing.T) {
 	assert.Equal(t, int64(50), consumed.Load())
 	assert.Equal(t, 0, run.remainingValidationBudget())
 	assert.Equal(t, 50, run.validatedModels)
+}
+
+// TestChannelUpstreamModelUpdateSelectFieldsPreserveAbilityConcurrency guards the
+// other way the scan's Select list can go wrong: every column it names exists,
+// but one that UpdateAbilities copies into each ability row is missing. The
+// rebuild then wrote NULL into abilities.max_concurrency and lifted the cap on the
+// DB selection path while channels.max_concurrency still showed the limit.
+func TestChannelUpstreamModelUpdateSelectFieldsPreserveAbilityConcurrency(t *testing.T) {
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", t.Name())
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
+
+	originalDB := model.DB
+	model.DB = db
+	t.Cleanup(func() { model.DB = originalDB })
+
+	seeded := model.Channel{
+		Id: 5, Name: "capped", Type: 1, Key: "k", Status: common.ChannelStatusEnabled,
+		Models: "gpt-4o", Group: "default",
+		Priority: common.GetPointer(int64(3)), Weight: common.GetPointer(uint(7)),
+		MaxConcurrency: common.GetPointer(4),
+	}
+	require.NoError(t, db.Create(&seeded).Error)
+	require.NoError(t, seeded.UpdateAbilities(nil))
+
+	var loaded []*model.Channel
+	require.NoError(t, db.Select(channelUpstreamModelUpdateSelectFields).Where("id = ?", seeded.Id).Find(&loaded).Error)
+	require.Len(t, loaded, 1)
+	loaded[0].Models = "gpt-4o,gpt-4.1"
+	require.NoError(t, loaded[0].UpdateAbilities(nil))
+
+	var abilities []model.Ability
+	require.NoError(t, db.Where("channel_id = ?", seeded.Id).Order("model asc").Find(&abilities).Error)
+	require.Len(t, abilities, 2)
+	for _, ability := range abilities {
+		require.NotNil(t, ability.MaxConcurrency, "rebuilt ability %s lost the channel's concurrency cap", ability.Model)
+		assert.Equal(t, 4, *ability.MaxConcurrency)
+		assert.EqualValues(t, 3, *ability.Priority)
+		assert.EqualValues(t, 7, ability.Weight)
+	}
 }

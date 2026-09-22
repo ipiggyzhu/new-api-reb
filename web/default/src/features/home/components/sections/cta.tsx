@@ -16,12 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+
 import { Link } from '@tanstack/react-router'
 import { ArrowRight } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { AnimateInView } from '@/components/animate-in-view'
 import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
 
 interface CTAProps {
   className?: string
@@ -30,54 +32,55 @@ interface CTAProps {
 
 export function CTA(props: CTAProps) {
   const { t } = useTranslation()
-
-  if (props.isAuthenticated) {
-    return null
-  }
+  const baseUrl = `${window.location.origin}/v1`
 
   return (
-    <section className='relative z-10 overflow-hidden px-6 py-24 md:py-32'>
-      {/* Gradient mesh background */}
-      <div
-        aria-hidden
-        className='absolute inset-0 -z-10 opacity-20 dark:opacity-[0.08]'
-        style={{
-          background: [
-            'radial-gradient(ellipse 50% 50% at 30% 50%, oklch(0.7 0.15 250 / 70%) 0%, transparent 70%)',
-            'radial-gradient(ellipse 40% 40% at 70% 40%, oklch(0.65 0.12 200 / 50%) 0%, transparent 70%)',
-          ].join(', '),
-        }}
-      />
-
-      <AnimateInView
-        className='mx-auto max-w-2xl text-center'
-        animation='scale-in'
-      >
-        <h2 className='text-2xl leading-tight font-bold tracking-tight md:text-4xl'>
-          {t('Ready to simplify')}
-          <br />
-          <span className='bg-gradient-to-r from-blue-400 via-violet-400 to-purple-500 bg-clip-text text-transparent'>
-            {t('your AI integration?')}
-          </span>
+    <section
+      className={cn(
+        'border-border/60 relative z-10 border-t px-5 py-20 sm:px-8 md:py-28',
+        props.className
+      )}
+    >
+      <AnimateInView className='mx-auto flex max-w-3xl flex-col items-center text-center'>
+        <p className='section-eyebrow mb-6 justify-center'>
+          {t('Three minutes to first request')}
+        </p>
+        <h2 className='font-heading text-3xl leading-[1.08] font-semibold tracking-tight text-balance md:text-5xl'>
+          {t('Point your client at one base URL.')}
         </h2>
-        <p className='text-muted-foreground/80 mx-auto mt-5 max-w-md text-sm leading-relaxed md:text-base'>
+        <p className='text-muted-foreground mt-5 max-w-lg text-sm leading-7'>
           {t(
             'Deploy your own gateway and start routing requests through your configured upstream services.'
           )}
         </p>
-        <div className='mt-8 flex items-center justify-center gap-3'>
-          <Button className='group rounded-lg' render={<Link to='/sign-up' />}>
-            {t('Get Started')}
-            <ArrowRight className='ml-1 size-3.5 transition-transform duration-200 group-hover:translate-x-0.5' />
-          </Button>
-          <Button
-            variant='outline'
-            className='border-border/50 hover:border-border hover:bg-muted/50 rounded-lg'
-            render={<Link to='/pricing' />}
-          >
-            {t('View Pricing')}
-          </Button>
-        </div>
+
+        <dl className='bg-card/70 border-border/70 mt-9 w-full max-w-xl overflow-hidden rounded-xl border text-left font-mono text-xs'>
+          <div className='border-border/60 flex flex-col gap-1 border-b px-4 py-3 sm:flex-row sm:items-center sm:gap-6'>
+            <dt className='text-muted-foreground shrink-0 sm:w-28'>base_url</dt>
+            <dd className='text-foreground truncate'>{baseUrl}</dd>
+          </div>
+          <div className='flex flex-col gap-1 px-4 py-3 sm:flex-row sm:items-center sm:gap-6'>
+            <dt className='text-muted-foreground shrink-0 sm:w-28'>
+              Authorization
+            </dt>
+            <dd className='text-foreground truncate'>
+              Bearer sk-<span className='text-primary'>••••••••••••••••</span>
+            </dd>
+          </div>
+        </dl>
+
+        <Button
+          className='group mt-9 h-12 rounded-lg px-6 text-sm'
+          render={
+            <Link to={props.isAuthenticated ? '/dashboard' : '/sign-up'} />
+          }
+        >
+          {props.isAuthenticated ? t('Go to Dashboard') : t('Get Started')}
+          <ArrowRight
+            className='ml-1.5 size-4 transition-transform group-hover:translate-x-1 motion-reduce:transform-none'
+            aria-hidden='true'
+          />
+        </Button>
       </AnimateInView>
     </section>
   )

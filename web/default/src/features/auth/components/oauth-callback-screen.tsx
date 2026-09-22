@@ -93,22 +93,23 @@ export function OAuthCallbackScreen({
   return (
     <AuthLayout>
       <div className='w-full space-y-8'>
-        <div className='flex flex-col items-center space-y-4 text-center'>
-          <div className='bg-muted flex h-16 w-16 items-center justify-center rounded-2xl'>
-            <Icon className='h-8 w-8' />
+        <div className='space-y-4'>
+          <div className='border-primary/25 bg-primary/5 text-primary flex size-12 items-center justify-center rounded-xl border'>
+            <Icon className='size-6' />
           </div>
           <div className='space-y-2'>
-            <h2 className='text-center text-2xl font-semibold tracking-tight'>
+            <p className='section-eyebrow'>
+              {isBindMode ? t('Bind account') : t('Sign in')}
+            </p>
+            <h2 className='font-heading text-3xl font-semibold tracking-tight'>
               {headline}
             </h2>
-            <p className='text-muted-foreground text-sm sm:text-base'>
-              {description}
-            </p>
+            <p className='text-muted-foreground text-sm'>{description}</p>
           </div>
         </div>
 
-        <div className='space-y-4 text-center'>
-          <div className='flex items-center justify-center gap-2 text-sm font-medium'>
+        <div className='space-y-4'>
+          <div className='flex items-center gap-2 text-sm font-medium'>
             <Loader2 className='h-4 w-4 animate-spin' />
             <span>{t('Processing OAuth response...')}</span>
           </div>

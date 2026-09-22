@@ -499,6 +499,13 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			newAPIError: types.NewOpenAIError(bodyErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError),
 		}
 	}
+	if outputErr := requireTestOutput(relayFormat, respBody, usage, isStream); outputErr != nil {
+		return testResult{
+			context:     c,
+			localErr:    outputErr,
+			newAPIError: types.NewErrorWithStatusCode(outputErr, types.ErrorCodeEmptyResponse, http.StatusBadGateway),
+		}
+	}
 	info.SetEstimatePromptTokens(usage.PromptTokens)
 
 	quota, tieredResult := settleTestQuota(info, priceData, usage)
@@ -668,6 +675,207 @@ func validateTestResponseBody(respBody []byte, isStream bool) error {
 	return nil
 }
 
+// requireTestOutput fails a text-generation probe whose upstream answered 200
+// with nothing a client could use. A status code and an error-free envelope are
+// not evidence that the model works: upstreams that do not actually serve a
+// model still return a well-formed reply with empty content, and some pad it
+// with a token count so it bills. Those are exactly the models this probe exists
+// to keep off the channel.
+//
+// Evidence is the response body itself: text, reasoning, a tool call, or media
+// in any of the four text formats. For a streamed reply the adaptor computes
+// usage from the text it forwarded, so positive output usage is accepted as
+// well; the buffered body is capped and could cut a long reply before the
+// content. Non-stream usage is copied from the upstream JSON and is not
+// trusted on its own. An adaptor that already validated the protocol output
+// (ResponseValidated) is trusted outright.
+func requireTestOutput(relayFormat types.RelayFormat, respBody []byte, usage *dto.Usage, isStream bool) error {
+	switch relayFormat {
+	case types.RelayFormatOpenAI, types.RelayFormatClaude, types.RelayFormatGemini, types.RelayFormatOpenAIResponses:
+	default:
+		return nil
+	}
+	if usage != nil && usage.ResponseValidated {
+		return nil
+	}
+	if testResponseHasOutput(respBody, isStream) {
+		return nil
+	}
+	if isStream && usage.HasOutput() {
+		return nil
+	}
+	return errors.New("upstream returned no output")
+}
+
+// testResponseHasOutput scans a probe reply for content in any of the text
+// formats: OpenAI chat (message or delta), Claude messages (content blocks and
+// their stream deltas), Gemini (candidate parts) and Responses (output items and
+// their delta events).
+func testResponseHasOutput(respBody []byte, isStream bool) bool {
+	if !isStream {
+		return testResponsePayloadHasOutput(gjson.ParseBytes(bytes.TrimSpace(respBody)))
+	}
+	for _, line := range bytes.Split(respBody, []byte{'\n'}) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+			continue
+		}
+		if testResponsePayloadHasOutput(gjson.ParseBytes(payload)) {
+			return true
+		}
+	}
+	return false
+}
+
+func testResponsePayloadHasOutput(payload gjson.Result) bool {
+	if !payload.IsObject() {
+		return false
+	}
+	nonEmpty := func(paths ...string) bool {
+		for _, path := range paths {
+			value := payload.Get(path)
+			switch {
+			case value.Type == gjson.String && strings.TrimSpace(value.Str) != "":
+				return true
+			case value.IsArray() && len(value.Array()) > 0:
+				return true
+			case value.IsObject() && len(value.Map()) > 0:
+				return true
+			}
+		}
+		return false
+	}
+	// OpenAI chat: a non-stream message or a stream delta.
+	for _, choice := range payload.Get("choices").Array() {
+		for _, field := range []string{"message", "delta"} {
+			part := choice.Get(field)
+			for _, path := range []string{"content", "reasoning_content", "reasoning", "refusal", "audio.data", "audio.transcript"} {
+				if value := part.Get(path); value.Type == gjson.String && strings.TrimSpace(value.Str) != "" {
+					return true
+				}
+			}
+			if calls := part.Get("tool_calls"); calls.IsArray() && len(calls.Array()) > 0 {
+				return true
+			}
+			if part.Get("function_call.name").Str != "" {
+				return true
+			}
+		}
+		if text := choice.Get("text"); text.Type == gjson.String && strings.TrimSpace(text.Str) != "" {
+			return true
+		}
+	}
+	// Claude messages: content blocks, or the stream events that build them.
+	for _, block := range payload.Get("content").Array() {
+		if nonEmptyClaudeBlock(block) {
+			return true
+		}
+	}
+	switch payload.Get("type").String() {
+	case "content_block_start":
+		if nonEmptyClaudeBlock(payload.Get("content_block")) {
+			return true
+		}
+	case "content_block_delta":
+		delta := payload.Get("delta")
+		for _, path := range []string{"text", "thinking", "partial_json", "data"} {
+			if value := delta.Get(path); value.Type == gjson.String && value.Str != "" {
+				return true
+			}
+		}
+	case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta", "response.function_call_arguments.delta", "response.refusal.delta":
+		if nonEmpty("delta") {
+			return true
+		}
+	case "response.output_item.done", "response.output_item.added":
+		if responsesItemHasTestOutput(payload.Get("item")) {
+			return true
+		}
+	case "response.completed", "response.done":
+		for _, item := range payload.Get("response.output").Array() {
+			if responsesItemHasTestOutput(item) {
+				return true
+			}
+		}
+	}
+	// Responses non-stream.
+	for _, item := range payload.Get("output").Array() {
+		if responsesItemHasTestOutput(item) {
+			return true
+		}
+	}
+	// Gemini: candidate parts.
+	for _, candidate := range payload.Get("candidates").Array() {
+		for _, part := range candidate.Get("content.parts").Array() {
+			if value := part.Get("text"); value.Type == gjson.String && strings.TrimSpace(value.Str) != "" {
+				return true
+			}
+			for _, path := range []string{"functionCall", "inlineData", "executableCode", "codeExecutionResult"} {
+				if value := part.Get(path); value.IsObject() && len(value.Map()) > 0 {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func nonEmptyClaudeBlock(block gjson.Result) bool {
+	switch block.Get("type").String() {
+	case "text":
+		return strings.TrimSpace(block.Get("text").Str) != ""
+	case "thinking":
+		return block.Get("thinking").Str != ""
+	case "redacted_thinking":
+		return block.Get("data").Str != ""
+	case "tool_use", "server_tool_use":
+		return block.Get("name").Str != ""
+	default:
+		return false
+	}
+}
+
+func responsesItemHasTestOutput(item gjson.Result) bool {
+	switch item.Get("type").String() {
+	case "message":
+		for _, part := range item.Get("content").Array() {
+			for _, path := range []string{"text", "refusal"} {
+				if value := part.Get(path); value.Type == gjson.String && strings.TrimSpace(value.Str) != "" {
+					return true
+				}
+			}
+		}
+		return false
+	case "reasoning":
+		if item.Get("encrypted_content").Str != "" {
+			return true
+		}
+		for _, part := range item.Get("summary").Array() {
+			if strings.TrimSpace(part.Get("text").Str) != "" {
+				return true
+			}
+		}
+		for _, part := range item.Get("content").Array() {
+			if strings.TrimSpace(part.Get("text").Str) != "" {
+				return true
+			}
+		}
+		return false
+	case "function_call", "custom_tool_call":
+		return item.Get("name").Str != ""
+	case "":
+		return false
+	default:
+		// Built-in tool calls (web_search_call and friends) are identified output
+		// even when they carry no text.
+		return strings.HasSuffix(item.Get("type").String(), "_call") && item.Get("id").Str != ""
+	}
+}
+
 func shouldUseStreamForAutomaticChannelTest(channel *model.Channel) bool {
 	return channel != nil && channel.Type == constant.ChannelTypeCodex
 }
@@ -704,7 +912,8 @@ func detectErrorMessageFromJSONBytes(jsonBytes []byte) string {
 func buildTestRequest(model string, endpointType string, channel *model.Channel, isStream bool) dto.Request {
 	// 每次构建都重新抽取，避免固定的 "hi" 被上游识别成机器人探测。
 	// 补全被 max_tokens 截断不影响判定：validateTestResponseBody 只检查错误
-	// 载荷（非流式）和至少一个流事件（流式），不看 finish_reason。
+	// 载荷（非流式）和至少一个流事件（流式），requireTestOutput 只要求有实际
+	// 输出内容，都不看 finish_reason。
 	chatPrompt := operation_setting.PickChannelTestPrompt()
 	testResponsesInput, err := common.Marshal([]dto.Message{{Role: "user", Content: chatPrompt}})
 	if err != nil {

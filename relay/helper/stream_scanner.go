@@ -242,6 +242,15 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 						err = PingData(c)
 					}()
 					if err != nil {
+						// The ticker and the request context race in this select, so a
+						// caller that hung up can surface here as a failed ping write
+						// rather than through the Done case below. That is not the
+						// upstream's fault and must not be recorded as one: PingFail
+						// would win the once-only end reason and fail the channel.
+						if c.Request.Context().Err() != nil {
+							info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, c.Request.Context().Err())
+							return
+						}
 						logger.LogError(c, "ping data error: "+err.Error())
 						info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonPingFail, err)
 						stop()

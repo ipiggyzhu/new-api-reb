@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useLocation } from '@tanstack/react-router'
 import {
   Children,
   isValidElement,
@@ -24,6 +25,9 @@ import {
   type ReactNode,
 } from 'react'
 
+import { useSidebarView } from '@/hooks/use-sidebar-view'
+
+import { checkIsActive } from '../lib/url-utils'
 import { Main } from './main'
 import { PageFooterProvider } from './page-footer'
 
@@ -54,10 +58,26 @@ export type SectionPageLayoutProps = {
   fixedContent?: boolean
 }
 
+/**
+ * Page frame with a masthead: an eyebrow naming the owning nav section
+ * (or the page's own breadcrumb), a display-face title, actions on the
+ * trailing edge, and a gold hairline separating it from the content.
+ */
 export function SectionPageLayout(props: SectionPageLayoutProps) {
   const [footerContainer, setFooterContainer] = useState<HTMLDivElement | null>(
     null
   )
+  const { view, navGroups } = useSidebarView()
+  const href = useLocation({ select: (location) => location.href })
+
+  let sectionTitle: string | undefined
+  if (view) {
+    sectionTitle = navGroups[0]?.title
+  } else {
+    sectionTitle = navGroups.find((group) =>
+      group.items.some((item) => checkIsActive(href, item, true))
+    )?.title
+  }
 
   let title: ReactNode = null
   let actions: ReactNode = null
@@ -67,41 +87,53 @@ export function SectionPageLayout(props: SectionPageLayoutProps) {
   Children.forEach(props.children, (node) => {
     if (!isValidElement(node)) return
     const child = node as ReactElement<SlotProps>
-    if (child.type === SectionPageLayoutTitle) title = child.props.children
-    else if (child.type === SectionPageLayoutActions)
+    if (child.type === SectionPageLayoutTitle) {
+      title = child.props.children
+    } else if (child.type === SectionPageLayoutActions) {
       actions = child.props.children
-    else if (child.type === SectionPageLayoutContent)
+    } else if (child.type === SectionPageLayoutContent) {
       content = child.props.children
-    else if (child.type === SectionPageLayoutBreadcrumb)
+    } else if (child.type === SectionPageLayoutBreadcrumb) {
       breadcrumb = child.props.children
+    }
   })
 
   return (
     <PageFooterProvider container={footerContainer}>
       <Main>
-        <div className='shrink-0 px-3 pt-3 pb-2.5 sm:px-4 sm:pt-5 sm:pb-3'>
-          {breadcrumb != null && (
-            <div className='mb-2 sm:mb-3'>{breadcrumb}</div>
-          )}
-          <div className='flex flex-wrap items-center justify-between gap-x-3 gap-y-2 sm:gap-x-4'>
+        <header
+          data-slot='masthead'
+          className='shrink-0 px-4 pt-4 sm:px-7 sm:pt-6'
+        >
+          <div className='flex flex-wrap items-end justify-between gap-x-6 gap-y-3'>
             <div className='min-w-0 flex-1'>
-              <h2 className='truncate text-base font-bold tracking-tight sm:text-lg'>
+              {breadcrumb != null ? (
+                <div className='mb-1.5'>{breadcrumb}</div>
+              ) : (
+                sectionTitle && (
+                  <p className='masthead-eyebrow mb-1.5'>
+                    <span>{sectionTitle}</span>
+                  </p>
+                )
+              )}
+              <h1 className='font-heading truncate text-2xl leading-tight font-semibold tracking-tight sm:text-[1.75rem]'>
                 {title}
-              </h2>
+              </h1>
             </div>
             {actions != null && (
-              <div className='flex shrink-0 flex-wrap items-center justify-end gap-2 sm:gap-x-4'>
+              <div className='flex shrink-0 flex-wrap items-center justify-end gap-2'>
                 {actions}
               </div>
             )}
           </div>
-        </div>
+          <hr className='gold-hairline mt-4 sm:mt-5' />
+        </header>
 
         <div
           className={
             props.fixedContent
-              ? 'min-h-0 flex-1 overflow-hidden px-3 pt-1 pb-3 sm:px-4 sm:pt-1.5 sm:pb-4'
-              : 'min-h-0 flex-1 overflow-auto px-3 pt-1 pb-3 sm:px-4 sm:pt-1.5 sm:pb-4'
+              ? 'min-h-0 flex-1 overflow-hidden px-4 pt-4 pb-4 sm:px-7 sm:pt-5 sm:pb-6'
+              : 'min-h-0 flex-1 overflow-auto px-4 pt-4 pb-4 sm:px-7 sm:pt-5 sm:pb-6'
           }
         >
           {content}
@@ -109,7 +141,7 @@ export function SectionPageLayout(props: SectionPageLayoutProps) {
 
         <div
           ref={setFooterContainer}
-          className='bg-background shrink-0 border-t px-3 py-2.5 empty:hidden sm:px-4 sm:py-3'
+          className='bg-background/80 shrink-0 border-t px-4 py-2.5 backdrop-blur empty:hidden sm:px-7 sm:py-3'
         />
       </Main>
     </PageFooterProvider>

@@ -217,6 +217,7 @@ export function ModelMutateDrawer({
       'monitor_setting.upstream_model_update_interval_hours': 24,
       'monitor_setting.upstream_model_update_scan_all_channels': true,
       'monitor_setting.upstream_model_update_validate': true,
+      'monitor_setting.upstream_model_update_strip_vendor_prefix': true,
       'monitor_setting.upstream_model_update_remove_failed': true,
       'monitor_setting.upstream_model_update_remove_unavailable_models': false,
       'monitor_setting.upstream_model_update_retry_delay_minutes': 60,

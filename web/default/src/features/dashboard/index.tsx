@@ -32,9 +32,9 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { ROLE } from '@/lib/roles'
-import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { LogStatCards } from './components/models/log-stat-cards'
 import { ModelsChartPreferences } from './components/models/models-chart-preferences'
 import { ModelsFilter } from './components/models/models-filter-dialog'
 import { OverviewDashboard } from './components/overview/overview-dashboard'
@@ -60,13 +60,6 @@ import type {
 
 const route = getRouteApi('/_authenticated/dashboard/$section')
 
-const LOG_STAT_CARD_FALLBACK_KEYS = [
-  'count',
-  'quota',
-  'tokens',
-  'average-rpm',
-  'average-tpm',
-] as const
 const PERFORMANCE_METRIC_FALLBACK_KEYS = [
   'success-rate',
   'average-latency',
@@ -76,12 +69,7 @@ const PERFORMANCE_MODEL_FALLBACK_KEYS = [
   'primary-model',
   'secondary-model',
 ] as const
-
-const LazyLogStatCards = lazy(() =>
-  import('./components/models/log-stat-cards').then((m) => ({
-    default: m.LogStatCards,
-  }))
-)
+const USER_CHART_FALLBACK_KEYS = ['rank', 'trend'] as const
 
 const LazyModelCharts = lazy(() =>
   import('./components/models/model-charts').then((m) => ({
@@ -113,32 +101,6 @@ const LazyFlowCharts = lazy(() =>
   }))
 )
 
-function LogStatCardsFallback() {
-  return (
-    <div className='overflow-hidden rounded-lg border'>
-      <div className='divide-border/60 grid grid-cols-2 divide-x sm:grid-cols-3 lg:grid-cols-5'>
-        {LOG_STAT_CARD_FALLBACK_KEYS.map((key, index) => (
-          <div
-            key={key}
-            className={cn(
-              'px-2.5 py-1.5 sm:px-5 sm:py-4',
-              index === LOG_STAT_CARD_FALLBACK_KEYS.length - 1 &&
-                'col-span-2 sm:col-span-1'
-            )}
-          >
-            <div className='flex items-center gap-1.5 sm:gap-2'>
-              <Skeleton className='size-4 rounded-sm sm:size-7 sm:rounded-md' />
-              <Skeleton className='h-4 w-16' />
-            </div>
-            <Skeleton className='mt-1 h-5 w-16 sm:mt-2 sm:h-7 sm:w-20' />
-            <Skeleton className='mt-1 hidden h-3.5 w-28 md:block' />
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 function ModelChartsFallback() {
   return (
     <div className='overflow-hidden rounded-lg border'>
@@ -148,6 +110,30 @@ function ModelChartsFallback() {
       </div>
       <div className='h-96 p-2'>
         <Skeleton className='h-full w-full' />
+      </div>
+    </div>
+  )
+}
+
+function UserChartsFallback() {
+  return (
+    <div className='space-y-3'>
+      <div className='flex items-center gap-1.5 pb-1 sm:gap-2'>
+        <Skeleton className='h-8 w-40 rounded-lg' />
+        <Skeleton className='h-8 w-56 rounded-lg' />
+      </div>
+      <div className='grid gap-3'>
+        {USER_CHART_FALLBACK_KEYS.map((key) => (
+          <div key={key} className='overflow-hidden rounded-lg border'>
+            <div className='flex items-center gap-2 border-b px-3 py-2 sm:px-5 sm:py-3'>
+              <Skeleton className='size-7 rounded-md' />
+              <Skeleton className='h-4 w-24' />
+            </div>
+            <div className='h-[300px] p-1.5 sm:h-96 sm:p-2'>
+              <Skeleton className='h-full w-full' />
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   )
@@ -348,12 +334,10 @@ export function Dashboard() {
           {activeSection === 'models' && (
             <>
               <FadeIn>
-                <Suspense fallback={<LogStatCardsFallback />}>
-                  <LazyLogStatCards
-                    filters={modelFilters}
-                    onDataUpdate={handleDataUpdate}
-                  />
-                </Suspense>
+                <LogStatCards
+                  filters={modelFilters}
+                  onDataUpdate={handleDataUpdate}
+                />
               </FadeIn>
               {isAdmin && (
                 <FadeIn delay={0.05}>
@@ -392,7 +376,7 @@ export function Dashboard() {
           )}
           {activeSection === 'users' && (
             <FadeIn>
-              <Suspense fallback={<ModelChartsFallback />}>
+              <Suspense fallback={<UserChartsFallback />}>
                 <LazyUserCharts
                   filters={userChartsFilters}
                   onFiltersChange={setUserChartsFilters}

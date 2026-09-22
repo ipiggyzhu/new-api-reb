@@ -22,37 +22,47 @@ import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
 import { LayoutProvider } from '@/context/layout-provider'
 import { SearchProvider } from '@/context/search-provider'
 import { getCookie } from '@/lib/cookies'
-import { cn } from '@/lib/utils'
 
-import { AppHeader } from './app-header'
 import { AppSidebar } from './app-sidebar'
+import { MobileTopBar } from './mobile-top-bar'
 
 type AuthenticatedLayoutProps = {
   children?: React.ReactNode
 }
 
+/**
+ * Authenticated shell: one sidebar (brand, search, nav groups, site links,
+ * global controls) beside the page. There is no global top bar; page
+ * context lives in each page's masthead via `SectionPageLayout`. Below
+ * `md` a compact top bar carries the sheet trigger.
+ */
 export function AuthenticatedLayout(props: AuthenticatedLayoutProps) {
   const defaultOpen = getCookie('sidebar_state') !== 'false'
 
   return (
     <LayoutProvider>
       <SearchProvider>
-        <SidebarProvider defaultOpen={defaultOpen} className='flex-col'>
+        <SidebarProvider
+          defaultOpen={defaultOpen}
+          className='app-canvas flex-col md:flex-row'
+          style={
+            {
+              '--sidebar-width': '14rem',
+              // No global top bar in this shell: the fixed sidebar starts
+              // at the viewport top instead of below the header slot.
+              '--app-header-height': '0px',
+            } as React.CSSProperties
+          }
+        >
           <SkipToMain />
-          <AppHeader />
-          <div className='flex min-h-0 w-full flex-1'>
-            <AppSidebar />
-            <SidebarInset
-              className={cn(
-                '@container/content',
-                'h-[calc(100svh-var(--app-header-height,0px))]',
-                'min-h-0 overflow-hidden',
-                'peer-data-[variant=inset]:h-[calc(100svh-var(--app-header-height,0px)-(var(--spacing)*4))]'
-              )}
-            >
-              {props.children ?? <AnimatedOutlet />}
-            </SidebarInset>
-          </div>
+          <MobileTopBar />
+          <AppSidebar />
+          <SidebarInset
+            id='content'
+            className='@container/content h-[calc(100svh-3rem)] min-h-0 min-w-0 overflow-hidden md:h-svh md:peer-data-[variant=inset]:h-[calc(100svh-(var(--spacing)*4))]'
+          >
+            {props.children ?? <AnimatedOutlet />}
+          </SidebarInset>
         </SidebarProvider>
       </SearchProvider>
     </LayoutProvider>

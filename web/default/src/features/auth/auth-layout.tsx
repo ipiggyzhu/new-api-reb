@@ -17,8 +17,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { Link } from '@tanstack/react-router'
+import { ArrowLeft } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
+import { LanguageSwitcher } from '@/components/language-switcher'
+import { ThemeSwitch } from '@/components/theme-switch'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useSystemConfig } from '@/hooks/use-system-config'
 
@@ -26,37 +29,111 @@ type AuthLayoutProps = {
   children: React.ReactNode
 }
 
-export function AuthLayout({ children }: AuthLayoutProps) {
-  const { t } = useTranslation()
+function BrandLink() {
   const { systemName, logo, loading } = useSystemConfig()
 
   return (
-    <div className='relative grid h-svh max-w-none'>
-      <Link
-        to='/'
-        className='absolute top-4 left-4 z-10 flex items-center gap-2 transition-opacity hover:opacity-80 sm:top-8 sm:left-8'
-      >
-        <div className='relative h-8 w-8'>
-          {loading ? (
-            <Skeleton className='absolute inset-0 rounded-full' />
-          ) : (
-            <img
-              src={logo}
-              alt={t('Logo')}
-              className='h-8 w-8 rounded-full object-cover'
-            />
-          )}
-        </div>
+    <Link
+      to='/'
+      className='inline-flex items-center gap-3 transition-opacity hover:opacity-80'
+    >
+      <span className='border-primary/30 bg-card flex size-9 items-center justify-center overflow-hidden rounded-lg border'>
         {loading ? (
-          <Skeleton className='h-6 w-24' />
+          <Skeleton className='size-full' />
         ) : (
-          <h1 className='text-xl font-medium'>{systemName}</h1>
+          <img src={logo} alt='' className='size-7 object-contain' />
         )}
-      </Link>
-      <div className='container flex items-center pt-16 sm:pt-0'>
-        <div className='mx-auto flex w-full flex-col justify-center space-y-2 px-4 py-8 sm:w-[480px] sm:p-8'>
-          {children}
+      </span>
+      {loading ? (
+        <Skeleton className='h-5 w-24' />
+      ) : (
+        <span className='font-heading text-base font-semibold tracking-tight'>
+          {systemName}
+        </span>
+      )}
+    </Link>
+  )
+}
+
+/**
+ * Split-screen auth shell: a brand pane on the left (lg+) and the form
+ * sitting directly on the canvas on the right. Below lg the brand pane is
+ * dropped and the brand row moves into the header.
+ */
+export function AuthLayout(props: AuthLayoutProps) {
+  const { t } = useTranslation()
+
+  const facts = [
+    {
+      label: t('Providers'),
+      value: t('Unified API for OpenAI, Claude, Gemini and 40+ providers'),
+    },
+    {
+      label: t('Billing'),
+      value: t('One key, one bill, one usage log'),
+    },
+    {
+      label: t('Deployment'),
+      value: t('Self-hosted, open, auditable'),
+    },
+  ]
+
+  return (
+    <div className='app-canvas flex min-h-svh flex-col lg:grid lg:grid-cols-2'>
+      <aside className='border-border/70 hidden flex-col justify-between border-r px-12 py-10 lg:flex xl:px-16'>
+        <BrandLink />
+
+        <div className='py-16'>
+          <h1 className='font-heading text-5xl leading-[1.05] font-semibold tracking-tight text-balance xl:text-6xl'>
+            {t('The hub for')}
+            <br />
+            <span className='gold-text'>{t('every model.')}</span>
+          </h1>
+          <p className='text-muted-foreground mt-7 max-w-md text-sm leading-7'>
+            {t(
+              'Access a vast selection of models via a standard, unified API protocol. Power AI applications, manage digital assets, and connect the Future.'
+            )}
+          </p>
         </div>
+
+        <dl className='max-w-md'>
+          {facts.map((fact) => (
+            <div
+              key={fact.label}
+              className='border-border/70 flex items-baseline justify-between gap-6 border-t py-3.5 last:border-b'
+            >
+              <dt className='text-muted-foreground shrink-0 font-mono text-[11px] tracking-[0.14em] uppercase'>
+                {fact.label}
+              </dt>
+              <dd className='text-foreground/85 text-right text-xs leading-5'>
+                {fact.value}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </aside>
+
+      <div className='flex min-h-svh flex-col lg:min-h-0'>
+        <header className='flex items-center justify-between gap-4 px-5 py-5 sm:px-8'>
+          <div className='lg:hidden'>
+            <BrandLink />
+          </div>
+          <Link
+            to='/'
+            className='text-muted-foreground hover:text-primary hidden items-center gap-2 text-xs transition-colors lg:inline-flex'
+          >
+            <ArrowLeft className='size-3.5' aria-hidden='true' />
+            {t('Home')}
+          </Link>
+          <div className='flex items-center gap-1'>
+            <ThemeSwitch />
+            <LanguageSwitcher />
+          </div>
+        </header>
+
+        <main className='flex flex-1 items-start justify-center px-5 pt-8 pb-14 sm:px-8 lg:items-center lg:pt-6'>
+          <div className='w-full max-w-[400px]'>{props.children}</div>
+        </main>
       </div>
     </div>
   )

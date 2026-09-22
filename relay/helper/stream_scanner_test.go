@@ -739,3 +739,65 @@ func TestStreamScannerHandler_NonStreamBody(t *testing.T) {
 		})
 	}
 }
+
+// cancelOnPingWriter models a client that hangs up at the moment a keepalive
+// ping is written: the write fails and the request context is already done.
+type cancelOnPingWriter struct {
+	*httptest.ResponseRecorder
+	cancel context.CancelFunc
+}
+
+func (w *cancelOnPingWriter) Write(data []byte) (int, error) {
+	if string(data) == ": PING\n\n" {
+		w.cancel()
+		return 0, fmt.Errorf("write: broken pipe")
+	}
+	return w.ResponseRecorder.Write(data)
+}
+
+// TestStreamScannerHandler_PingFailureAfterClientDisconnectIsClientGone pins the
+// verdict for a ping that fails because the caller left. The ticker and the
+// request context race inside the ping goroutine's select, so the failed write
+// can be observed first; recording it as ping_fail turned every client hangup
+// near a ping tick into a channel fault.
+func TestStreamScannerHandler_PingFailureAfterClientDisconnectIsClientGone(t *testing.T) {
+	setting := operation_setting.GetGeneralSetting()
+	oldEnabled := setting.PingIntervalEnabled
+	oldSeconds := setting.PingIntervalSeconds
+	setting.PingIntervalEnabled = true
+	setting.PingIntervalSeconds = 1
+	t.Cleanup(func() {
+		setting.PingIntervalEnabled = oldEnabled
+		setting.PingIntervalSeconds = oldSeconds
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	writer := &cancelOnPingWriter{ResponseRecorder: httptest.NewRecorder(), cancel: cancel}
+	c, _ := gin.CreateTestContext(writer)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+
+	// The upstream stays silent so the first ping is the only write.
+	pr, pw := io.Pipe()
+	t.Cleanup(func() {
+		_ = pr.Close()
+		_ = pw.Close()
+	})
+	resp := &http.Response{Body: pr}
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
+
+	done := make(chan struct{})
+	go func() {
+		StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the handler to return after the client left")
+	}
+
+	require.NotNil(t, info.StreamStatus)
+	assert.Equal(t, relaycommon.StreamEndReasonClientGone, info.StreamStatus.EndReason)
+	assert.Nil(t, info.StreamStatus.FailureError(), "a client hangup must not be charged to the channel")
+}

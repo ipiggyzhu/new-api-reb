@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+
 import { Link } from '@tanstack/react-router'
 import DOMPurify from 'dompurify'
 import { Fragment, useMemo } from 'react'
@@ -23,6 +24,7 @@ import { useTranslation } from 'react-i18next'
 
 import { useStatus } from '@/hooks/use-status'
 import { useSystemConfig } from '@/hooks/use-system-config'
+import { DEFAULT_LOGO, DEFAULT_SYSTEM_NAME } from '@/lib/constants'
 import { cn } from '@/lib/utils'
 
 interface FooterLink {
@@ -152,6 +154,7 @@ function ProjectAttribution(props: { currentYear: number; inline?: boolean }) {
 
 export function Footer(props: FooterProps) {
   const { t } = useTranslation()
+  const { status } = useStatus()
   const {
     systemName,
     logo: systemLogo,
@@ -167,10 +170,15 @@ export function Footer(props: FooterProps) {
     [footerHtml]
   )
 
-  const displayLogo = systemLogo || props.logo || '/logo.png'
-  const displayName = systemName || props.name || 'New API'
+  const displayLogo = systemLogo || props.logo || DEFAULT_LOGO
+  const displayName = systemName || props.name || DEFAULT_SYSTEM_NAME
   const isDemoSiteMode = Boolean(demoSiteEnabled)
   const currentYear = new Date().getFullYear()
+  const version = typeof status?.version === 'string' ? status.version : ''
+  const docsLink =
+    typeof status?.docs_link === 'string' && status.docs_link
+      ? status.docs_link
+      : ''
 
   const fallbackColumns = useMemo<FooterColumnProps[]>(
     () => [
@@ -229,27 +237,39 @@ export function Footer(props: FooterProps) {
     [t]
   )
 
-  const displayColumns = props.columns ?? fallbackColumns
+  // The product column points at this deployment's own pages; the demo-site
+  // columns (project docs and related repos) are appended only in demo mode,
+  // matching the previous gating.
+  const productColumn: FooterColumnProps = {
+    title: 'Product',
+    links: [
+      { text: 'Pricing', href: '/pricing' },
+      { text: 'Console', href: '/dashboard' },
+      ...(docsLink ? [{ text: 'Docs', href: docsLink }] : []),
+    ],
+  }
+  const demoColumns = props.columns ?? fallbackColumns
+  const displayColumns = isDemoSiteMode
+    ? [productColumn, ...demoColumns]
+    : [productColumn]
 
   if (footerHtml) {
     return (
       <footer
         className={cn(
-          'border-border/40 relative z-10 border-t',
+          'border-border/60 relative z-10 border-t',
           props.className
         )}
       >
-        <div className='mx-auto w-full max-w-6xl px-6 py-5'>
-          <div className='bg-muted/20 border-border/50 flex flex-col items-center justify-between gap-4 rounded-2xl border px-4 py-4 backdrop-blur-sm sm:flex-row sm:px-5'>
-            <div
-              className='custom-footer text-muted-foreground min-w-0 text-center text-sm sm:text-left'
-              // eslint-disable-next-line react/no-danger -- sanitized above
-              dangerouslySetInnerHTML={{ __html: sanitizedFooterHtml }}
-            />
-            <div className='border-border/60 text-muted-foreground/45 flex w-full flex-wrap items-center justify-center gap-x-3 gap-y-1 border-t pt-4 text-xs sm:w-auto sm:justify-end sm:border-t-0 sm:border-l sm:pt-0 sm:pl-5'>
-              <LegalLinks />
-              <ProjectAttribution currentYear={currentYear} inline />
-            </div>
+        <div className='mx-auto flex w-full max-w-6xl flex-col items-center justify-between gap-4 px-5 py-6 sm:flex-row sm:px-8'>
+          <div
+            className='custom-footer text-muted-foreground min-w-0 text-center text-sm sm:text-left'
+            // eslint-disable-next-line react/no-danger -- sanitized above
+            dangerouslySetInnerHTML={{ __html: sanitizedFooterHtml }}
+          />
+          <div className='text-muted-foreground/45 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-xs sm:justify-end'>
+            <LegalLinks />
+            <ProjectAttribution currentYear={currentYear} inline />
           </div>
         </div>
       </footer>
@@ -258,59 +278,65 @@ export function Footer(props: FooterProps) {
 
   return (
     <footer
-      className={cn('border-border/40 relative z-10 border-t', props.className)}
+      className={cn('border-border/60 relative z-10 border-t', props.className)}
     >
-      <div className='mx-auto max-w-6xl px-6 py-12 md:py-16'>
-        <div className='flex flex-col justify-between gap-10 md:flex-row md:gap-16'>
+      <div className='mx-auto max-w-6xl px-5 py-14 sm:px-8 md:py-16'>
+        <div className='grid gap-12 md:grid-cols-[minmax(0,1.4fr)_minmax(0,2.6fr)] md:gap-16'>
           {/* Brand column */}
-          <div className='shrink-0'>
-            <Link to='/' className='group flex items-center gap-2.5'>
+          <div>
+            <Link to='/' className='inline-flex items-center gap-2.5'>
               <img
                 src={displayLogo}
                 alt={displayName}
-                className='size-7 rounded-lg object-contain'
+                className='size-7 rounded-md object-contain'
               />
-              <span className='text-sm font-semibold tracking-tight'>
+              <span className='font-heading text-base font-semibold tracking-tight'>
                 {displayName}
               </span>
             </Link>
-            <p className='text-muted-foreground/60 mt-3 max-w-[200px] text-xs leading-relaxed'>
+            <p className='text-muted-foreground mt-4 max-w-[260px] text-sm leading-relaxed'>
               {t('Powerful API Management Platform')}
             </p>
           </div>
 
-          {/* Links columns */}
-          {isDemoSiteMode && (
-            <div className='grid grid-cols-3 gap-8 md:gap-16'>
-              {displayColumns.map((column, index) => (
-                <div key={index}>
-                  <p className='text-muted-foreground/50 mb-3 text-xs font-medium tracking-wider uppercase'>
-                    {t(column.title)}
-                  </p>
-                  <ul className='space-y-2.5'>
-                    {column.links.map((link, linkIndex) => (
-                      <li key={linkIndex}>
-                        <FooterLinkItem link={link} />
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
-            </div>
-          )}
+          {/* Link columns */}
+          <div className='grid grid-cols-2 gap-8 sm:grid-cols-3 lg:auto-cols-fr lg:grid-flow-col'>
+            {displayColumns.map((column) => (
+              <div key={column.title}>
+                <p className='text-primary/80 mb-4 font-mono text-[10px] font-semibold tracking-[0.18em] uppercase'>
+                  {t(column.title)}
+                </p>
+                <ul className='space-y-2.5'>
+                  {column.links.map((link) => (
+                    <li key={link.href}>
+                      <FooterLinkItem link={link} />
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
         </div>
 
-        {/* Copyright + optional legal links inline on the left, project
-            attribution on the right; wraps on narrow screens. */}
-        <div className='border-border/30 mt-12 flex flex-col items-center justify-between gap-x-3 gap-y-2 border-t pt-6 sm:flex-row'>
-          <div className='text-muted-foreground/40 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-xs sm:justify-start'>
+        {/* Ruled bottom row: copyright + legal + project attribution on the
+            left, build version on the right. Wraps on narrow screens. */}
+        <div className='border-border/40 mt-14 flex flex-col items-center gap-x-6 gap-y-3 border-t pt-6 text-xs sm:flex-row sm:items-start sm:justify-between'>
+          <div className='text-muted-foreground/40 flex flex-wrap items-center justify-center gap-x-2 gap-y-1 sm:justify-start'>
             <span>
               &copy; {currentYear} {displayName}.{' '}
               {props.copyright ?? t('footer.defaultCopyright')}
             </span>
             <LegalLinks leadingSeparator />
+            <span aria-hidden='true' className='text-muted-foreground/30'>
+              ·
+            </span>
+            <ProjectAttribution currentYear={currentYear} inline />
           </div>
-          <ProjectAttribution currentYear={currentYear} />
+          {version && (
+            <span className='text-muted-foreground/50 shrink-0 font-mono text-[11px] tracking-wider'>
+              {version}
+            </span>
+          )}
         </div>
       </div>
     </footer>

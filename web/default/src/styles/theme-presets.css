@@ -427,25 +427,45 @@ For commercial licensing, please contact support@quantumnous.com
  *     derivation (the Anthropic system deliberately uses warm neutrals for
  *     cards/borders rather than tinting them with the clay accent).
  *   - `simple-large`: keeps intentionally neutral, high-contrast surfaces. */
+/* NOTE: the base canvas is now dark in BOTH tiers (see the Aurum
+ * palette in theme.css), so these percentages are tuned for mixing an accent
+ * into a dark background. The old light-canvas values (3-7%) left cards
+ * indistinguishable from the background once the canvas went black.
+ *
+ * Surfaces also need to sit ABOVE the canvas here: on a dark theme a surface
+ * reads as elevated by getting lighter, which is why `--card` mixes in a
+ * little `--foreground` alongside the accent. */
 [data-theme-preset]:not([data-theme-preset='default']):not(
-    [data-theme-preset='anthropic']
-  ):not([data-theme-preset='simple-large']) {
-  --card: color-mix(in oklch, var(--primary) 3%, var(--background));
-  --popover: color-mix(in oklch, var(--primary) 5%, var(--background));
-  --muted: color-mix(in oklch, var(--primary) 7%, var(--background));
+  [data-theme-preset='anthropic']
+):not([data-theme-preset='simple-large']) {
+  --card: color-mix(
+    in oklch,
+    var(--foreground) 5%,
+    color-mix(in oklch, var(--primary) 7%, var(--background))
+  );
+  --popover: color-mix(
+    in oklch,
+    var(--foreground) 8%,
+    color-mix(in oklch, var(--primary) 9%, var(--background))
+  );
+  --muted: color-mix(
+    in oklch,
+    var(--foreground) 7%,
+    color-mix(in oklch, var(--primary) 10%, var(--background))
+  );
   --muted-foreground: color-mix(
     in oklch,
     var(--foreground) 68%,
     var(--primary)
   );
-  --accent: color-mix(in oklch, var(--primary) 14%, var(--background));
+  --accent: color-mix(in oklch, var(--primary) 20%, var(--background));
   --accent-foreground: var(--foreground);
-  --border: color-mix(in oklch, var(--primary) 20%, var(--background));
-  --input: color-mix(in oklch, var(--primary) 22%, var(--background));
-  --sidebar: color-mix(in oklch, var(--primary) 4%, var(--background));
-  --sidebar-accent: color-mix(in oklch, var(--primary) 14%, var(--background));
+  --border: color-mix(in oklch, var(--primary) 26%, var(--background));
+  --input: color-mix(in oklch, var(--primary) 30%, var(--background));
+  --sidebar: color-mix(in oklch, var(--primary) 5%, var(--background));
+  --sidebar-accent: color-mix(in oklch, var(--primary) 20%, var(--background));
   --sidebar-accent-foreground: var(--foreground);
-  --sidebar-border: color-mix(in oklch, var(--primary) 18%, var(--background));
+  --sidebar-border: color-mix(in oklch, var(--primary) 24%, var(--background));
   --success: var(--chart-2);
   --warning: var(--chart-4);
   --info: var(--chart-1);

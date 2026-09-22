@@ -19,7 +19,22 @@ For commercial licensing, please contact support@quantumnous.com
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --font-sans: 'Public Sans', sans-serif;
+  /* Aurum type ramp: Inter for UI text, Manrope for headlines, JetBrains
+   * Mono for data. None of the three ships in the bundle — the stacks pick
+   * them up when installed locally and otherwise fall through to the bundled
+   * Public Sans variable and the platform UI face, with CJK fallbacks so
+   * Chinese copy never lands on a bitmap fallback. */
+  --font-sans:
+    'Inter', 'Inter Variable', 'Public Sans Variable', 'Public Sans',
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
+  --font-heading:
+    'Manrope', 'Manrope Variable', 'Inter', 'Inter Variable',
+    'Public Sans Variable', 'Public Sans', -apple-system, BlinkMacSystemFont,
+    'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
+  --font-mono:
+    'JetBrains Mono', 'JetBrains Mono Variable', 'Fira Code', 'Cascadia Code',
+    'SF Mono', Menlo, Consolas, 'Liberation Mono', ui-monospace, monospace;
   /* Editorial serif token — the body face used by the `serif` font axis
    * and by presets that opt in (currently Anthropic). Lora carries only
    * Latin glyphs, so the stack walks through CJK serifs (Noto / Source Han
@@ -33,12 +48,8 @@ For commercial licensing, please contact support@quantumnous.com
     'Songti SC', 'STSong', 'STSongti-SC-Regular', 'PingFang SC', 'SimSun',
     'NSimSun', '宋体', 'FangSong', '仿宋', 'KaiTi', '楷体', Georgia,
     'Times New Roman', Cambria, 'Liberation Serif', serif;
-  --font-inter:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu',
-    'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
-  --font-manrope:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu',
-    'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  --font-inter: var(--font-sans);
+  --font-manrope: var(--font-heading);
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -83,6 +94,9 @@ For commercial licensing, please contact support@quantumnous.com
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  --color-gold-pale: var(--gold-pale);
+  --color-gold-hover: var(--gold-hover);
+  --color-gold-deep: var(--gold-deep);
 
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
@@ -94,8 +108,8 @@ For commercial licensing, please contact support@quantumnous.com
 }
 
 :root {
-  --radius: 1rem;
-  --app-header-height: 3rem;
+  --radius: 0.75rem;
+  --app-header-height: 3.75rem;
   /* Static build-channel fallback consumed when JS hasn't booted yet. */
   --app-rev: '2k6e8r7p';
   /* Currently active body font. The font axis swaps this between
@@ -103,137 +117,173 @@ For commercial licensing, please contact support@quantumnous.com
    * in theme-presets.css. Default mirrors `--font-sans` so behavior is
    * identical when no font preference is set. */
   --font-body: var(--font-sans);
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.692 0.141 243.716);
-  --primary-foreground: oklch(1 0 0);
-  --secondary: oklch(0.95 0 0);
-  --secondary-foreground: oklch(0.42 0.16 250);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.49 0 0);
-  --accent: color-mix(in oklch, var(--primary) 12%, var(--background));
-  --accent-foreground: oklch(0.145 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
+  /* ── Aurum Ivory & Gold (light) ───────────────────────────────────────
+   * Light mode is the ivory counterpart of the black-gold reference tier in
+   * `.dark` below: a warm ivory canvas (hue 91, the same hue family as the
+   * gold) with near-white cards lifting off it, warm ink for text and a
+   * DEEP gold as the accent. The #D4AF37 gold of the dark tier is too light
+   * to pass as text or as an active-state color on ivory, so the light
+   * primary drops to L≈0.55 (≈4.5:1 on the canvas) and carries an ivory
+   * foreground instead of the dark tier's ink-on-gold pairing.
+   *
+   * Semantic colors (destructive / success / warning / info) keep their
+   * own hues, darkened so they pass on ivory, so status never competes
+   * with the gold accent. */
+  --background: oklch(0.975 0.008 91);
+  --foreground: oklch(0.21 0.012 80);
+  --card: oklch(0.99 0.005 91);
+  --card-foreground: oklch(0.21 0.012 80);
+  --popover: oklch(0.995 0.004 91);
+  --popover-foreground: oklch(0.21 0.012 80);
+  /* Deep gold — dark enough to read as text on ivory, so buttons flip to
+   * an ivory foreground. */
+  --primary: oklch(0.55 0.125 84);
+  --primary-foreground: oklch(0.985 0.01 91);
+  --secondary: oklch(0.94 0.012 91);
+  --secondary-foreground: oklch(0.25 0.012 80);
+  --muted: oklch(0.945 0.01 91);
+  --muted-foreground: oklch(0.48 0.02 80);
+  --accent-foreground: oklch(0.42 0.11 80);
+  --destructive: oklch(0.55 0.19 25);
   --destructive-foreground: oklch(0.985 0 0);
-  --success: oklch(0.596 0.145 163.225);
+  --success: oklch(0.52 0.14 150);
   --success-foreground: oklch(0.985 0 0);
-  --warning: oklch(0.681 0.162 75.834);
-  --warning-foreground: oklch(0.145 0 0);
-  --info: oklch(0.588 0.158 241.966);
+  --warning: oklch(0.6 0.14 70);
+  --warning-foreground: oklch(0.21 0.012 80);
+  --info: oklch(0.52 0.15 260);
   --info-foreground: oklch(0.985 0 0);
-  --neutral: oklch(0.708 0 0);
-  --neutral-foreground: oklch(0.145 0 0);
-  --border: oklch(0.93 0 0);
-  --input: oklch(0.93 0 0);
-  --ring: oklch(0.708 0.16 249.003);
-  --chart-1: oklch(0.72 0.18 250);
-  --chart-2: oklch(0.65 0.15 200);
-  --chart-3: oklch(0.7 0.12 280);
-  --chart-4: oklch(0.68 0.19 325);
-  --chart-5: oklch(0.68 0.16 155);
-  --overview-accent-1: oklch(0.72 0.18 250);
-  --overview-accent-2: oklch(0.65 0.15 200);
-  --overview-accent-3: oklch(0.7 0.12 280);
-  --sidebar: color-mix(in oklch, var(--foreground) 0.5%, var(--background));
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.64 0.197 253.892);
-  --sidebar-primary-foreground: oklch(1 0 0);
-  --sidebar-accent: color-mix(in oklch, var(--primary) 12%, var(--background));
-  --sidebar-accent-foreground: oklch(0.579 0.196 255.909);
-  --sidebar-border: oklch(0.93 0 0);
-  --sidebar-ring: oklch(0.58 0.2 250);
-  --skeleton-base: oklch(0.97 0 0);
-  --skeleton-highlight: oklch(0.985 0 0);
+  --neutral: oklch(0.48 0.02 80);
+  --neutral-foreground: oklch(0.985 0 0);
+  /* Warm hairlines a few steps below the canvas; gold stays reserved for
+   * the active/hover states. */
+  --border: oklch(0.885 0.015 91);
+  --input: oklch(0.85 0.018 91);
+  --ring: oklch(0.55 0.125 84 / 60%);
+  /* Gold family used for KPI numerals, hover states and pressed buttons —
+   * all darkened so they read on ivory. */
+  --gold-pale: oklch(0.5 0.12 82);
+  --gold-hover: oklch(0.62 0.135 88);
+  --gold-deep: oklch(0.45 0.11 78);
+  /* Chart ramp walks the gold family (gold → deep gold → pale gold) so
+   * multi-series charts stay on-palette while remaining distinguishable. */
+  --chart-1: oklch(0.67 0.14 88);
+  --chart-2: oklch(0.52 0.12 80);
+  --chart-3: oklch(0.8 0.11 92);
+  --chart-4: oklch(0.6 0.13 85);
+  --chart-5: oklch(0.6 0.02 80);
+  --overview-accent-1: oklch(0.6 0.135 86);
+  --overview-accent-2: oklch(0.5 0.12 80);
+  --overview-accent-3: oklch(0.7 0.13 90);
+  /* Sidebar sits a step BELOW the canvas (parchment under ivory) so the
+   * shell keeps its depth without a dark band. */
+  --sidebar: oklch(0.955 0.012 91);
+  --sidebar-foreground: oklch(0.21 0.012 80);
+  --sidebar-primary: oklch(0.55 0.125 84);
+  --sidebar-primary-foreground: oklch(0.985 0.01 91);
+  --sidebar-accent-foreground: oklch(0.42 0.11 80);
+  --sidebar-border: oklch(0.875 0.015 91);
+  --sidebar-ring: oklch(0.55 0.125 84 / 60%);
+  --skeleton-base: oklch(0.93 0.01 91);
+  --skeleton-highlight: oklch(0.965 0.008 91);
+  /* Mix ratios for the derived surface tokens declared on `body` below. */
+  --table-header-mix: 3%;
+  --table-header-hover-mix: 5%;
+  --table-disabled-mix: 3%;
+  --table-disabled-hover-mix: 4.5%;
+  --table-disabled-border-mix: 16%;
+}
+
+/* Derived surfaces are declared on <body>, not :root, on purpose: `var()`
+ * inside a custom property resolves where the property is DECLARED, and the
+ * color presets (theme-presets.css) override --background / --foreground /
+ * --primary on <body>. Declared on :root these mixes would keep using the
+ * :root canvas — e.g. the table header stayed near-black under a cream
+ * preset. Presets that set --accent / --sidebar-accent directly still win
+ * because attribute selectors outrank the bare `body` selector. */
+body {
+  --accent: color-mix(in oklch, var(--primary) 14%, var(--background));
+  --sidebar-accent: color-mix(in oklch, var(--primary) 14%, var(--sidebar));
   --table-row: var(--background);
   --table-header: color-mix(
     in oklch,
-    var(--foreground) 1.5%,
+    var(--foreground) var(--table-header-mix),
     var(--background)
   );
   --table-header-hover: color-mix(
     in oklch,
-    var(--foreground) 3%,
+    var(--foreground) var(--table-header-hover-mix),
     var(--background)
   );
   /* Disabled rows: kept subtle so they read as "quiet", not as a colored
      alert state. */
-  --table-disabled: color-mix(in oklch, var(--foreground) 3%, var(--background));
+  --table-disabled: color-mix(
+    in oklch,
+    var(--foreground) var(--table-disabled-mix),
+    var(--background)
+  );
   --table-disabled-hover: color-mix(
     in oklch,
-    var(--foreground) 4.5%,
+    var(--foreground) var(--table-disabled-hover-mix),
     var(--background)
   );
   --table-disabled-border: color-mix(
     in oklch,
-    var(--foreground) 16%,
+    var(--foreground) var(--table-disabled-border-mix),
     var(--background)
   );
 }
 
 .dark {
-  /* OpenAI-like dark mode with a crisp charcoal canvas. */
-  --background: oklch(0.235 0 0);
-  --foreground: oklch(0.965 0 0);
-  --card: oklch(0.285 0 0);
-  --card-foreground: oklch(0.965 0 0);
-  --popover: oklch(0.305 0 0);
-  --popover-foreground: oklch(0.965 0 0);
-  --primary: oklch(0.54 0.142 248.516);
-  --primary-foreground: oklch(1 0 0);
-  --secondary: oklch(0.335 0 0);
-  --secondary-foreground: oklch(0.9 0.05 250);
-  --muted: oklch(0.305 0 0);
-  --muted-foreground: oklch(0.78 0 0);
-  --accent: color-mix(in oklch, var(--primary) 20%, var(--background));
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
+  /* Reference tier — the Aurum design system verbatim. */
+  --background: oklch(0.145 0.002 286);
+  --foreground: oklch(0.961 0.001 286);
+  --card: oklch(0.192 0.004 286);
+  --card-foreground: oklch(0.961 0.001 286);
+  --popover: oklch(0.219 0.006 286);
+  --popover-foreground: oklch(0.961 0.001 286);
+  --primary: oklch(0.767 0.139 91);
+  --primary-foreground: oklch(0.145 0.002 286);
+  --secondary: oklch(0.219 0.006 286);
+  --secondary-foreground: oklch(0.961 0.001 286);
+  --muted: oklch(0.219 0.006 286);
+  --muted-foreground: oklch(0.689 0.013 286);
+  --accent-foreground: oklch(0.925 0.068 94);
+  --destructive: oklch(0.626 0.193 23);
   --destructive-foreground: oklch(0.985 0 0);
-  --success: oklch(0.696 0.17 162.48);
-  --success-foreground: oklch(0.145 0 0);
-  --warning: oklch(0.769 0.188 70.08);
-  --warning-foreground: oklch(0.145 0 0);
-  --info: oklch(0.613 0.14 239.919);
-  --info-foreground: oklch(0.145 0 0);
-  --neutral: oklch(0.76 0 0);
-  --neutral-foreground: oklch(0.155 0 0);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 17%);
-  --ring: oklch(0.554 0.148 250.726);
-  --chart-1: oklch(0.76 0.14 250);
-  --chart-2: oklch(0.76 0.13 200);
-  --chart-3: oklch(0.76 0.13 285);
-  --chart-4: oklch(0.75 0.16 325);
-  --chart-5: oklch(0.76 0.14 155);
-  --sidebar: oklch(0.225 0 0);
-  --sidebar-foreground: oklch(0.95 0 0);
-  --sidebar-primary: oklch(0.588 0.123 246.488);
-  --sidebar-primary-foreground: oklch(1 0 0);
-  --sidebar-accent: color-mix(in oklch, var(--primary) 20%, var(--background));
-  --sidebar-accent-foreground: oklch(0.9 0.05 250);
-  --sidebar-border: oklch(1 0 0 / 11%);
-  --sidebar-ring: oklch(0.7 0.17 250);
-  --skeleton-base: oklch(0.335 0 0);
-  --skeleton-highlight: oklch(0.44 0 0);
-  --table-row: var(--background);
-  --table-header: color-mix(in oklch, var(--foreground) 6%, var(--background));
-  --table-header-hover: color-mix(
-    in oklch,
-    var(--foreground) 9%,
-    var(--background)
-  );
-  --table-disabled: color-mix(in oklch, var(--foreground) 7%, var(--background));
-  --table-disabled-hover: color-mix(
-    in oklch,
-    var(--foreground) 9.5%,
-    var(--background)
-  );
-  --table-disabled-border: color-mix(
-    in oklch,
-    var(--foreground) 24%,
-    var(--background)
-  );
+  --success: oklch(0.749 0.163 155);
+  --success-foreground: oklch(0.145 0.002 286);
+  --warning: oklch(0.764 0.142 72);
+  --warning-foreground: oklch(0.145 0.002 286);
+  --info: oklch(0.701 0.156 264);
+  --info-foreground: oklch(0.145 0.002 286);
+  --neutral: oklch(0.689 0.013 286);
+  --neutral-foreground: oklch(0.145 0.002 286);
+  --border: oklch(0.271 0.009 286);
+  --input: oklch(0.304 0.011 286);
+  --ring: oklch(0.767 0.139 91 / 70%);
+  --gold-pale: oklch(0.925 0.068 94);
+  --gold-hover: oklch(0.835 0.132 93);
+  --gold-deep: oklch(0.652 0.132 82);
+  --chart-1: oklch(0.767 0.139 91);
+  --chart-2: oklch(0.652 0.132 82);
+  --chart-3: oklch(0.925 0.068 94);
+  --chart-4: oklch(0.835 0.132 93);
+  --chart-5: oklch(0.689 0.013 286);
+  --overview-accent-1: oklch(0.767 0.139 91);
+  --overview-accent-2: oklch(0.652 0.132 82);
+  --overview-accent-3: oklch(0.925 0.068 94);
+  --sidebar: oklch(0.165 0.004 286);
+  --sidebar-foreground: oklch(0.961 0.001 286);
+  --sidebar-primary: oklch(0.767 0.139 91);
+  --sidebar-primary-foreground: oklch(0.145 0.002 286);
+  --sidebar-accent-foreground: oklch(0.925 0.068 94);
+  --sidebar-border: oklch(0.271 0.009 286);
+  --sidebar-ring: oklch(0.767 0.139 91 / 70%);
+  --skeleton-base: oklch(0.219 0.006 286);
+  --skeleton-highlight: oklch(0.271 0.009 286);
+  --table-header-mix: 4%;
+  --table-header-hover-mix: 7%;
+  --table-disabled-mix: 6%;
+  --table-disabled-hover-mix: 8.5%;
+  --table-disabled-border-mix: 22%;
 }

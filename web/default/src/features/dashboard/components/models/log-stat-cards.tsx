@@ -150,9 +150,9 @@ export function LogStatCards(props: LogStatCardsProps) {
           let valueContent
           if (loading) {
             valueContent = (
-              <div className='mt-1 flex flex-col gap-1 sm:mt-2 sm:gap-1.5'>
-                <Skeleton className='h-5 w-16 sm:h-7 sm:w-20' />
-                <Skeleton className='hidden h-3.5 w-28 md:block' />
+              <div className='mt-1 flex flex-col gap-1 sm:mt-2'>
+                <Skeleton className='h-5 w-16 sm:h-9 sm:w-20' />
+                <Skeleton className='hidden h-4 w-28 md:block' />
               </div>
             )
           } else if (error) {

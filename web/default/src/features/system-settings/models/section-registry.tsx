@@ -73,6 +73,10 @@ const MODELS_SECTIONS = [
               ],
             upstream_model_update_validate:
               settings['monitor_setting.upstream_model_update_validate'],
+            upstream_model_update_strip_vendor_prefix:
+              settings[
+                'monitor_setting.upstream_model_update_strip_vendor_prefix'
+              ],
             upstream_model_update_remove_failed:
               settings['monitor_setting.upstream_model_update_remove_failed'],
             upstream_model_update_remove_unavailable_models:

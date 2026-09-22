@@ -487,7 +487,19 @@ func collectWebsocketResponse(conn *websocket.Conn) (*http.Response, error) {
 		if response := gjson.GetBytes(payload, "response"); response.Exists() {
 			body = []byte(response.Raw)
 		}
-		resp := synthesizeWebsocketResponse(http.StatusOK, "application/json",
+		// response.failed is terminal but not a success: the unwrapped response
+		// carries an `error` object and no output. OaiResponsesHandler returns
+		// that error with the status stamped here, and a 200 would leave the
+		// caller with an error body under a success code, no retry, and the
+		// channel credited as healthy. The SSE path already maps this event to
+		// 502 (responsesStreamError); the collect path must agree.
+		status := http.StatusOK
+		if eventType == "response.failed" {
+			status = http.StatusBadGateway
+		} else if errField := gjson.GetBytes(body, "error"); errField.Exists() && errField.Type != gjson.Null {
+			status = http.StatusBadGateway
+		}
+		resp := synthesizeWebsocketResponse(status, "application/json",
 			io.NopCloser(bytes.NewReader(body)))
 		resp.ContentLength = int64(len(body))
 		return resp, nil

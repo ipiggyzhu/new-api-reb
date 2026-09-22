@@ -12,6 +12,8 @@ on:
   push:
     branches:
       - feat/channel-routing-and-gateway-improvements
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -32,6 +34,7 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
           BRANCH_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
           # GHCR rejects uppercase in image paths, and a branch name may contain
           # characters that are not valid in a tag (a slash, most commonly).
@@ -45,7 +48,13 @@ jobs:
             exit 1
           fi
 
-          VERSION="${TAG_PREFIX}-$(date +'%Y%m%d')-$(git rev-parse --short HEAD)"
+          # A release tag (v1.0.0) is the version itself; a branch push gets a
+          # date+sha suffix so successive builds stay distinguishable.
+          if [ "$REF_TYPE" = "tag" ]; then
+            VERSION="$TAG_PREFIX"
+          else
+            VERSION="${TAG_PREFIX}-$(date +'%Y%m%d')-$(git rev-parse --short HEAD)"
+          fi
 
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "tag_prefix=$TAG_PREFIX" >> "$GITHUB_OUTPUT"

@@ -51,6 +51,11 @@ var channelUpstreamModelUpdateSelectFields = []string{
 	"priority",
 	"weight",
 	"tag",
+	// UpdateAbilities rebuilds every ability row from this struct, and each row
+	// carries a copy of max_concurrency for the DB selection path. Loading the
+	// channel without it wrote NULL back and silently lifted the channel's
+	// concurrency cap on every scan that changed its model list.
+	"max_concurrency",
 	"channel_info",
 	"header_override",
 	// The columns below are not needed to diff model lists, but model validation
@@ -87,6 +92,7 @@ type applyAllChannelUpstreamModelUpdatesResult struct {
 	ChannelID             int      `json:"channel_id"`
 	ChannelName           string   `json:"channel_name"`
 	AddedModels           []string `json:"added_models"`
+	RejectedModels        []string `json:"rejected_models"`
 	RemovedModels         []string `json:"removed_models"`
 	RemainingModels       []string `json:"remaining_models"`
 	RemainingRemoveModels []string `json:"remaining_remove_models"`
@@ -186,24 +192,93 @@ func normalizeChannelModelMapping(channel *model.Channel) map[string]string {
 	return normalized
 }
 
+// stripUpstreamVendorPrefixes maps each upstream id of the form vendor/name to
+// the bare name a client would actually type, for the ids where that is
+// unambiguous. Aggregator upstreams list openai/gpt-4o, anthropic/claude-sonnet-4
+// and the like; adopting those verbatim gives the channel model names nobody
+// requests, so they sit unused while gpt-4o goes unserved.
+//
+// The bare name is the last path segment, so accounts/vendor/models/x also
+// collapses to x. An id keeps its prefix when the bare name is already a
+// distinct upstream id (openai/gpt-4o next to gpt-4o) or when two prefixed ids
+// would collapse to the same name (openai/gpt-4o next to azure/gpt-4o): guessing
+// which one gpt-4o should mean is exactly the kind of silent misrouting this is
+// meant to prevent. Suffixes such as :free or a date stay untouched.
+func stripUpstreamVendorPrefixes(upstreamModels []string) map[string]string {
+	upstreamSet := make(map[string]struct{}, len(upstreamModels))
+	for _, modelName := range upstreamModels {
+		upstreamSet[modelName] = struct{}{}
+	}
+	bareCount := make(map[string]int, len(upstreamModels))
+	bareOf := make(map[string]string, len(upstreamModels))
+	for _, modelName := range upstreamModels {
+		slash := strings.LastIndex(modelName, "/")
+		if slash < 0 {
+			continue
+		}
+		bare := strings.TrimSpace(modelName[slash+1:])
+		if bare == "" {
+			continue
+		}
+		if _, ok := upstreamSet[bare]; ok {
+			continue
+		}
+		bareOf[modelName] = bare
+		bareCount[bare]++
+	}
+	for modelName, bare := range bareOf {
+		if bareCount[bare] > 1 {
+			delete(bareOf, modelName)
+		}
+	}
+	return bareOf
+}
+
+// collectPendingUpstreamModelChangesFromModels diffs the channel's model list
+// against what the upstream advertises.
+//
+// pendingModelMapping carries, for every pending candidate that was adopted under
+// a bare name, the upstream id it must be mapped back to (see
+// stripUpstreamVendorPrefixes). A candidate is only usable together with that
+// entry, so the two travel together from detection through apply.
 func collectPendingUpstreamModelChangesFromModels(
 	localModels []string,
 	upstreamModels []string,
 	ignoredModels []string,
 	modelMapping map[string]string,
-) (pendingAddModels []string, pendingRemoveModels []string) {
+	stripVendorPrefix bool,
+) (pendingAddModels []string, pendingRemoveModels []string, pendingModelMapping map[string]string) {
 	localSet := make(map[string]struct{})
 	localModels = normalizeModelNames(localModels)
 	upstreamModels = normalizeModelNames(upstreamModels)
 	for _, modelName := range localModels {
 		localSet[modelName] = struct{}{}
 	}
+	// Both spellings of a prefixed id count as "listed upstream": a channel that
+	// already serves openai/gpt-4o verbatim must not have it flagged for removal
+	// just because this run would have adopted it as gpt-4o.
 	upstreamSet := make(map[string]struct{}, len(upstreamModels))
 	for _, modelName := range upstreamModels {
 		upstreamSet[modelName] = struct{}{}
 	}
+	bareOf := map[string]string{}
+	if stripVendorPrefix {
+		bareOf = stripUpstreamVendorPrefixes(upstreamModels)
+		for _, bare := range bareOf {
+			upstreamSet[bare] = struct{}{}
+		}
+	}
 
 	normalizedIgnoredModels := normalizeModelNames(ignoredModels)
+	isIgnored := func(modelName string) bool {
+		return lo.ContainsBy(normalizedIgnoredModels, func(ignoredModel string) bool {
+			if regexBody, ok := strings.CutPrefix(ignoredModel, "regex:"); ok {
+				matched, err := regexp.MatchString(strings.TrimSpace(regexBody), modelName)
+				return err == nil && matched
+			}
+			return ignoredModel == modelName
+		})
+	}
 
 	redirectSourceSet := make(map[string]struct{}, len(modelMapping))
 	redirectTargetSet := make(map[string]struct{}, len(modelMapping))
@@ -220,21 +295,31 @@ func collectPendingUpstreamModelChangesFromModels(
 		coveredUpstreamSet[modelName] = struct{}{}
 	}
 
-	pendingAdd := lo.Filter(upstreamModels, func(modelName string, _ int) bool {
-		if _, ok := coveredUpstreamSet[modelName]; ok {
-			return false
+	pendingModelMapping = make(map[string]string)
+	pendingAdd := make([]string, 0, len(upstreamModels))
+	for _, upstreamName := range upstreamModels {
+		candidate := upstreamName
+		if bare, ok := bareOf[upstreamName]; ok {
+			candidate = bare
 		}
-		if lo.ContainsBy(normalizedIgnoredModels, func(ignoredModel string) bool {
-			if regexBody, ok := strings.CutPrefix(ignoredModel, "regex:"); ok {
-				matched, err := regexp.MatchString(strings.TrimSpace(regexBody), modelName)
-				return err == nil && matched
-			}
-			return ignoredModel == modelName
-		}) {
-			return false
+		// Covered under either spelling: an admin who listed or mapped the
+		// prefixed id already serves this model.
+		if _, ok := coveredUpstreamSet[candidate]; ok {
+			continue
 		}
-		return true
-	})
+		if _, ok := coveredUpstreamSet[upstreamName]; ok {
+			continue
+		}
+		// Ignore rules match either spelling too, so an admin can write the
+		// upstream's own id and still have it honored after normalization.
+		if isIgnored(candidate) || (candidate != upstreamName && isIgnored(upstreamName)) {
+			continue
+		}
+		pendingAdd = append(pendingAdd, candidate)
+		if candidate != upstreamName {
+			pendingModelMapping[candidate] = upstreamName
+		}
+	}
 	pendingRemove := lo.Filter(localModels, func(modelName string, _ int) bool {
 		// Redirect source models are virtual aliases and should not be removed
 		// only because they are absent from upstream model list.
@@ -244,21 +329,82 @@ func collectPendingUpstreamModelChangesFromModels(
 		_, ok := upstreamSet[modelName]
 		return !ok
 	})
-	return normalizeModelNames(pendingAdd), normalizeModelNames(pendingRemove)
+	if len(pendingModelMapping) == 0 {
+		pendingModelMapping = nil
+	}
+	return normalizeModelNames(pendingAdd), normalizeModelNames(pendingRemove), pendingModelMapping
 }
 
-func collectPendingUpstreamModelChanges(channel *model.Channel, settings dto.ChannelOtherSettings) (pendingAddModels []string, pendingRemoveModels []string, err error) {
+func collectPendingUpstreamModelChanges(channel *model.Channel, settings dto.ChannelOtherSettings) (pendingAddModels []string, pendingRemoveModels []string, pendingModelMapping map[string]string, err error) {
 	upstreamModels, err := fetchChannelUpstreamModelIDs(channel)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	pendingAddModels, pendingRemoveModels = collectPendingUpstreamModelChangesFromModels(
+	pendingAddModels, pendingRemoveModels, pendingModelMapping = collectPendingUpstreamModelChangesFromModels(
 		channel.GetModels(),
 		upstreamModels,
 		settings.UpstreamModelUpdateIgnoredModels,
 		normalizeChannelModelMapping(channel),
+		operation_setting.GetMonitorSetting().UpstreamModelUpdateStripVendorPrefix,
 	)
-	return pendingAddModels, pendingRemoveModels, nil
+	return pendingAddModels, pendingRemoveModels, pendingModelMapping, nil
+}
+
+// pendingModelMappingFor narrows a pending mapping to the models still staged,
+// so an entry never outlives the candidate it belongs to.
+func pendingModelMappingFor(pending map[string]string, models []string) map[string]string {
+	if len(pending) == 0 || len(models) == 0 {
+		return nil
+	}
+	narrowed := make(map[string]string, len(models))
+	for _, modelName := range normalizeModelNames(models) {
+		if upstreamName, ok := pending[modelName]; ok && upstreamName != "" {
+			narrowed[modelName] = upstreamName
+		}
+	}
+	if len(narrowed) == 0 {
+		return nil
+	}
+	return narrowed
+}
+
+// mergeChannelModelMapping returns the channel's model_mapping with entries added
+// for the given models, leaving every existing entry alone: the admin's own
+// redirects always win over what the task inferred. It reports false when there
+// is nothing to add or the stored mapping cannot be parsed, in which case the
+// column must not be rewritten — replacing an admin's hand-edited JSON with a
+// reconstruction is not this task's call.
+func mergeChannelModelMapping(channel *model.Channel, entries map[string]string) (*string, bool) {
+	if len(entries) == 0 {
+		return nil, false
+	}
+	merged := make(map[string]string)
+	if raw := strings.TrimSpace(channel.GetModelMapping()); raw != "" && raw != "{}" {
+		if err := common.UnmarshalJsonStr(raw, &merged); err != nil {
+			common.SysLog(fmt.Sprintf(
+				"upstream model mapping not written: channel_id=%d model_mapping is not valid JSON: %v",
+				channel.Id, err,
+			))
+			return nil, false
+		}
+	}
+	changed := false
+	for modelName, upstreamName := range entries {
+		if _, exists := merged[modelName]; exists {
+			continue
+		}
+		merged[modelName] = upstreamName
+		changed = true
+	}
+	if !changed {
+		return nil, false
+	}
+	encoded, err := common.Marshal(merged)
+	if err != nil {
+		return nil, false
+	}
+	mapping := string(encoded)
+	return &mapping, true
 }
 
 func getUpstreamModelUpdateMinCheckIntervalSeconds() int64 {
@@ -425,7 +571,11 @@ var channelUpstreamModelPersistMu sync.Mutex
 //
 // The channel argument is still updated in place so the caller's later
 // UpdateAbilities sees the new model list.
-func updateChannelUpstreamModelSettings(channel *model.Channel, settings dto.ChannelOtherSettings, updateModels bool) error {
+//
+// modelMapping, when non-nil, is written to the model_mapping column in the same
+// statement as the model list: a model adopted under a bare name is only
+// reachable through the mapping that turns it back into the upstream id.
+func updateChannelUpstreamModelSettings(channel *model.Channel, settings dto.ChannelOtherSettings, updateModels bool, modelMapping *string) error {
 	apply := func(stored *dto.ChannelOtherSettings) bool {
 		// Exactly the UpstreamModelUpdate* group. Everything else on the struct
 		// belongs to the admin form or to the handshake probe, and must survive.
@@ -435,6 +585,7 @@ func updateChannelUpstreamModelSettings(channel *model.Channel, settings dto.Cha
 		stored.UpstreamModelUpdateLastDetectedModels = settings.UpstreamModelUpdateLastDetectedModels
 		stored.UpstreamModelUpdateLastRemovedModels = settings.UpstreamModelUpdateLastRemovedModels
 		stored.UpstreamModelUpdateIgnoredModels = settings.UpstreamModelUpdateIgnoredModels
+		stored.UpstreamModelUpdatePendingModelMapping = settings.UpstreamModelUpdatePendingModelMapping
 		stored.UpstreamModelUpdateModelHealth = settings.UpstreamModelUpdateModelHealth
 		stored.UpstreamModelUpdateRotationCursor = settings.UpstreamModelUpdateRotationCursor
 		return true
@@ -443,21 +594,35 @@ func updateChannelUpstreamModelSettings(channel *model.Channel, settings dto.Cha
 	// Keep the in-memory channel consistent with what the caller expects to have
 	// written, so code after this call reads the values it just set.
 	channel.SetOtherSettings(settings)
+	if modelMapping != nil {
+		channel.ModelMapping = modelMapping
+	}
 
-	if updateModels {
-		return model.MutateChannelSettingsWithModels(channel.Id, channel.Models, apply)
+	if updateModels || modelMapping != nil {
+		return model.MutateChannelSettingsWithModels(channel.Id, channel.Models, modelMapping, apply)
 	}
 	return model.MutateChannelSettings(channel.Id, apply)
 }
 
-// upstreamModelUpdateRunContext carries the per-run state of a scheduled
-// auto-update scan. It exists only when monitor_setting has the upstream model
-// auto-update switch on, so a nil pointer means "legacy detect-only behavior":
-// stage the diff for manual review, never validate and never apply.
+// upstreamModelUpdateRunContext carries the per-run policy and state of one
+// pass that may add models to channels: the scheduled scan, the manual apply
+// endpoints, or "run now". A nil pointer means detect-only: stage the diff for
+// review, never validate and never apply.
 type upstreamModelUpdateRunContext struct {
 	ctx        context.Context
 	monitor    *operation_setting.MonitorSetting
 	testUserID int
+
+	// autoSyncAll is the global auto-update switch: every scanned channel adopts
+	// its validated candidates. With it off, only channels whose own auto-sync
+	// flag is on adopt anything — the channel-level setting takes precedence,
+	// the global one fills in for the rest.
+	autoSyncAll bool
+	// candidatesOnly restricts validation to the models about to be added. It is
+	// set for every path other than the global auto-update scan, so a manual
+	// apply or a channel-level auto-sync never re-tests or removes models the
+	// channel already serves: those are opted into via the global switch alone.
+	candidatesOnly bool
 
 	// mu guards every counter below: the task scans channels concurrently and
 	// all workers draw from the same shared validation budget.
@@ -495,6 +660,36 @@ func (r *upstreamModelUpdateRunContext) consumeValidationBudget() bool {
 // request before adding them and before removing them.
 func (r *upstreamModelUpdateRunContext) validationEnabled() bool {
 	return r != nil && r.monitor.UpstreamModelUpdateValidate && r.testUserID > 0
+}
+
+// newUpstreamModelUpdateRunContext builds the run policy from a monitor snapshot.
+// It returns nil when the run could add nothing and validate nothing, which keeps
+// the detect-only paths on the nil fast path.
+//
+// Validation issues billable requests, so it needs a user to bill. c supplies the
+// admin on the manual endpoints; the scheduled scan passes nil and falls back to
+// the root user. If no user can be resolved the run degrades to detect-only and
+// says so in the log, rather than adopting models on trust.
+func newUpstreamModelUpdateRunContext(ctx context.Context, c *gin.Context, monitor *operation_setting.MonitorSetting, candidatesOnly bool) *upstreamModelUpdateRunContext {
+	if !monitor.UpstreamModelUpdateEnabled && !monitor.UpstreamModelUpdateValidate {
+		return nil
+	}
+	run := &upstreamModelUpdateRunContext{
+		ctx:              ctx,
+		monitor:          monitor,
+		autoSyncAll:      monitor.UpstreamModelUpdateEnabled,
+		candidatesOnly:   candidatesOnly || !monitor.UpstreamModelUpdateEnabled,
+		validationBudget: monitor.GetUpstreamModelUpdateMaxValidationsPerRun(),
+	}
+	if monitor.UpstreamModelUpdateValidate {
+		testUserID, err := resolveChannelTestUserID(c)
+		if err != nil {
+			common.SysLog(fmt.Sprintf("upstream model validation disabled for this run: %v", err))
+		} else {
+			run.testUserID = testUserID
+		}
+	}
+	return run
 }
 
 const (
@@ -655,12 +850,20 @@ func (r *upstreamModelUpdateRunContext) validateChannelModels(
 
 	now := common.GetTimestamp()
 	retryDelaySeconds := int64(r.monitor.GetUpstreamModelUpdateRetryDelayMinutes()) * 60
+	selectionHealth := health
+	rotationSampleSize := r.monitor.GetUpstreamModelUpdateRotationSampleSize()
+	if r.candidatesOnly {
+		// Neither the retry of recorded failures nor the rotation sample: both
+		// exist to remove models, and this run is only allowed to add.
+		selectionHealth = nil
+		rotationSampleSize = 0
+	}
 	selected, nextCursor := selectModelsForUpstreamValidation(
 		existingModels,
 		candidateModels,
-		health,
+		selectionHealth,
 		retryDelaySeconds,
-		r.monitor.GetUpstreamModelUpdateRotationSampleSize(),
+		rotationSampleSize,
 		settings.UpstreamModelUpdateRotationCursor,
 		now,
 		r.remainingValidationBudget(),
@@ -893,22 +1096,30 @@ func checkAndPersistChannelUpstreamModelUpdates(
 		}
 	}
 
-	pendingAddModels, pendingRemoveModels, fetchErr := collectPendingUpstreamModelChanges(channel, *settings)
+	pendingAddModels, pendingRemoveModels, pendingModelMapping, fetchErr := collectPendingUpstreamModelChanges(channel, *settings)
 	settings.UpstreamModelUpdateLastCheckTime = now
 	if fetchErr != nil {
-		if err = updateChannelUpstreamModelSettings(channel, *settings, false); err != nil {
+		if err = updateChannelUpstreamModelSettings(channel, *settings, false, nil); err != nil {
 			return false, 0, 0, err
 		}
 		return false, 0, 0, fetchErr
 	}
 
-	// A scheduled auto-update run applies to every channel it scans; the
-	// per-channel auto-sync flag stays honored so the legacy env-driven path keeps
-	// working unchanged for deployments that never enable the global switch.
-	autoSyncEnabled := settings.UpstreamModelUpdateAutoSyncEnabled || run != nil
+	// The channel's own auto-sync flag comes first; the global switch fills in
+	// for channels that never set one.
+	autoSyncEnabled := settings.UpstreamModelUpdateAutoSyncEnabled || (run != nil && run.autoSyncAll)
 	var failedModels []string
-	if allowAutoApply && run.validationEnabled() {
+	var modelMapping *string
+	if allowAutoApply && autoSyncEnabled && run.validationEnabled() {
+		// Probe through the mapping the candidates will be adopted with, so a
+		// bare gpt-4o is tested as the upstream's openai/gpt-4o and not as a
+		// name the upstream has never heard of.
+		storedMapping := channel.ModelMapping
+		if probeMapping, ok := mergeChannelModelMapping(channel, pendingModelMapping); ok {
+			channel.ModelMapping = probeMapping
+		}
 		pendingAddModels, failedModels = run.validateChannelModels(channel, settings, pendingAddModels)
+		channel.ModelMapping = storedMapping
 	}
 
 	if allowAutoApply && autoSyncEnabled && (len(pendingAddModels) > 0 || len(failedModels) > 0) {
@@ -916,6 +1127,7 @@ func checkAndPersistChannelUpstreamModelUpdates(
 		targetModels := originModels
 		if len(pendingAddModels) > 0 {
 			targetModels = mergeModelNames(targetModels, pendingAddModels)
+			modelMapping, _ = mergeChannelModelMapping(channel, pendingModelMappingFor(pendingModelMapping, pendingAddModels))
 		}
 		autoAdded = len(targetModels) - len(originModels)
 		if len(failedModels) > 0 {
@@ -928,12 +1140,14 @@ func checkAndPersistChannelUpstreamModelUpdates(
 			modelsChanged = true
 		}
 		settings.UpstreamModelUpdateLastDetectedModels = []string{}
+		settings.UpstreamModelUpdatePendingModelMapping = nil
 	} else {
 		settings.UpstreamModelUpdateLastDetectedModels = pendingAddModels
+		settings.UpstreamModelUpdatePendingModelMapping = pendingModelMappingFor(pendingModelMapping, pendingAddModels)
 	}
 	settings.UpstreamModelUpdateLastRemovedModels = pendingRemoveModels
 
-	if err = updateChannelUpstreamModelSettings(channel, *settings, modelsChanged); err != nil {
+	if err = updateChannelUpstreamModelSettings(channel, *settings, modelsChanged, modelMapping); err != nil {
 		return modelsChanged, autoAdded, autoRemoved, err
 	}
 	if modelsChanged {
@@ -1092,8 +1306,9 @@ type upstreamModelUpdateSummary struct {
 // When monitor_setting has the upstream model auto-update switch on and the run
 // is allowed to apply, each candidate model is confirmed with a real request
 // before being added and failing models are removed once they exceed the
-// configured failure threshold. With the switch off the behavior is unchanged:
-// diff only, applied per the channel's own auto-sync flag.
+// configured failure threshold. With the switch off, only channels whose own
+// auto-sync flag is on adopt anything, and their candidates are still validated
+// before being added; nothing is removed on that path.
 func runChannelUpstreamModelUpdateTaskOnce(ctx context.Context, force bool, allowAutoApply bool, report func(processed, total int)) upstreamModelUpdateSummary {
 	checkedChannels := 0
 	failedChannels := 0
@@ -1113,24 +1328,13 @@ func runChannelUpstreamModelUpdateTaskOnce(ctx context.Context, force bool, allo
 	// mid-run.
 	monitor := *operation_setting.GetMonitorSetting()
 	scanAllChannels := monitor.UpstreamModelUpdateEnabled && monitor.UpstreamModelUpdateScanAllChannels
+	// Built even with the global switch off: a channel whose own auto-sync flag
+	// is on still adds models on this path, and those adds must be validated
+	// like any other. The run then carries the policy but applies to no channel
+	// of its own accord.
 	var run *upstreamModelUpdateRunContext
-	if monitor.UpstreamModelUpdateEnabled {
-		run = &upstreamModelUpdateRunContext{
-			ctx:              ctx,
-			monitor:          &monitor,
-			validationBudget: monitor.GetUpstreamModelUpdateMaxValidationsPerRun(),
-		}
-		if monitor.UpstreamModelUpdateValidate {
-			// Validation issues billable requests, so it needs a user to bill. If
-			// no root user can be resolved the run degrades to detect-only rather
-			// than adopting models on trust.
-			testUserID, err := resolveChannelTestUserID(nil)
-			if err != nil {
-				common.SysLog(fmt.Sprintf("upstream model validation disabled for this run: %v", err))
-			} else {
-				run.testUserID = testUserID
-			}
-		}
+	if allowAutoApply {
+		run = newUpstreamModelUpdateRunContext(ctx, nil, &monitor, false)
 	}
 
 	// Count the enabled channels up front so progress can be reported as a
@@ -1353,16 +1557,21 @@ func ApplyChannelUpstreamModelUpdates(c *gin.Context) {
 	beforeSettings := channel.GetOtherSettings()
 	ignoredModels := intersectModelNames(req.IgnoreModels, beforeSettings.UpstreamModelUpdateLastDetectedModels)
 
-	addedModels, removedModels, remainingModels, remainingRemoveModels, modelsChanged, err := applyChannelUpstreamModelUpdates(
+	monitor := *operation_setting.GetMonitorSetting()
+	run := newUpstreamModelUpdateRunContext(c.Request.Context(), c, &monitor, true)
+	applied, err := applyChannelUpstreamModelUpdates(
 		channel,
 		req.AddModels,
 		req.IgnoreModels,
 		req.RemoveModels,
+		run,
 	)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
+	addedModels, removedModels := applied.addedModels, applied.removedModels
+	remainingModels, remainingRemoveModels, modelsChanged := applied.remainingModels, applied.remainingRemoveModels, applied.modelsChanged
 
 	if modelsChanged {
 		refreshChannelRuntimeCache()
@@ -1377,6 +1586,7 @@ func ApplyChannelUpstreamModelUpdates(c *gin.Context) {
 		"data": gin.H{
 			"id":                      channel.Id,
 			"added_models":            addedModels,
+			"rejected_models":         applied.rejectedModels,
 			"removed_models":          removedModels,
 			"ignored_models":          ignoredModels,
 			"remaining_models":        remainingModels,
@@ -1431,19 +1641,30 @@ func DetectChannelUpstreamModelUpdates(c *gin.Context) {
 	})
 }
 
+type appliedChannelUpstreamModelUpdates struct {
+	addedModels []string
+	// rejectedModels were selected for adding but failed the validation request;
+	// they stay staged so the admin can see them and retry.
+	rejectedModels        []string
+	removedModels         []string
+	remainingModels       []string
+	remainingRemoveModels []string
+	modelsChanged         bool
+}
+
+// applyChannelUpstreamModelUpdates carries out an admin's selection from the
+// staged diff. Selected additions go through the same validation as the
+// scheduled scan when run allows it: a manual "add all" used to be the one path
+// that adopted upstream ids on trust, which is how models nobody could use ended
+// up on channels.
 func applyChannelUpstreamModelUpdates(
 	channel *model.Channel,
 	addModelsInput []string,
 	ignoreModelsInput []string,
 	removeModelsInput []string,
-) (
-	addedModels []string,
-	removedModels []string,
-	remainingModels []string,
-	remainingRemoveModels []string,
-	modelsChanged bool,
-	err error,
-) {
+	run *upstreamModelUpdateRunContext,
+) (appliedChannelUpstreamModelUpdates, error) {
+	var applied appliedChannelUpstreamModelUpdates
 	settings := channel.GetOtherSettings()
 	pendingAddModels := normalizeModelNames(settings.UpstreamModelUpdateLastDetectedModels)
 	pendingRemoveModels := normalizeModelNames(settings.UpstreamModelUpdateLastRemovedModels)
@@ -1452,33 +1673,55 @@ func applyChannelUpstreamModelUpdates(
 	removeModels := intersectModelNames(removeModelsInput, pendingRemoveModels)
 	removeModels = subtractModelNames(removeModels, addModels)
 
+	if len(addModels) > 0 && run.validationEnabled() {
+		storedMapping := channel.ModelMapping
+		if probeMapping, ok := mergeChannelModelMapping(channel, pendingModelMappingFor(settings.UpstreamModelUpdatePendingModelMapping, addModels)); ok {
+			channel.ModelMapping = probeMapping
+		}
+		approved, _ := run.validateChannelModels(channel, &settings, addModels)
+		channel.ModelMapping = storedMapping
+		applied.rejectedModels = subtractModelNames(addModels, approved)
+		addModels = approved
+	}
+
 	originModels := normalizeModelNames(channel.GetModels())
 	nextModels := applySelectedModelChanges(originModels, addModels, removeModels)
-	modelsChanged = !slices.Equal(originModels, nextModels)
-	if modelsChanged {
+	applied.modelsChanged = !slices.Equal(originModels, nextModels)
+	var modelMapping *string
+	if applied.modelsChanged {
 		channel.Models = strings.Join(nextModels, ",")
+		modelMapping, _ = mergeChannelModelMapping(channel, pendingModelMappingFor(settings.UpstreamModelUpdatePendingModelMapping, addModels))
 	}
 
 	settings.UpstreamModelUpdateIgnoredModels = mergeModelNames(settings.UpstreamModelUpdateIgnoredModels, ignoreModels)
 	if len(addModels) > 0 {
 		settings.UpstreamModelUpdateIgnoredModels = subtractModelNames(settings.UpstreamModelUpdateIgnoredModels, addModels)
 	}
-	remainingModels = subtractModelNames(pendingAddModels, append(addModels, ignoreModels...))
-	remainingRemoveModels = subtractModelNames(pendingRemoveModels, removeModels)
-	settings.UpstreamModelUpdateLastDetectedModels = remainingModels
-	settings.UpstreamModelUpdateLastRemovedModels = remainingRemoveModels
+	applied.remainingModels = subtractModelNames(pendingAddModels, append(addModels, ignoreModels...))
+	applied.remainingRemoveModels = subtractModelNames(pendingRemoveModels, removeModels)
+	settings.UpstreamModelUpdateLastDetectedModels = applied.remainingModels
+	settings.UpstreamModelUpdatePendingModelMapping = pendingModelMappingFor(settings.UpstreamModelUpdatePendingModelMapping, applied.remainingModels)
+	settings.UpstreamModelUpdateLastRemovedModels = applied.remainingRemoveModels
 	settings.UpstreamModelUpdateLastCheckTime = common.GetTimestamp()
+	applied.addedModels = addModels
+	applied.removedModels = removeModels
 
-	if err := updateChannelUpstreamModelSettings(channel, settings, modelsChanged); err != nil {
-		return nil, nil, nil, nil, false, err
+	if err := updateChannelUpstreamModelSettings(channel, settings, applied.modelsChanged, modelMapping); err != nil {
+		return appliedChannelUpstreamModelUpdates{}, err
 	}
 
-	if modelsChanged {
-		if err := channel.UpdateAbilities(nil); err != nil {
-			return addModels, removeModels, remainingModels, remainingRemoveModels, true, err
+	if applied.modelsChanged {
+		// Same lock as the scheduled scan: a rebuild is delete-then-insert of
+		// every ability row, and interleaving two of them for one channel leaves
+		// the union of both model sets behind.
+		channelUpstreamModelPersistMu.Lock()
+		err := channel.UpdateAbilities(nil)
+		channelUpstreamModelPersistMu.Unlock()
+		if err != nil {
+			return applied, err
 		}
 	}
-	return addModels, removeModels, remainingModels, remainingRemoveModels, modelsChanged, nil
+	return applied, nil
 }
 
 func collectPendingApplyUpstreamModelChanges(settings dto.ChannelOtherSettings) (pendingAddModels []string, pendingRemoveModels []string) {
@@ -1503,7 +1746,13 @@ func ApplyAllChannelUpstreamModelUpdates(c *gin.Context) {
 	failed := make([]int, 0)
 	refreshNeeded := false
 	addedModelCount := 0
+	rejectedModelCount := 0
 	removedModelCount := 0
+
+	// One run for the whole batch so the validation budget is shared across
+	// channels exactly as it is in the scheduled scan.
+	monitor := *operation_setting.GetMonitorSetting()
+	run := newUpstreamModelUpdateRunContext(c.Request.Context(), c, &monitor, true)
 
 	lastID := 0
 	for {
@@ -1532,28 +1781,31 @@ func ApplyAllChannelUpstreamModelUpdates(c *gin.Context) {
 				continue
 			}
 
-			addedModels, removedModels, remainingModels, remainingRemoveModels, modelsChanged, err := applyChannelUpstreamModelUpdates(
+			applied, err := applyChannelUpstreamModelUpdates(
 				channel,
 				pendingAddModels,
 				nil,
 				pendingRemoveModels,
+				run,
 			)
 			if err != nil {
 				failed = append(failed, channel.Id)
 				continue
 			}
-			if modelsChanged {
+			if applied.modelsChanged {
 				refreshNeeded = true
 			}
-			addedModelCount += len(addedModels)
-			removedModelCount += len(removedModels)
+			addedModelCount += len(applied.addedModels)
+			rejectedModelCount += len(applied.rejectedModels)
+			removedModelCount += len(applied.removedModels)
 			results = append(results, applyAllChannelUpstreamModelUpdatesResult{
 				ChannelID:             channel.Id,
 				ChannelName:           channel.Name,
-				AddedModels:           addedModels,
-				RemovedModels:         removedModels,
-				RemainingModels:       remainingModels,
-				RemainingRemoveModels: remainingRemoveModels,
+				AddedModels:           applied.addedModels,
+				RejectedModels:        applied.rejectedModels,
+				RemovedModels:         applied.removedModels,
+				RemainingModels:       applied.remainingModels,
+				RemainingRemoveModels: applied.remainingRemoveModels,
 			})
 		}
 
@@ -1575,6 +1827,7 @@ func ApplyAllChannelUpstreamModelUpdates(c *gin.Context) {
 		"data": gin.H{
 			"processed_channels": len(results),
 			"added_models":       addedModelCount,
+			"rejected_models":    rejectedModelCount,
 			"removed_models":     removedModelCount,
 			"failed_channel_ids": failed,
 			"results":            results,

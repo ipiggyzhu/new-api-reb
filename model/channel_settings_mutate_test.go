@@ -227,6 +227,7 @@ func TestMutateChannelSettingsWithModelsWritesBothColumns(t *testing.T) {
 	require.NoError(t, MutateChannelSettingsWithModels(
 		channel.Id,
 		"gpt-4o,gpt-4o-mini",
+		nil,
 		func(s *dto.ChannelOtherSettings) bool {
 			s.UpstreamModelUpdateLastCheckTime = 42
 			return true
@@ -237,6 +238,28 @@ func TestMutateChannelSettingsWithModelsWritesBothColumns(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "gpt-4o,gpt-4o-mini", stored.Models)
 	assert.Equal(t, int64(42), stored.GetOtherSettings().UpstreamModelUpdateLastCheckTime)
+	assert.Nil(t, stored.ModelMapping, "nil modelMapping must leave the column untouched")
+}
+
+// TestMutateChannelSettingsWithModelsWritesModelMapping pins that a model adopted
+// under a bare name lands together with the mapping that turns it back into the
+// upstream id: one without the other is a model that resolves nowhere.
+func TestMutateChannelSettingsWithModelsWritesModelMapping(t *testing.T) {
+	channel := openChannelSettingsTestDB(t)
+
+	mapping := `{"gpt-4o-mini":"openai/gpt-4o-mini"}`
+	require.NoError(t, MutateChannelSettingsWithModels(
+		channel.Id,
+		"gpt-4o,gpt-4o-mini",
+		&mapping,
+		func(s *dto.ChannelOtherSettings) bool { return true },
+	))
+
+	stored, err := GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-4o,gpt-4o-mini", stored.Models)
+	require.NotNil(t, stored.ModelMapping)
+	assert.Equal(t, mapping, *stored.ModelMapping)
 }
 
 // TestMutateChannelSettingsWithModelsSkipsBothWritesWhenMutateReturnsFalse pins
@@ -249,6 +272,7 @@ func TestMutateChannelSettingsWithModelsSkipsBothWritesWhenMutateReturnsFalse(t 
 	require.NoError(t, MutateChannelSettingsWithModels(
 		channel.Id,
 		"gpt-4o,should-not-be-written",
+		nil,
 		func(s *dto.ChannelOtherSettings) bool { return false },
 	))
 

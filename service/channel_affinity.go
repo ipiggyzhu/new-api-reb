@@ -990,6 +990,16 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 			channelID = successChannelID
 		}
 	}
+	// The pin stays with its channel when SwitchOnSuccess is off, but only while
+	// that channel is still the one that answers. If it faulted on this request
+	// and a fallback produced the success, refreshing its TTL here would walk the
+	// next request straight back into the broken channel; the failure path would
+	// have retracted the pin, and a success on another channel must not undo that.
+	if pinnedChannel := c.GetInt(ginKeyChannelAffinityPinnedChannel); pinnedChannel > 0 &&
+		channelID == pinnedChannel && channelAffinityChannelFaulted(c, pinnedChannel) {
+		releaseChannelAffinityOnFault(c)
+		return
+	}
 	cacheKey, ttlSeconds, ok := getChannelAffinityContext(c)
 	if !ok {
 		return

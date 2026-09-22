@@ -16,8 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+
 import { useRef, useEffect, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
+
+import { cn } from '@/lib/utils'
+
+import { useLandingBoard } from '../../hooks'
 
 interface CounterProps {
   end: number
@@ -88,40 +93,103 @@ interface StatsProps {
 }
 
 interface StatItem {
+  key: string
   end: number
   suffix: string
   label: string
   decimals?: number
 }
 
-export function Stats(_props: StatsProps) {
-  const { t } = useTranslation()
+const COLUMN_CLASS: Record<number, string> = {
+  1: 'grid-cols-1',
+  2: 'grid-cols-2',
+  3: 'grid-cols-2 md:grid-cols-3',
+  4: 'grid-cols-2 md:grid-cols-4',
+}
 
-  const stats: StatItem[] = [
-    { end: 50, suffix: '+', label: t('upstream services integrated') },
-    { end: 100, suffix: '+', label: t('model billing support') },
-    { end: 50, suffix: '+', label: t('compatible API routes') },
-    { end: 10, suffix: '+', label: t('scheduling controls') },
-  ]
+/**
+ * Stats strip: real figures from the public catalog and rankings on a
+ * ruled band, separated by hairlines rather than boxed into cards. A
+ * figure with no data behind it is dropped rather than padded; the strip
+ * disappears entirely when nothing public is available.
+ */
+export function Stats(props: StatsProps) {
+  const { t } = useTranslation()
+  const board = useLandingBoard()
+
+  if (board.isLoading) {
+    return null
+  }
+
+  const stats: StatItem[] = []
+  if (board.modelCount > 0) {
+    stats.push({
+      key: 'models',
+      end: board.modelCount,
+      suffix: '',
+      label: t('models in catalog'),
+    })
+  }
+  if (board.providerCount > 0) {
+    stats.push({
+      key: 'providers',
+      end: board.providerCount,
+      suffix: '',
+      label: t('providers'),
+    })
+  }
+  if (board.endpointCount > 0) {
+    stats.push({
+      key: 'endpoints',
+      end: board.endpointCount,
+      suffix: '',
+      label: t('API endpoint types'),
+    })
+  }
+  if (board.weeklyTokens > 0) {
+    let value = board.weeklyTokens
+    let unit = ''
+    if (value >= 1e9) {
+      value /= 1e9
+      unit = 'B'
+    } else if (value >= 1e6) {
+      value /= 1e6
+      unit = 'M'
+    } else if (value >= 1e3) {
+      value /= 1e3
+      unit = 'K'
+    }
+    stats.push({
+      key: 'tokens',
+      end: value,
+      suffix: unit,
+      decimals: unit && value < 100 ? 1 : 0,
+      label: t('tokens routed this week'),
+    })
+  }
+
+  if (stats.length === 0) {
+    return null
+  }
 
   return (
-    <div className='border-border/40 bg-muted/10 relative z-10 border-y'>
-      <div className='mx-auto max-w-6xl px-6 py-10 md:py-12'>
-        <div className='grid grid-cols-2 gap-8 md:grid-cols-4 md:gap-12'>
+    <div className={cn('relative z-10 px-5 sm:px-8', props.className)}>
+      <div className='border-border/60 mx-auto max-w-6xl border-y'>
+        <dl className={cn('grid', COLUMN_CLASS[stats.length])}>
           {stats.map((s) => (
             <div
-              key={s.label}
-              className='flex flex-col items-center text-center'
+              key={s.key}
+              className='border-border/60 px-5 py-7 sm:px-7 sm:py-9 md:[&:not(:first-child)]:border-l [&:nth-child(even)]:border-l [&:nth-child(n+3)]:border-t md:[&:nth-child(n+3)]:border-t-0'
             >
-              <span className='text-2xl font-bold tracking-tight md:text-3xl'>
+              <dd className='font-heading text-primary text-4xl font-semibold tracking-tight md:text-5xl'>
                 <Counter end={s.end} suffix={s.suffix} decimals={s.decimals} />
-              </span>
-              <span className='text-muted-foreground mt-1.5 text-xs'>
+              </dd>
+              <dt className='text-muted-foreground mt-3 text-[11px] font-medium tracking-[0.14em] uppercase'>
                 {s.label}
-              </span>
+              </dt>
             </div>
           ))}
-        </div>
+        </dl>
       </div>
     </div>
   )

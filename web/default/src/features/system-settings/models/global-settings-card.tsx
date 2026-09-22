@@ -122,6 +122,7 @@ const schema = z.object({
     upstream_model_update_interval_hours: z.coerce.number().min(1),
     upstream_model_update_scan_all_channels: z.boolean(),
     upstream_model_update_validate: z.boolean(),
+    upstream_model_update_strip_vendor_prefix: z.boolean(),
     upstream_model_update_remove_failed: z.boolean(),
     upstream_model_update_remove_unavailable_models: z.boolean(),
     upstream_model_update_retry_delay_minutes: z.coerce.number().min(1),
@@ -146,6 +147,7 @@ type FlatGlobalModelSettings = {
   'monitor_setting.upstream_model_update_interval_hours': number
   'monitor_setting.upstream_model_update_scan_all_channels': boolean
   'monitor_setting.upstream_model_update_validate': boolean
+  'monitor_setting.upstream_model_update_strip_vendor_prefix': boolean
   'monitor_setting.upstream_model_update_remove_failed': boolean
   'monitor_setting.upstream_model_update_remove_unavailable_models': boolean
   'monitor_setting.upstream_model_update_retry_delay_minutes': number
@@ -181,6 +183,8 @@ const flattenGlobalValues = (
     values.monitor_setting.upstream_model_update_scan_all_channels,
   'monitor_setting.upstream_model_update_validate':
     values.monitor_setting.upstream_model_update_validate,
+  'monitor_setting.upstream_model_update_strip_vendor_prefix':
+    values.monitor_setting.upstream_model_update_strip_vendor_prefix,
   'monitor_setting.upstream_model_update_remove_failed':
     values.monitor_setting.upstream_model_update_remove_failed,
   'monitor_setting.upstream_model_update_remove_unavailable_models':
@@ -710,6 +714,30 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
 
             <FormField
               control={form.control}
+              name='monitor_setting.upstream_model_update_strip_vendor_prefix'
+              render={({ field }) => (
+                <SettingsSwitchItem>
+                  <SettingsSwitchContent>
+                    <FormLabel>{t('Strip Vendor Prefixes')}</FormLabel>
+                    <FormDescription>
+                      {t(
+                        'Adopt openai/gpt-4o as gpt-4o and map it back to the upstream id. The prefix is kept when the bare name is ambiguous or already served.'
+                      )}
+                    </FormDescription>
+                  </SettingsSwitchContent>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      disabled={!autoUpdateEnabled}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </SettingsSwitchItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
               name='monitor_setting.upstream_model_update_remove_failed'
               render={({ field }) => (
                 <SettingsSwitchItem>
@@ -738,7 +766,9 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
               render={({ field }) => (
                 <SettingsSwitchItem>
                   <SettingsSwitchContent>
-                    <FormLabel>{t('Remove Models the Upstream Rejects')}</FormLabel>
+                    <FormLabel>
+                      {t('Remove Models the Upstream Rejects')}
+                    </FormLabel>
                     <FormDescription>
                       {t(
                         'Also count an explicit HTTP 404 "model not supported" as a model failure. Quota, balance, auth and rate limit errors never count, and neither do 400 or 503 responses, because those are account-level or transient. Off by default: turning it on lets models start being removed on a deployment where this never happened before.'
@@ -761,7 +791,9 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
               name='monitor_setting.upstream_model_update_retry_delay_minutes'
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>{t('Retry Delay After Failure (minutes)')}</FormLabel>
+                  <FormLabel>
+                    {t('Retry Delay After Failure (minutes)')}
+                  </FormLabel>
                   <FormControl>
                     <Input
                       type='number'

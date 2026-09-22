@@ -23,6 +23,7 @@ For commercial licensing, please contact support@quantumnous.com
 // Core components
 export { AppHeader } from './components/app-header'
 export { AppSidebar } from './components/app-sidebar'
+export { MobileTopBar } from './components/mobile-top-bar'
 export { AuthenticatedLayout } from './components/authenticated-layout'
 export { PublicLayout } from './components/public-layout'
 export { PublicHeader } from './components/public-header'

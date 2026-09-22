@@ -25,9 +25,11 @@ For commercial licensing, please contact support@quantumnous.com
 
 export const THEME_PRESETS = [
   {
+    // Aurum — the shipped identity. Gold (#D4AF37) over a near-black canvas
+    // (#0A0A0B); both swatches preview the two poles of that pairing.
     value: 'default',
-    name: 'Default',
-    swatches: ['oklch(0.72 0.18 250)', 'oklch(0.7 0.12 280)'],
+    name: 'Aurum',
+    swatches: ['oklch(0.767 0.139 91)', 'oklch(0.145 0.002 286)'],
   },
   {
     // Inspired by Anthropic's official brand language: warm cream canvas

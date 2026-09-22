@@ -1,13 +1,19 @@
 package channel
 
 import (
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	appconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBuildResponsesWebsocketURL(t *testing.T) {
@@ -309,4 +315,77 @@ func TestShouldTryResponsesWebsocket(t *testing.T) {
 			t.Error("only openai and codex api types may attempt websocket")
 		}
 	})
+}
+
+// TestCollectWebsocketResponseFailedEventIsNotASuccess pins the non-streaming
+// collect path against the SSE path: a terminal response.failed frame carries an
+// error and no output, and OaiResponsesHandler returns that error with whatever
+// status the synthetic response carries. A 200 here handed the caller an error
+// body under a success code, skipped the retry, and credited the channel.
+func TestCollectWebsocketResponseFailedEventIsNotASuccess(t *testing.T) {
+	cases := []struct {
+		name       string
+		frames     []string
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name: "response.failed",
+			frames: []string{
+				`{"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`,
+				`{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"type":"server_error","message":"boom"}}}`,
+			},
+			wantStatus: http.StatusBadGateway,
+			wantBody:   `{"id":"resp_1","status":"failed","error":{"type":"server_error","message":"boom"}}`,
+		},
+		{
+			name: "response.completed",
+			frames: []string{
+				`{"type":"response.completed","response":{"id":"resp_2","status":"completed","output":[{"type":"message"}]}}`,
+			},
+			wantStatus: http.StatusOK,
+			wantBody:   `{"id":"resp_2","status":"completed","output":[{"type":"message"}]}`,
+		},
+		{
+			name: "response.done with an error object",
+			frames: []string{
+				`{"type":"response.done","response":{"id":"resp_3","status":"failed","error":{"message":"rate limited"},"output":[]}}`,
+			},
+			wantStatus: http.StatusBadGateway,
+			wantBody:   `{"id":"resp_3","status":"failed","error":{"message":"rate limited"},"output":[]}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upgrader := websocket.Upgrader{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				for _, frame := range tc.frames {
+					if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+						return
+					}
+				}
+				// Keep the socket open until the client closes it; the collector must
+				// stop at the terminal event rather than wait for EOF.
+				_, _, _ = conn.ReadMessage()
+			}))
+			t.Cleanup(server.Close)
+
+			conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+			require.NoError(t, err)
+
+			resp, err := collectWebsocketResponse(conn)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = resp.Body.Close() })
+
+			assert.Equal(t, tc.wantStatus, resp.StatusCode)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.wantBody, string(body))
+		})
+	}
 }

@@ -27,26 +27,27 @@ export function Otp() {
   return (
     <AuthLayout>
       <div className='w-full space-y-8'>
-        <div className='space-y-3'>
-          <h2 className='text-center text-2xl font-semibold tracking-tight sm:text-left'>
+        <div className='space-y-2'>
+          <p className='section-eyebrow'>{t('Security')}</p>
+          <h2 className='font-heading text-3xl font-semibold tracking-tight'>
             {t('Two-factor Authentication')}
           </h2>
-          <p className='text-muted-foreground text-left text-sm sm:text-base'>
+          <p className='text-muted-foreground text-sm'>
             {t('Please enter the authentication code.')}
-          </p>
-          <p className='text-muted-foreground text-left text-sm sm:text-base'>
-            {t('Session expired?')}{' '}
-            <Link
-              to='/sign-in'
-              className='hover:text-primary font-medium underline underline-offset-4'
-            >
-              {t('Re-login')}
-            </Link>
-            .
           </p>
         </div>
 
         <OtpForm />
+
+        <p className='text-muted-foreground text-sm'>
+          {t('Session expired?')}{' '}
+          <Link
+            to='/sign-in'
+            className='text-primary hover:text-gold-hover font-medium underline-offset-4 hover:underline'
+          >
+            {t('Re-login')}
+          </Link>
+        </p>
       </div>
     </AuthLayout>
   )
