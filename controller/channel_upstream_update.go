@@ -1849,6 +1849,7 @@ func ApplyAllChannelUpstreamModelUpdates(c *gin.Context) {
 func DetectAllChannelUpstreamModelUpdates(c *gin.Context) {
 	var req struct {
 		AutoApply bool `json:"auto_apply"`
+		FullSweep bool `json:"full_sweep"`
 	}
 	if c.Request != nil && c.Request.Body != nil {
 		// A missing or malformed body is not an error here: detect-only is the
@@ -1859,6 +1860,7 @@ func DetectAllChannelUpstreamModelUpdates(c *gin.Context) {
 	task, created, err := service.EnqueueSystemTask(model.SystemTaskTypeModelUpdate, modelUpdateTaskPayload{
 		Manual:    true,
 		AutoApply: req.AutoApply,
+		FullSweep: req.FullSweep,
 	})
 	if err != nil {
 		common.ApiError(c, err)
@@ -1877,7 +1879,11 @@ func DetectAllChannelUpstreamModelUpdates(c *gin.Context) {
 		return
 	}
 
-	recordManageAudit(c, "channel.upstream_detect_all", map[string]interface{}{
+	auditAction := "channel.upstream_detect_all"
+	if req.FullSweep {
+		auditAction = "channel.model_sweep_all"
+	}
+	recordManageAudit(c, auditAction, map[string]interface{}{
 		"task_id": task.TaskID,
 	})
 	c.JSON(http.StatusOK, gin.H{

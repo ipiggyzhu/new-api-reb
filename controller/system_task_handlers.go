@@ -151,12 +151,26 @@ func (modelUpdateHandler) NewPayload() any { return nil }
 type modelUpdateTaskPayload struct {
 	Manual    bool `json:"manual,omitempty"`
 	AutoApply bool `json:"auto_apply,omitempty"`
+	// FullSweep switches this run to the operator-triggered "test every model on
+	// every channel and prune the failures" sweep instead of the conservative
+	// detect/auto-apply scan. It reuses this task type so the two share the
+	// system-task single-active-run dedup and never overlap.
+	FullSweep bool `json:"full_sweep,omitempty"`
 }
 
 func (modelUpdateHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	payload := modelUpdateTaskPayload{}
 	if err := task.DecodePayload(&payload); err != nil {
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
+		return
+	}
+	if payload.FullSweep {
+		sweep := runChannelModelSweepTaskOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
+		if sweep.ScanError != "" {
+			finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, sweep, errors.New(sweep.ScanError))
+			return
+		}
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, sweep, nil)
 		return
 	}
 	allowAutoApply := !payload.Manual || payload.AutoApply

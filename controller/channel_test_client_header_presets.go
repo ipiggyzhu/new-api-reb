@@ -3,12 +3,14 @@ package controller
 import (
 	"net/http"
 
+	"github.com/QuantumNous/new-api/setting/operation_setting"
+
 	"github.com/gin-gonic/gin"
 )
 
 // Built-in client header presets offered to admins as a dropdown.
 //
-// Every version here was taken from the package registry on 2026-08-02 (npm for
+// Every version here was taken from the package registry on 2026-09-22 (npm for
 // the CLIs, PyPI for the SDKs) rather than invented, and the user-agent
 // templates were read out of the shipped client itself where one was available
 // locally — claude-cli's builder is
@@ -82,27 +84,31 @@ func googleGenAIPreset(version string) map[string]string {
 // is the order the dropdown renders.
 var builtinClientHeaderPresets = []clientHeaderPreset{
 	// Claude Code CLI — npm @anthropic-ai/claude-code, versions as published.
-	{ID: "claude-code-2.1.220", Label: "Claude Code CLI 2.1.220 (latest)", Family: "claude", Endpoint: "anthropic", Headers: claudeCodePreset("2.1.220")},
+	{ID: "claude-code-2.1.278", Label: "Claude Code CLI 2.1.278 (latest)", Family: "claude", Endpoint: "anthropic", Headers: claudeCodePreset("2.1.278")},
+	{ID: "claude-code-2.1.220", Label: "Claude Code CLI 2.1.220", Family: "claude", Endpoint: "anthropic", Headers: claudeCodePreset("2.1.220")},
 	{ID: "claude-code-2.1.216", Label: "Claude Code CLI 2.1.216", Family: "claude", Endpoint: "anthropic", Headers: claudeCodePreset("2.1.216")},
 	{ID: "claude-code-2.1.210", Label: "Claude Code CLI 2.1.210", Family: "claude", Endpoint: "anthropic", Headers: claudeCodePreset("2.1.210")},
 	{ID: "claude-code-2.1.206", Label: "Claude Code CLI 2.1.206", Family: "claude", Endpoint: "anthropic", Headers: claudeCodePreset("2.1.206")},
 	{ID: "claude-code-2.0.14", Label: "Claude Code CLI 2.0.14 (older)", Family: "claude", Endpoint: "anthropic", Headers: claudeCodePreset("2.0.14")},
 
 	// openai-python — PyPI openai.
-	{ID: "openai-python-2.52.0", Label: "openai-python 2.52.0 (latest)", Family: "openai", Endpoint: "openai", Headers: openAIPythonPreset("2.52.0")},
+	{ID: "openai-python-3.17.0", Label: "openai-python 3.17.0 (latest)", Family: "openai", Endpoint: "openai", Headers: openAIPythonPreset("3.17.0")},
+	{ID: "openai-python-2.52.0", Label: "openai-python 2.52.0", Family: "openai", Endpoint: "openai", Headers: openAIPythonPreset("2.52.0")},
 	{ID: "openai-python-2.50.0", Label: "openai-python 2.50.0", Family: "openai", Endpoint: "openai", Headers: openAIPythonPreset("2.50.0")},
 	{ID: "openai-python-2.45.0", Label: "openai-python 2.45.0", Family: "openai", Endpoint: "openai", Headers: openAIPythonPreset("2.45.0")},
 	{ID: "openai-python-2.40.0", Label: "openai-python 2.40.0", Family: "openai", Endpoint: "openai", Headers: openAIPythonPreset("2.40.0")},
 	{ID: "openai-python-1.99.1", Label: "openai-python 1.99.1 (older)", Family: "openai", Endpoint: "openai", Headers: openAIPythonPreset("1.99.1")},
 
 	// Codex CLI — npm @openai/codex. Talks to /v1/responses, not chat completions.
-	{ID: "codex-cli-0.146.0", Label: "Codex CLI 0.146.0 (latest) — /v1/responses", Family: "codex", Endpoint: "openai-response", Headers: codexPreset("0.146.0")},
+	{ID: "codex-cli-0.155.1", Label: "Codex CLI 0.155.1 (latest) — /v1/responses", Family: "codex", Endpoint: "openai-response", Headers: codexPreset("0.155.1")},
+	{ID: "codex-cli-0.146.0", Label: "Codex CLI 0.146.0 — /v1/responses", Family: "codex", Endpoint: "openai-response", Headers: codexPreset("0.146.0")},
 	{ID: "codex-cli-0.145.0", Label: "Codex CLI 0.145.0 — /v1/responses", Family: "codex", Endpoint: "openai-response", Headers: codexPreset("0.145.0")},
 	{ID: "codex-cli-0.144.1", Label: "Codex CLI 0.144.1 — /v1/responses", Family: "codex", Endpoint: "openai-response", Headers: codexPreset("0.144.1")},
 	{ID: "codex-cli-0.143.0", Label: "Codex CLI 0.143.0 — /v1/responses", Family: "codex", Endpoint: "openai-response", Headers: codexPreset("0.143.0")},
 
 	// google-genai — PyPI google-genai.
-	{ID: "google-genai-2.16.0", Label: "google-genai 2.16.0 (latest)", Family: "gemini", Endpoint: "gemini", Headers: googleGenAIPreset("2.16.0")},
+	{ID: "google-genai-2.24.0", Label: "google-genai 2.24.0 (latest)", Family: "gemini", Endpoint: "gemini", Headers: googleGenAIPreset("2.24.0")},
+	{ID: "google-genai-2.16.0", Label: "google-genai 2.16.0", Family: "gemini", Endpoint: "gemini", Headers: googleGenAIPreset("2.16.0")},
 	{ID: "google-genai-2.14.0", Label: "google-genai 2.14.0", Family: "gemini", Endpoint: "gemini", Headers: googleGenAIPreset("2.14.0")},
 	{ID: "google-genai-2.12.0", Label: "google-genai 2.12.0", Family: "gemini", Endpoint: "gemini", Headers: googleGenAIPreset("2.12.0")},
 	{ID: "google-genai-2.9.0", Label: "google-genai 2.9.0 (older)", Family: "gemini", Endpoint: "gemini", Headers: googleGenAIPreset("2.9.0")},
@@ -123,5 +129,17 @@ func ListChannelTestClientHeaderPresets(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data":    GetChannelTestClientHeaderPresets(),
+	})
+}
+
+// ListChannelTestPrompts exposes the built-in conversation test prompt pool so
+// the settings page fills the "built-in examples" button and placeholder from
+// the same list the gateway actually draws from, instead of a stale hardcoded
+// copy that drifts out of sync with the backend pool.
+func ListChannelTestPrompts(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    operation_setting.BuiltinChannelTestPrompts(),
 	})
 }

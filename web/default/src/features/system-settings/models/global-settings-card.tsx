@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -81,17 +81,6 @@ const chatToResponsesPolicyAllChannelsExample = JSON.stringify(
     all_channels: true,
     model_patterns: ['^gpt-4o.*$', '^gpt-5.*$'],
   },
-  null,
-  2
-)
-
-const channelTestPromptsExample = JSON.stringify(
-  [
-    '用 HTML 和 JavaScript 写一个贪吃蛇小游戏，要求支持键盘控制和计分。',
-    '液态玻璃（Liquid Glass）效果在 CSS 里怎么实现？给出关键属性和一个最小示例。',
-    'Implement a least-recently-used (LRU) cache in TypeScript with O(1) get and put.',
-    '解释一下数据库索引为什么能加快查询，什么情况下反而会变慢。',
-  ],
   null,
   2
 )
@@ -223,8 +212,8 @@ type ClientHeaderPreset = {
 
 const channelTestClientHeadersExample = JSON.stringify(
   {
-    claude: { 'user-agent': 'claude-cli/2.1.220 (external, cli)' },
-    openai: { 'user-agent': 'OpenAI/Python 2.52.0' },
+    claude: { 'user-agent': 'claude-cli/2.1.278 (external, cli)' },
+    openai: { 'user-agent': 'OpenAI/Python 3.17.0' },
   },
   null,
   2
@@ -238,8 +227,38 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
   const { t } = useTranslation()
   const updateOption = useUpdateOption()
   const [runningUpdate, setRunningUpdate] = useState(false)
+  const [runningSweep, setRunningSweep] = useState(false)
   const [headerPresets, setHeaderPresets] = useState<ClientHeaderPreset[]>([])
   const [selectedPreset, setSelectedPreset] = useState('')
+  const [builtinPrompts, setBuiltinPrompts] = useState<string[]>([])
+
+  // The built-in test prompt pool comes from the backend, so the "fill built-in
+  // examples" button and the placeholder always match the pool the gateway
+  // actually draws from when the field is left empty, instead of a stale copy.
+  useEffect(() => {
+    let cancelled = false
+    api
+      .get('/api/option/channel_test_prompts')
+      .then((res) => {
+        if (cancelled) return
+        if (res.data?.success && Array.isArray(res.data.data)) {
+          setBuiltinPrompts(res.data.data as string[])
+        }
+      })
+      .catch(() => {
+        // A missing pool must not break the page: the button just fills nothing.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const channelTestPromptsExample = JSON.stringify(
+    builtinPrompts.slice(0, 4),
+    null,
+    2
+  )
+  const channelTestPromptsFill = JSON.stringify(builtinPrompts, null, 2)
 
   // The preset list comes from the backend rather than being duplicated here:
   // two hardcoded copies drift, and a preset that does not match what the
@@ -307,9 +326,18 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
     defaultValues: defaultValues as GlobalModelSettingsFormInput,
   })
 
+  // The parent rebuilds defaultValues as a fresh object literal on every render,
+  // so keying this reset on its identity throws away unsaved edits — an applied
+  // header preset, a half-typed JSON block — whenever anything unrelated
+  // re-renders the page. Worse, onSubmit diffs against the same defaults, so the
+  // wiped form then reports "no changes to save". Key the reset on content.
+  const lastResetKey = useRef<string | null>(null)
+  const defaultValuesKey = JSON.stringify(defaultValues)
   useEffect(() => {
+    if (lastResetKey.current === defaultValuesKey) return
+    lastResetKey.current = defaultValuesKey
     form.reset(defaultValues as GlobalModelSettingsFormInput)
-  }, [defaultValues, form])
+  }, [defaultValuesKey, defaultValues, form])
 
   const pingEnabled = form.watch('general_setting.ping_interval_enabled')
   const autoUpdateEnabled = form.watch(
@@ -347,6 +375,36 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
       }
     } finally {
       setRunningUpdate(false)
+    }
+  }
+
+  // Trigger the operator-driven full sweep: every enabled channel has the union
+  // of its current models and its upstream's advertised models tested in groups,
+  // and confirmed failures (including models already configured) are pruned.
+  const runFullSweepNow = async () => {
+    if (runningSweep) return
+    setRunningSweep(true)
+    try {
+      const { data } = await api.post(
+        '/api/channel/upstream_updates/detect_all',
+        { full_sweep: true },
+        { skipBusinessError: true, skipErrorHandler: true }
+      )
+      if (data?.success) {
+        toast.success(t('Channel model sweep task started'))
+      } else {
+        toast.error(data?.message || t('Failed to start channel model sweep'))
+      }
+    } catch (error) {
+      const status = (error as { response?: { status?: number } })?.response
+        ?.status
+      if (status === 409) {
+        toast.info(t('A model update task is already running'))
+      } else {
+        toast.error(t('Failed to start channel model sweep'))
+      }
+    } finally {
+      setRunningSweep(false)
     }
   }
 
@@ -944,10 +1002,11 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
                       type='button'
                       variant='outline'
                       size='sm'
+                      disabled={builtinPrompts.length === 0}
                       onClick={() =>
                         form.setValue(
                           'monitor_setting.channel_test_prompts',
-                          channelTestPromptsExample,
+                          channelTestPromptsFill,
                           { shouldDirty: true }
                         )
                       }
@@ -1063,10 +1122,24 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
               >
                 {t('Run model update now')}
               </Button>
+              <Button
+                type='button'
+                variant='outline'
+                size='sm'
+                disabled={runningSweep}
+                onClick={runFullSweepNow}
+              >
+                {t('Test and clean all channels now')}
+              </Button>
             </div>
             <FormDescription>
               {t(
                 'Runs one update cycle immediately using the saved settings. Save your changes first.'
+              )}
+            </FormDescription>
+            <FormDescription>
+              {t(
+                'Test-and-clean sweeps every channel: it tests each channel’s current and upstream models in groups and removes the ones that fail (including models already configured). It never empties a channel. This consumes quota and writes test logs.'
               )}
             </FormDescription>
           </div>
