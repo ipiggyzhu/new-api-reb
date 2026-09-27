@@ -107,22 +107,8 @@ func handleGeminiFormat(c *gin.Context, data string, info *relaycommon.RelayInfo
 	if !ok {
 		return fmt.Errorf("expected Gemini stream response, got %T", result.Value)
 	}
-
-	// 如果返回 nil，表示没有实际内容，跳过发送
-	if geminiResponse == nil {
-		return nil
-	}
-
-	geminiResponseStr, err := common.Marshal(geminiResponse)
-	if err != nil {
-		logger.LogError(c, "failed to marshal gemini response: "+err.Error())
-		return err
-	}
-
-	// send gemini format response
-	c.Render(-1, common.CustomEvent{Data: "data: " + string(geminiResponseStr)})
-	_ = helper.FlushWriter(c)
-	return nil
+	// A nil response carries no content; GeminiData treats it as a skip.
+	return helper.GeminiData(c, geminiResponse)
 }
 
 func ProcessStreamResponse(streamResponse dto.ChatCompletionsStreamResponse, responseTextBuilder *strings.Builder, toolCount *int) error {
@@ -310,21 +296,8 @@ func HandleFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, lastStream
 			common.SysLog(fmt.Sprintf("expected Gemini stream response, got %T", result.Value))
 			return
 		}
-
-		// openai 流响应开头的空数据
-		if geminiResponse == nil {
-			return
-		}
-
-		geminiResponseStr, err := common.Marshal(geminiResponse)
-		if err != nil {
-			common.SysLog("error marshalling gemini response: " + err.Error())
-			return
-		}
-
-		// 发送最终的 Gemini 响应
-		c.Render(-1, common.CustomEvent{Data: "data: " + string(geminiResponseStr)})
-		_ = helper.FlushWriter(c)
+		// 发送最终的 Gemini 响应（geminiResponse 为 nil 时 GeminiData 会跳过发送）
+		_ = helper.GeminiData(c, geminiResponse)
 	}
 }
 

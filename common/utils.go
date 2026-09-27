@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
@@ -212,14 +211,6 @@ func UnescapeHTML(x string) interface{} {
 	return template.HTML(x)
 }
 
-func IntMax(a int, b int) int {
-	if a >= b {
-		return a
-	} else {
-		return b
-	}
-}
-
 func GetUUID() string {
 	code := uuid.New().String()
 	code = strings.Replace(code, "-", "", -1)
@@ -305,12 +296,12 @@ func GetPointer[T any](v T) *T {
 
 func Any2Type[T any](data any) (T, error) {
 	var zero T
-	bytes, err := json.Marshal(data)
+	bytes, err := Marshal(data)
 	if err != nil {
 		return zero, err
 	}
 	var res T
-	err = json.Unmarshal(bytes, &res)
+	err = Unmarshal(bytes, &res)
 	if err != nil {
 		return zero, err
 	}

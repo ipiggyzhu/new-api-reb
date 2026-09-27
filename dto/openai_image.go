@@ -113,22 +113,10 @@ func GetJSONFieldNames(t reflect.Type) map[string]struct{} {
 		}
 
 		// 取逗号前字段名（排除 omitempty 等）
-		name := tag
-		if commaIdx := indexComma(tag); commaIdx != -1 {
-			name = tag[:commaIdx]
-		}
+		name, _, _ := strings.Cut(tag, ",")
 		fields[name] = struct{}{}
 	}
 	return fields
-}
-
-func indexComma(s string) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == ',' {
-			return i
-		}
-	}
-	return -1
 }
 
 func (i *ImageRequest) GetTokenCountMeta() *types.TokenCountMeta {

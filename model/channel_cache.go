@@ -239,31 +239,12 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 	channelSyncLock.RLock()
 	defer channelSyncLock.RUnlock()
 
-	// First, try to find channels with the exact model name.
-	channels := filterChannelsByRequestPathAndModel(group2model2channels[group][model], requestPath, model)
-
-	// If no channels found, try to find channels with the normalized model name.
-	if len(channels) == 0 {
-		normalizedModel := ratio_setting.FormatMatchingModelName(model)
-		channels = filterChannelsByRequestPathAndModel(group2model2channels[group][normalizedModel], requestPath, model)
+	candidates, err := buildCachedCandidates(group, model, requestPath, true)
+	if err != nil {
+		return nil, err
 	}
-
-	if len(channels) == 0 {
+	if len(candidates) == 0 {
 		return nil, nil
-	}
-
-	candidates := make([]channelCandidate, 0, len(channels))
-	for _, channelId := range channels {
-		channel, ok := channelsIDM[channelId]
-		if !ok {
-			return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
-		}
-		candidates = append(candidates, channelCandidate{
-			channelId:      channelId,
-			priority:       channel.GetPriority(),
-			weight:         channel.GetWeight(),
-			maxConcurrency: channel.GetMaxConcurrency(),
-		})
 	}
 
 	candidates = applyDynamicScores(group, model, candidates)
@@ -278,6 +259,42 @@ func GetRandomSatisfiedChannel(group string, model string, retry int, requestPat
 	// Copy for the same reason as CacheGetChannel: the selected channel travels
 	// with the request long after this read lock is gone.
 	return channelsIDM[channelId].CloneForCache(), nil
+}
+
+// buildCachedCandidates builds the eligible (channel, tier, weight) candidates for
+// group/model/requestPath from the in-memory channel cache. It is the single
+// source of the memory-cache candidate set: the selection path
+// (GetRandomSatisfiedChannel) and affinity revalidation both build from it, so
+// their request-path filtering and normalized-model fallback cannot drift apart.
+// The caller must hold channelSyncLock (read lock).
+//
+// strictMissing covers the one intentional difference between the two callers: a
+// channel id present in the routing map but missing from channelsIDM is a fatal
+// consistency error for selection, but revalidation only skips it — a pin verdict
+// must never fail a request over a transient cache gap.
+func buildCachedCandidates(group string, modelName string, requestPath string, strictMissing bool) ([]channelCandidate, error) {
+	channels := filterChannelsByRequestPathAndModel(group2model2channels[group][modelName], requestPath, modelName)
+	if len(channels) == 0 {
+		normalizedModel := ratio_setting.FormatMatchingModelName(modelName)
+		channels = filterChannelsByRequestPathAndModel(group2model2channels[group][normalizedModel], requestPath, modelName)
+	}
+	candidates := make([]channelCandidate, 0, len(channels))
+	for _, channelId := range channels {
+		channel, ok := channelsIDM[channelId]
+		if !ok {
+			if strictMissing {
+				return nil, fmt.Errorf("数据库一致性错误，渠道# %d 不存在，请联系管理员修复", channelId)
+			}
+			continue
+		}
+		candidates = append(candidates, channelCandidate{
+			channelId:      channelId,
+			priority:       channel.GetPriority(),
+			weight:         channel.GetWeight(),
+			maxConcurrency: channel.GetMaxConcurrency(),
+		})
+	}
+	return candidates, nil
 }
 
 // filterChannelsByRequestPathAndModel restricts candidates by request path and

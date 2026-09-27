@@ -559,6 +559,16 @@ func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {
 // mutex could never reach.
 var channelUpstreamModelPersistMu sync.Mutex
 
+// rebuildChannelAbilitiesLocked rebuilds a channel's ability rows while holding
+// channelUpstreamModelPersistMu. A rebuild is a delete-then-insert of every
+// ability row for the channel, so two interleaved rebuilds for the same channel
+// leave the union of both model sets behind; the lock serializes them.
+func rebuildChannelAbilitiesLocked(channel *model.Channel) error {
+	channelUpstreamModelPersistMu.Lock()
+	defer channelUpstreamModelPersistMu.Unlock()
+	return channel.UpdateAbilities(nil)
+}
+
 // updateChannelUpstreamModelSettings persists this task's own fields onto the
 // channel's settings.
 //
@@ -1151,10 +1161,7 @@ func checkAndPersistChannelUpstreamModelUpdates(
 		return modelsChanged, autoAdded, autoRemoved, err
 	}
 	if modelsChanged {
-		channelUpstreamModelPersistMu.Lock()
-		err = channel.UpdateAbilities(nil)
-		channelUpstreamModelPersistMu.Unlock()
-		if err != nil {
+		if err = rebuildChannelAbilitiesLocked(channel); err != nil {
 			return true, autoAdded, autoRemoved, err
 		}
 	}
@@ -1360,16 +1367,7 @@ func runChannelUpstreamModelUpdateTaskOnce(ctx context.Context, force bool, allo
 		if ctx != nil && ctx.Err() != nil {
 			break
 		}
-		var channels []*model.Channel
-		query := model.DB.
-			Select(channelUpstreamModelUpdateSelectFields).
-			Where("status = ?", common.ChannelStatusEnabled).
-			Order("id asc").
-			Limit(channelUpstreamModelUpdateTaskBatchSize)
-		if lastID > 0 {
-			query = query.Where("id > ?", lastID)
-		}
-		err := query.Find(&channels).Error
+		channels, err := findEnabledChannelsAfterID(lastID, channelUpstreamModelUpdateTaskBatchSize)
 		if err != nil {
 			scanErr = err.Error()
 			common.SysLog(fmt.Sprintf("upstream model update task query failed: %v", err))
@@ -1711,13 +1709,7 @@ func applyChannelUpstreamModelUpdates(
 	}
 
 	if applied.modelsChanged {
-		// Same lock as the scheduled scan: a rebuild is delete-then-insert of
-		// every ability row, and interleaving two of them for one channel leaves
-		// the union of both model sets behind.
-		channelUpstreamModelPersistMu.Lock()
-		err := channel.UpdateAbilities(nil)
-		channelUpstreamModelPersistMu.Unlock()
-		if err != nil {
+		if err := rebuildChannelAbilitiesLocked(channel); err != nil {
 			return applied, err
 		}
 	}

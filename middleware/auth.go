@@ -34,6 +34,16 @@ func validUserInfo(username string, role int) bool {
 	return true
 }
 
+// parseAPIKey strips an optional "sk-" prefix and splits the remaining key on
+// "-", returning the primary key segment (parts[0]) and the full segment list.
+// Trailing segments carry optional suffixes such as a specific channel id that
+// SetupContextForToken consumes.
+func parseAPIKey(key string) (string, []string) {
+	key = strings.TrimPrefix(key, "sk-")
+	parts := strings.Split(key, "-")
+	return parts[0], parts
+}
+
 func authHelper(c *gin.Context, minRole int) {
 	session := sessions.Default(c)
 	var username string
@@ -62,20 +72,14 @@ func authHelper(c *gin.Context, minRole int) {
 					"message": common.TranslateMessage(c, i18n.MsgDatabaseError),
 				})
 			} else {
-				c.JSON(http.StatusOK, gin.H{
-					"success": false,
-					"message": common.TranslateMessage(c, i18n.MsgAuthAccessTokenInvalid),
-				})
+				common.ApiErrorI18n(c, i18n.MsgAuthAccessTokenInvalid)
 			}
 			c.Abort()
 			return
 		}
 		if user != nil && user.Username != "" {
 			if !validUserInfo(user.Username, user.Role) {
-				c.JSON(http.StatusOK, gin.H{
-					"success": false,
-					"message": common.TranslateMessage(c, i18n.MsgAuthUserInfoInvalid),
-				})
+				common.ApiErrorI18n(c, i18n.MsgAuthUserInfoInvalid)
 				c.Abort()
 				return
 			}
@@ -87,10 +91,7 @@ func authHelper(c *gin.Context, minRole int) {
 			group = user.Group
 			useAccessToken = true
 		} else {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": common.TranslateMessage(c, i18n.MsgAuthAccessTokenInvalid),
-			})
+			common.ApiErrorI18n(c, i18n.MsgAuthAccessTokenInvalid)
 			c.Abort()
 			return
 		}
@@ -158,26 +159,17 @@ func authHelper(c *gin.Context, minRole int) {
 		return
 	}
 	if status == common.UserStatusDisabled {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": common.TranslateMessage(c, i18n.MsgAuthUserBanned),
-		})
+		common.ApiErrorI18n(c, i18n.MsgAuthUserBanned)
 		c.Abort()
 		return
 	}
 	if role < minRole {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": common.TranslateMessage(c, i18n.MsgAuthInsufficientPrivilege),
-		})
+		common.ApiErrorI18n(c, i18n.MsgAuthInsufficientPrivilege)
 		c.Abort()
 		return
 	}
 	if !validUserInfo(username, role) {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"message": common.TranslateMessage(c, i18n.MsgAuthUserInfoInvalid),
-		})
+		common.ApiErrorI18n(c, i18n.MsgAuthUserInfoInvalid)
 		c.Abort()
 		return
 	}
@@ -290,9 +282,7 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 		if strings.HasPrefix(key, "Bearer ") || strings.HasPrefix(key, "bearer ") {
 			key = strings.TrimSpace(key[7:])
 		}
-		key = strings.TrimPrefix(key, "sk-")
-		parts := strings.Split(key, "-")
-		key = parts[0]
+		key, _ = parseAPIKey(key)
 
 		token, err := model.GetTokenByKey(key, false)
 		if err != nil {
@@ -397,13 +387,9 @@ func TokenAuth() func(c *gin.Context) {
 			if strings.HasPrefix(key, "Bearer ") || strings.HasPrefix(key, "bearer ") {
 				key = strings.TrimSpace(key[7:])
 			}
-			key = strings.TrimPrefix(key, "sk-")
-			parts = strings.Split(key, "-")
-			key = parts[0]
+			key, parts = parseAPIKey(key)
 		} else {
-			key = strings.TrimPrefix(key, "sk-")
-			parts = strings.Split(key, "-")
-			key = parts[0]
+			key, parts = parseAPIKey(key)
 		}
 		token, err := model.ValidateUserToken(key)
 		if token != nil {

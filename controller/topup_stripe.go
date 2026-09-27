@@ -427,15 +427,7 @@ func getStripeTopupPlan(displayAmount int64, group string) (stripeTopupPlan, err
 		dBase = dBase.Div(decimal.NewFromFloat(common.QuotaPerUnit))
 	}
 
-	topupGroupRatio := common.GetTopupGroupRatio(group)
-	if topupGroupRatio == 0 {
-		topupGroupRatio = 1
-	}
-	// apply optional preset discount by the original request amount (if configured), default 1.0
-	discount := 1.0
-	if ds, ok := operation_setting.GetPaymentSetting().AmountDiscount[int(displayAmount)]; ok && ds > 0 {
-		discount = ds
-	}
+	topupGroupRatio, discount := topupScaleFactors(int(displayAmount), group)
 	dScale := decimal.NewFromFloat(topupGroupRatio).Mul(decimal.NewFromFloat(discount))
 	if dBase.Sign() <= 0 || dScale.Sign() <= 0 {
 		return stripeTopupPlan{}, errors.New("无效的充值数量")

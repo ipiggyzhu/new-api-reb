@@ -70,3 +70,20 @@ func (l *InMemoryRateLimiter) Request(key string, maxRequestNum int, duration in
 	}
 	return true
 }
+
+// Check reports whether key has room for one more request right now, without
+// recording anything. A limit that only counts successful requests checks
+// before serving and calls Request once the request has succeeded. A
+// non-positive maximum has no room, as in the Redis sliding window.
+func (l *InMemoryRateLimiter) Check(key string, maxRequestNum int, duration int64) bool {
+	if maxRequestNum <= 0 {
+		return false
+	}
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+	queue, ok := l.store[key]
+	if !ok || len(*queue) < maxRequestNum {
+		return true
+	}
+	return time.Now().Unix()-(*queue)[0] >= duration
+}

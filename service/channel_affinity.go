@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,8 +62,6 @@ var (
 
 	channelAffinityUsageCacheStatsOnce  sync.Once
 	channelAffinityUsageCacheStatsCache *cachex.HybridCache[ChannelAffinityUsageCacheCounters]
-
-	channelAffinityRegexCache sync.Map // map[string]*regexp.Regexp
 
 	// channelAffinityEmptyModelRegexLogged keeps the rejection of a rule with an
 	// empty model_regex down to one line per rule name per process.
@@ -274,30 +271,6 @@ func ClearChannelAffinityCacheByRuleName(ruleName string) (int, error) {
 		return 0, err
 	}
 	return deleted, nil
-}
-
-func matchAnyRegexCached(patterns []string, s string) bool {
-	if len(patterns) == 0 || s == "" {
-		return false
-	}
-	for _, pattern := range patterns {
-		if pattern == "" {
-			continue
-		}
-		re, ok := channelAffinityRegexCache.Load(pattern)
-		if !ok {
-			compiled, err := regexp.Compile(pattern)
-			if err != nil {
-				continue
-			}
-			re = compiled
-			channelAffinityRegexCache.Store(pattern, re)
-		}
-		if re.(*regexp.Regexp).MatchString(s) {
-			return true
-		}
-	}
-	return false
 }
 
 func matchAnyIncludeFold(patterns []string, s string) bool {
@@ -592,10 +565,10 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 			}
 			continue
 		}
-		if !matchAnyRegexCached(rule.ModelRegex, modelName) {
+		if !common.MatchAnyRegex(rule.ModelRegex, modelName) {
 			continue
 		}
-		if len(rule.PathRegex) > 0 && !matchAnyRegexCached(rule.PathRegex, path) {
+		if len(rule.PathRegex) > 0 && !common.MatchAnyRegex(rule.PathRegex, path) {
 			continue
 		}
 		if len(rule.UserAgentInclude) > 0 && !matchAnyIncludeFold(rule.UserAgentInclude, userAgent) {
@@ -613,7 +586,7 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 		if affinityValue == "" {
 			continue
 		}
-		if rule.ValueRegex != "" && !matchAnyRegexCached([]string{rule.ValueRegex}, affinityValue) {
+		if rule.ValueRegex != "" && !common.MatchAnyRegex([]string{rule.ValueRegex}, affinityValue) {
 			continue
 		}
 

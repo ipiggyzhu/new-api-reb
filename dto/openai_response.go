@@ -105,13 +105,7 @@ func (c *ChatCompletionsStreamResponseChoiceDelta) GetContentString() string {
 }
 
 func (c *ChatCompletionsStreamResponseChoiceDelta) GetReasoningContent() string {
-	if c.ReasoningContent == nil && c.Reasoning == nil {
-		return ""
-	}
-	if c.ReasoningContent != nil {
-		return *c.ReasoningContent
-	}
-	return *c.Reasoning
+	return reasoningContentWithFallback(c.ReasoningContent, c.Reasoning)
 }
 
 func (c *ChatCompletionsStreamResponseChoiceDelta) SetReasoningContent(s string) {

@@ -88,14 +88,6 @@ func RedisGet(key string) (string, error) {
 //	return RDB.GetSet(ctx, key, expiration).Result()
 //}
 
-func RedisDel(key string) error {
-	if DebugEnabled {
-		SysLog(fmt.Sprintf("Redis DEL: key=%s", key))
-	}
-	ctx := context.Background()
-	return RDB.Del(ctx, key).Err()
-}
-
 func RedisDelKey(key string) error {
 	if DebugEnabled {
 		SysLog(fmt.Sprintf("Redis DEL Key: key=%s", key))
@@ -238,90 +230,52 @@ func RedisHGetObj(key string, obj interface{}) error {
 	return nil
 }
 
+// redisMutatePreserveTTL runs mutate inside a transaction pipeline only when
+// key currently has a positive TTL, then restores that TTL so the mutation does
+// not extend the key's lifetime. Keys without an expiry (or missing) are left
+// untouched, matching the original per-operation behavior.
+func redisMutatePreserveTTL(key string, mutate func(ctx context.Context, txn redis.Pipeliner) error) error {
+	ctx := context.Background()
+	ttl, err := RDB.TTL(ctx, key).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return fmt.Errorf("failed to get TTL: %w", err)
+	}
+	if ttl <= 0 {
+		return nil
+	}
+	txn := RDB.TxPipeline()
+	if err := mutate(ctx, txn); err != nil {
+		return err
+	}
+	txn.Expire(ctx, key, ttl)
+	_, err = txn.Exec(ctx)
+	return err
+}
+
 // RedisIncr Add this function to handle atomic increments
 func RedisIncr(key string, delta int64) error {
 	if DebugEnabled {
 		SysLog(fmt.Sprintf("Redis INCR: key=%s, delta=%d", key, delta))
 	}
-	// 检查键的剩余生存时间
-	ttlCmd := RDB.TTL(context.Background(), key)
-	ttl, err := ttlCmd.Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return fmt.Errorf("failed to get TTL: %w", err)
-	}
-
-	// 只有在 key 存在且有 TTL 时才需要特殊处理
-	if ttl > 0 {
-		ctx := context.Background()
-		// 开始一个Redis事务
-		txn := RDB.TxPipeline()
-
-		// 减少余额
-		decrCmd := txn.IncrBy(ctx, key, delta)
-		if err := decrCmd.Err(); err != nil {
-			return err // 如果减少失败，则直接返回错误
-		}
-
-		// 重新设置过期时间，使用原来的过期时间
-		txn.Expire(ctx, key, ttl)
-
-		// 执行事务
-		_, err = txn.Exec(ctx)
-		return err
-	}
-	return nil
+	return redisMutatePreserveTTL(key, func(ctx context.Context, txn redis.Pipeliner) error {
+		return txn.IncrBy(ctx, key, delta).Err()
+	})
 }
 
 func RedisHIncrBy(key, field string, delta int64) error {
 	if DebugEnabled {
 		SysLog(fmt.Sprintf("Redis HINCRBY: key=%s, field=%s, delta=%d", key, field, delta))
 	}
-	ttlCmd := RDB.TTL(context.Background(), key)
-	ttl, err := ttlCmd.Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return fmt.Errorf("failed to get TTL: %w", err)
-	}
-
-	if ttl > 0 {
-		ctx := context.Background()
-		txn := RDB.TxPipeline()
-
-		incrCmd := txn.HIncrBy(ctx, key, field, delta)
-		if err := incrCmd.Err(); err != nil {
-			return err
-		}
-
-		txn.Expire(ctx, key, ttl)
-
-		_, err = txn.Exec(ctx)
-		return err
-	}
-	return nil
+	return redisMutatePreserveTTL(key, func(ctx context.Context, txn redis.Pipeliner) error {
+		return txn.HIncrBy(ctx, key, field, delta).Err()
+	})
 }
 
 func RedisHSetField(key, field string, value interface{}) error {
 	if DebugEnabled {
 		SysLog(fmt.Sprintf("Redis HSET field: key=%s, field=%s, value=%v", key, field, value))
 	}
-	ttlCmd := RDB.TTL(context.Background(), key)
-	ttl, err := ttlCmd.Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return fmt.Errorf("failed to get TTL: %w", err)
-	}
-
-	if ttl > 0 {
-		ctx := context.Background()
-		txn := RDB.TxPipeline()
-
-		hsetCmd := txn.HSet(ctx, key, field, value)
-		if err := hsetCmd.Err(); err != nil {
-			return err
-		}
-
-		txn.Expire(ctx, key, ttl)
-
-		_, err = txn.Exec(ctx)
-		return err
-	}
-	return nil
+	return redisMutatePreserveTTL(key, func(ctx context.Context, txn redis.Pipeliner) error {
+		return txn.HSet(ctx, key, field, value).Err()
+	})
 }

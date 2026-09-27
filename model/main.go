@@ -22,6 +22,7 @@ import (
 
 var commonGroupCol string
 var commonKeyCol string
+var commonTradeNoCol string
 var commonTrueVal string
 var commonFalseVal string
 
@@ -33,11 +34,13 @@ func initCol() {
 	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
 		commonGroupCol = `"group"`
 		commonKeyCol = `"key"`
+		commonTradeNoCol = `"trade_no"`
 		commonTrueVal = "true"
 		commonFalseVal = "false"
 	} else {
 		commonGroupCol = "`group`"
 		commonKeyCol = "`key`"
+		commonTradeNoCol = "`trade_no`"
 		commonTrueVal = "1"
 		commonFalseVal = "0"
 	}

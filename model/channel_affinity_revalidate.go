@@ -2,7 +2,6 @@ package model
 
 import (
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
 
 // ChannelAffinityPinVerdict is why a pinned channel was kept or dropped. The
@@ -90,73 +89,17 @@ func ValidateChannelAffinityPin(channelId int, group string, modelName string, r
 }
 
 // affinityCandidateSnapshot builds the eligible candidate set for group/model/path
-// without acquiring a concurrency slot or selecting anything. It mirrors the two
-// selection paths' filtering (including the normalized-model fallback) so the
-// revalidation verdict cannot disagree with what selection would actually do.
+// without acquiring a concurrency slot or selecting anything. It reuses the same
+// builders the two selection paths use (buildCachedCandidates / buildDBCandidates),
+// so the revalidation verdict cannot disagree with what selection would actually
+// do. Missing-from-cache channels are skipped rather than treated as fatal
+// (strictMissing=false): a pin verdict must never fail a request over a transient
+// cache gap.
 func affinityCandidateSnapshot(group string, modelName string, requestPath string) ([]channelCandidate, error) {
 	if common.MemoryCacheEnabled {
-		return cachedAffinityCandidates(group, modelName, requestPath), nil
+		channelSyncLock.RLock()
+		defer channelSyncLock.RUnlock()
+		return buildCachedCandidates(group, modelName, requestPath, false)
 	}
-
-	abilities, err := getEnabledAbilities(group, modelName)
-	if err != nil {
-		return nil, err
-	}
-	abilities = filterAbilitiesByRequestPathAndModel(abilities, requestPath, modelName)
-	if len(abilities) == 0 {
-		normalizedModel := ratio_setting.FormatMatchingModelName(modelName)
-		if normalizedModel != modelName {
-			abilities, err = getEnabledAbilities(group, normalizedModel)
-			if err != nil {
-				return nil, err
-			}
-			abilities = filterAbilitiesByRequestPathAndModel(abilities, requestPath, modelName)
-		}
-	}
-	candidates := make([]channelCandidate, 0, len(abilities))
-	for _, ability := range abilities {
-		priority := int64(0)
-		if ability.Priority != nil {
-			priority = *ability.Priority
-		}
-		maxConcurrency := 0
-		if ability.MaxConcurrency != nil && *ability.MaxConcurrency > 0 {
-			maxConcurrency = *ability.MaxConcurrency
-		}
-		candidates = append(candidates, channelCandidate{
-			channelId:      ability.ChannelId,
-			priority:       priority,
-			weight:         saturatingUintToInt(ability.Weight),
-			maxConcurrency: maxConcurrency,
-		})
-	}
-	return candidates, nil
-}
-
-// cachedAffinityCandidates is the memory-cache half of affinityCandidateSnapshot.
-// It holds the same read lock the selection path takes and applies the same
-// filters.
-func cachedAffinityCandidates(group string, modelName string, requestPath string) []channelCandidate {
-	channelSyncLock.RLock()
-	defer channelSyncLock.RUnlock()
-
-	channels := filterChannelsByRequestPathAndModel(group2model2channels[group][modelName], requestPath, modelName)
-	if len(channels) == 0 {
-		normalizedModel := ratio_setting.FormatMatchingModelName(modelName)
-		channels = filterChannelsByRequestPathAndModel(group2model2channels[group][normalizedModel], requestPath, modelName)
-	}
-	candidates := make([]channelCandidate, 0, len(channels))
-	for _, channelId := range channels {
-		channel, ok := channelsIDM[channelId]
-		if !ok {
-			continue
-		}
-		candidates = append(candidates, channelCandidate{
-			channelId:      channelId,
-			priority:       channel.GetPriority(),
-			weight:         channel.GetWeight(),
-			maxConcurrency: channel.GetMaxConcurrency(),
-		})
-	}
-	return candidates
+	return buildDBCandidates(group, modelName, requestPath)
 }

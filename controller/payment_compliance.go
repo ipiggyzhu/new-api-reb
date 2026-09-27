@@ -27,6 +27,25 @@ func requirePaymentCompliance(c *gin.Context) bool {
 	return true
 }
 
+// enforceSubscriptionPurchaseLimit checks the per-user purchase cap for a plan.
+// It returns false and writes an API error response when the limit is reached
+// or the count query fails, so callers should return immediately in that case.
+func enforceSubscriptionPurchaseLimit(c *gin.Context, userId int, plan *model.SubscriptionPlan) bool {
+	if plan.MaxPurchasePerUser <= 0 {
+		return true
+	}
+	count, err := model.CountUserSubscriptionsByPlan(userId, plan.Id)
+	if err != nil {
+		common.ApiError(c, err)
+		return false
+	}
+	if count >= int64(plan.MaxPurchasePerUser) {
+		common.ApiErrorMsg(c, "已达到该套餐购买上限")
+		return false
+	}
+	return true
+}
+
 func ConfirmPaymentCompliance(c *gin.Context) {
 	if c.GetBool("use_access_token") {
 		c.JSON(http.StatusForbidden, gin.H{

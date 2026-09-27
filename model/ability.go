@@ -301,43 +301,12 @@ func selectAndAcquireChannel(candidates []channelCandidate, retry int, excludedC
 // This keeps tiering identical to the memory-cache path, which filters before it
 // groups.
 func GetChannel(group string, model string, retry int, requestPath string, excludedChannelIds map[int]bool) (*Channel, error) {
-	abilities, err := getEnabledAbilities(group, model)
+	candidates, err := buildDBCandidates(group, model, requestPath)
 	if err != nil {
 		return nil, err
 	}
-	abilities = filterAbilitiesByRequestPathAndModel(abilities, requestPath, model)
-	if len(abilities) == 0 {
-		normalizedModel := ratio_setting.FormatMatchingModelName(model)
-		if normalizedModel != model {
-			abilities, err = getEnabledAbilities(group, normalizedModel)
-			if err != nil {
-				return nil, err
-			}
-			abilities = filterAbilitiesByRequestPathAndModel(abilities, requestPath, model)
-		}
-	}
-	if len(abilities) == 0 {
+	if len(candidates) == 0 {
 		return nil, nil
-	}
-
-	candidates := make([]channelCandidate, 0, len(abilities))
-	for _, ability := range abilities {
-		// A NULL priority column maps to 0, matching Channel.GetPriority so both
-		// selection paths place such a channel in the same tier.
-		priority := int64(0)
-		if ability.Priority != nil {
-			priority = *ability.Priority
-		}
-		maxConcurrency := 0
-		if ability.MaxConcurrency != nil && *ability.MaxConcurrency > 0 {
-			maxConcurrency = *ability.MaxConcurrency
-		}
-		candidates = append(candidates, channelCandidate{
-			channelId:      ability.ChannelId,
-			priority:       priority,
-			weight:         saturatingUintToInt(ability.Weight),
-			maxConcurrency: maxConcurrency,
-		})
 	}
 
 	candidates = applyDynamicScores(group, model, candidates)
@@ -357,6 +326,51 @@ func GetChannel(group string, model string, retry int, requestPath string, exclu
 		return nil, err
 	}
 	return &channel, nil
+}
+
+// buildDBCandidates loads the eligible (channel, tier, weight) candidates for
+// group/model/requestPath straight from the database. It is the single source of
+// the no-cache candidate set: the selection path (GetChannel) and affinity
+// revalidation both build from it, so their tiering, request-path filtering and
+// normalized-model fallback cannot drift apart. Dynamic scoring is deliberately
+// left to the caller — selection applies it before acquiring a slot, revalidation
+// applies it while comparing against the pin.
+func buildDBCandidates(group string, modelName string, requestPath string) ([]channelCandidate, error) {
+	abilities, err := getEnabledAbilities(group, modelName)
+	if err != nil {
+		return nil, err
+	}
+	abilities = filterAbilitiesByRequestPathAndModel(abilities, requestPath, modelName)
+	if len(abilities) == 0 {
+		normalizedModel := ratio_setting.FormatMatchingModelName(modelName)
+		if normalizedModel != modelName {
+			abilities, err = getEnabledAbilities(group, normalizedModel)
+			if err != nil {
+				return nil, err
+			}
+			abilities = filterAbilitiesByRequestPathAndModel(abilities, requestPath, modelName)
+		}
+	}
+	candidates := make([]channelCandidate, 0, len(abilities))
+	for _, ability := range abilities {
+		// A NULL priority column maps to 0, matching Channel.GetPriority so both
+		// selection paths place such a channel in the same tier.
+		priority := int64(0)
+		if ability.Priority != nil {
+			priority = *ability.Priority
+		}
+		maxConcurrency := 0
+		if ability.MaxConcurrency != nil && *ability.MaxConcurrency > 0 {
+			maxConcurrency = *ability.MaxConcurrency
+		}
+		candidates = append(candidates, channelCandidate{
+			channelId:      ability.ChannelId,
+			priority:       priority,
+			weight:         saturatingUintToInt(ability.Weight),
+			maxConcurrency: maxConcurrency,
+		})
+	}
+	return candidates, nil
 }
 
 // getEnabledAbilities mirrors the memory-cache path's channel-status filter.

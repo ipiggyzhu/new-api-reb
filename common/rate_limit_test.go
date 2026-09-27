@@ -38,6 +38,21 @@ func TestInMemoryRateLimiterInitKeepsFirstExpiration(t *testing.T) {
 		"the expiration captured by the first Init must survive later calls")
 }
 
+// TestInMemoryRateLimiterCheckFollowsTheWindow pins the window Check decides by:
+// a full queue refuses while its oldest request is inside the window and admits
+// once that request has aged out. The queues are seeded directly because ageing
+// them through Request would mean waiting out a window.
+func TestInMemoryRateLimiterCheckFollowsTheWindow(t *testing.T) {
+	limiter := &InMemoryRateLimiter{}
+	limiter.Init(0)
+	now := time.Now().Unix()
+	limiter.store["fresh"] = &[]int64{now - 10, now}
+	limiter.store["aged"] = &[]int64{now - 120, now}
+
+	assert.False(t, limiter.Check("fresh", 2, 60), "the oldest request is still inside the window")
+	assert.True(t, limiter.Check("aged", 2, 60), "the oldest request has left the window")
+}
+
 // TestInMemoryRateLimiterInitIsRaceFree exercises the concurrent Init the rate
 // limit middlewares actually perform (one call per request). Under -race a
 // double-checked read of store outside the mutex is reported here; without the

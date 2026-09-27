@@ -59,29 +59,7 @@ func (c *ClaudeMediaMessage) IsStringContent() bool {
 }
 
 func (c *ClaudeMediaMessage) GetStringContent() string {
-	if c.Content == nil {
-		return ""
-	}
-	switch c.Content.(type) {
-	case string:
-		return c.Content.(string)
-	case []any:
-		var contentStr string
-		for _, contentItem := range c.Content.([]any) {
-			contentMap, ok := contentItem.(map[string]any)
-			if !ok {
-				continue
-			}
-			if contentMap["type"] == ContentTypeText {
-				if subStr, ok := contentMap["text"].(string); ok {
-					contentStr += subStr
-				}
-			}
-		}
-		return contentStr
-	}
-
-	return ""
+	return stringContentFromAny(c.Content)
 }
 
 func (c *ClaudeMediaMessage) GetJsonRowString() string {
@@ -133,29 +111,7 @@ func (c *ClaudeMessage) IsStringContent() bool {
 }
 
 func (c *ClaudeMessage) GetStringContent() string {
-	if c.Content == nil {
-		return ""
-	}
-	switch c.Content.(type) {
-	case string:
-		return c.Content.(string)
-	case []any:
-		var contentStr string
-		for _, contentItem := range c.Content.([]any) {
-			contentMap, ok := contentItem.(map[string]any)
-			if !ok {
-				continue
-			}
-			if contentMap["type"] == ContentTypeText {
-				if subStr, ok := contentMap["text"].(string); ok {
-					contentStr += subStr
-				}
-			}
-		}
-		return contentStr
-	}
-
-	return ""
+	return stringContentFromAny(c.Content)
 }
 
 func (c *ClaudeMessage) SetStringContent(content string) {
@@ -414,7 +370,7 @@ func (c *ClaudeRequest) GetTools() []any {
 
 func (c *ClaudeRequest) GetEfforts() string {
 	var OutputConfig OutputConfigForEffort
-	if err := json.Unmarshal(c.OutputConfig, &OutputConfig); err == nil {
+	if err := common.Unmarshal(c.OutputConfig, &OutputConfig); err == nil {
 		effort := OutputConfig.Effort
 		return effort
 	}

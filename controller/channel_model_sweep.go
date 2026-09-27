@@ -327,10 +327,7 @@ func sweepChannelModels(ctx context.Context, channelID int, testUserID int, budg
 	// Abilities are rebuilt from channel.Models (not the mapping), on the same
 	// in-memory channel, exactly as the scheduled巡检 does after persisting.
 	channel.Models = joined
-	channelUpstreamModelPersistMu.Lock()
-	err = channel.UpdateAbilities(nil)
-	channelUpstreamModelPersistMu.Unlock()
-	if err != nil {
+	if err = rebuildChannelAbilitiesLocked(channel); err != nil {
 		return result, fmt.Errorf("rebuild abilities for channel %d: %w", channelID, err)
 	}
 	result.changed = true

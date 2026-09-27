@@ -156,23 +156,11 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
 
-		// apply param override
-		if len(info.ParamOverride) > 0 {
-			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
-			if err != nil {
-				return newAPIErrorFromParamOverride(err)
-			}
-		}
-
-		logger.LogDebug(c, "Gemini request body: %s", jsonData)
-
-		body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
-		if err != nil {
-			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		body, closer, apiErr := buildUpstreamRequestBody(c, info, jsonData, false, "Gemini request body")
+		if apiErr != nil {
+			return apiErr
 		}
 		defer closer.Close()
-		jsonData = nil
-		info.UpstreamRequestBodySize = size
 		requestBody = body
 	}
 
@@ -275,21 +263,11 @@ func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo) (newAPI
 		return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 	}
 
-	// apply param override
-	if len(info.ParamOverride) > 0 {
-		jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
-		if err != nil {
-			return newAPIErrorFromParamOverride(err)
-		}
-	}
-	logger.LogDebug(c, "Gemini embedding request body: %s", jsonData)
-	body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
-	if err != nil {
-		return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+	body, closer, apiErr := buildUpstreamRequestBody(c, info, jsonData, false, "Gemini embedding request body")
+	if apiErr != nil {
+		return apiErr
 	}
 	defer closer.Close()
-	jsonData = nil
-	info.UpstreamRequestBodySize = size
 	requestBody = body
 
 	resp, err := adaptor.DoRequest(c, info, requestBody)

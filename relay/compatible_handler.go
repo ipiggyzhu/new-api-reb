@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -81,14 +82,7 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			return newApiErr
 		}
 
-		var containAudioTokens = usage.CompletionTokenDetails.AudioTokens > 0 || usage.PromptTokensDetails.AudioTokens > 0
-		var containsAudioRatios = ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
-
-		if containAudioTokens && containsAudioRatios {
-			service.PostAudioConsumeQuota(c, info, usage, "")
-		} else {
-			service.PostTextConsumeQuota(c, info, usage, nil)
-		}
+		postAudioOrTextConsumeQuota(c, info, usage)
 		return nil
 	}
 
@@ -115,46 +109,8 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
 
-		if info.ChannelSetting.SystemPrompt != "" {
-			// 如果有系统提示，则将其添加到请求中
-			request, ok := convertedRequest.(*dto.GeneralOpenAIRequest)
-			if ok {
-				containSystemPrompt := false
-				for _, message := range request.Messages {
-					if message.Role == request.GetSystemRoleName() {
-						containSystemPrompt = true
-						break
-					}
-				}
-				if !containSystemPrompt {
-					// 如果没有系统提示，则添加系统提示
-					systemMessage := dto.Message{
-						Role:    request.GetSystemRoleName(),
-						Content: info.ChannelSetting.SystemPrompt,
-					}
-					request.Messages = append([]dto.Message{systemMessage}, request.Messages...)
-				} else if info.ChannelSetting.SystemPromptOverride {
-					common.SetContextKey(c, constant.ContextKeySystemPromptOverride, true)
-					// 如果有系统提示，且允许覆盖，则拼接到前面
-					for i, message := range request.Messages {
-						if message.Role == request.GetSystemRoleName() {
-							if message.IsStringContent() {
-								request.Messages[i].SetStringContent(info.ChannelSetting.SystemPrompt + "\n" + message.StringContent())
-							} else {
-								contents := message.ParseContent()
-								contents = append([]dto.MediaContent{
-									{
-										Type: dto.ContentTypeText,
-										Text: info.ChannelSetting.SystemPrompt,
-									},
-								}, contents...)
-								request.Messages[i].Content = contents
-							}
-							break
-						}
-					}
-				}
-			}
+		if req, ok := convertedRequest.(*dto.GeneralOpenAIRequest); ok {
+			applySystemPromptIfNeeded(c, info, req)
 		}
 
 		jsonData, err := common.Marshal(convertedRequest)
@@ -162,55 +118,16 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 			return types.NewError(err, types.ErrorCodeJsonMarshalFailed, types.ErrOptionWithSkipRetry())
 		}
 
-		// remove disabled fields for OpenAI API
-		jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
-		if err != nil {
-			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
-		}
-
-		// apply param override
-		if len(info.ParamOverride) > 0 {
-			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
-			if err != nil {
-				return newAPIErrorFromParamOverride(err)
-			}
-		}
-
-		logger.LogDebug(c, "text request body: %s", jsonData)
-
-		body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
-		if err != nil {
-			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		body, closer, apiErr := buildUpstreamRequestBody(c, info, jsonData, true, "text request body")
+		if apiErr != nil {
+			return apiErr
 		}
 		defer closer.Close()
-		jsonData = nil
-		info.UpstreamRequestBodySize = size
 		requestBody = body
 	}
 
-	var httpResp *http.Response
-	resp, err := adaptor.DoRequest(c, info, requestBody)
-	if err != nil {
-		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
-	}
-
-	statusCodeMappingStr := c.GetString("status_code_mapping")
-
-	if resp != nil {
-		httpResp = resp.(*http.Response)
-		info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
-		if httpResp.StatusCode != http.StatusOK {
-			newApiErr := service.RelayErrorHandler(c.Request.Context(), httpResp, false)
-			// reset status code 重置状态码
-			service.ResetStatusCode(newApiErr, statusCodeMappingStr)
-			return newApiErr
-		}
-	}
-
-	usage, newApiErr := adaptor.DoResponse(c, httpResp, info)
+	usage, newApiErr := doUpstreamRoundTrip(c, info, adaptor, requestBody, true)
 	if newApiErr != nil {
-		// reset status code 重置状态码
-		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
 		return newApiErr
 	}
 
@@ -222,13 +139,83 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 		return newApiErr
 	}
 
-	var containAudioTokens = usageDto.CompletionTokenDetails.AudioTokens > 0 || usageDto.PromptTokensDetails.AudioTokens > 0
-	var containsAudioRatios = ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
-
-	if containAudioTokens && containsAudioRatios {
-		service.PostAudioConsumeQuota(c, info, usageDto, "")
-	} else {
-		service.PostTextConsumeQuota(c, info, usageDto, nil)
-	}
+	postAudioOrTextConsumeQuota(c, info, usageDto)
 	return nil
+}
+
+// postAudioOrTextConsumeQuota settles a chat/completions response as audio usage
+// when the usage carries audio tokens and the model has an audio ratio
+// configured; otherwise it settles as ordinary text usage.
+func postAudioOrTextConsumeQuota(c *gin.Context, info *relaycommon.RelayInfo, usage *dto.Usage) {
+	containAudioTokens := usage.CompletionTokenDetails.AudioTokens > 0 || usage.PromptTokensDetails.AudioTokens > 0
+	containsAudioRatios := ratio_setting.ContainsAudioRatio(info.OriginModelName) || ratio_setting.ContainsAudioCompletionRatio(info.OriginModelName)
+	if containAudioTokens && containsAudioRatios {
+		service.PostAudioConsumeQuota(c, info, usage, "")
+	} else {
+		service.PostTextConsumeQuota(c, info, usage, nil)
+	}
+}
+
+// buildUpstreamRequestBody finalizes an already-marshaled upstream request body:
+// optionally strips channel-disabled fields, applies any configured param
+// override, logs the outgoing body under debugLabel, and wraps it for transport.
+// It sets info.UpstreamRequestBodySize and returns the body reader together with
+// the closer the caller must defer-close.
+func buildUpstreamRequestBody(c *gin.Context, info *relaycommon.RelayInfo, jsonData []byte, removeDisabledFields bool, debugLabel string) (io.Reader, io.Closer, *types.NewAPIError) {
+	var err error
+	if removeDisabledFields {
+		jsonData, err = relaycommon.RemoveDisabledFields(jsonData, info.ChannelOtherSettings, info.ChannelSetting.PassThroughBodyEnabled)
+		if err != nil {
+			return nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+	}
+	if len(info.ParamOverride) > 0 {
+		jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
+		if err != nil {
+			return nil, nil, newAPIErrorFromParamOverride(err)
+		}
+	}
+	logger.LogDebug(c, "%s: %s", debugLabel, jsonData)
+	body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
+	if err != nil {
+		return nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+	}
+	info.UpstreamRequestBodySize = size
+	return body, closer, nil
+}
+
+// doUpstreamRoundTrip sends the finalized request body through the adaptor and
+// hands the upstream response back to the adaptor for parsing. A non-200
+// upstream status becomes a relay error; that error and any DoResponse error
+// both get the channel's status code mapping applied. With detectEventStream
+// set, a text/event-stream upstream response switches the relay to stream mode
+// before the status check.
+func doUpstreamRoundTrip(c *gin.Context, info *relaycommon.RelayInfo, adaptor channel.Adaptor, requestBody io.Reader, detectEventStream bool) (any, *types.NewAPIError) {
+	resp, err := adaptor.DoRequest(c, info, requestBody)
+	if err != nil {
+		return nil, types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
+	}
+
+	statusCodeMappingStr := c.GetString("status_code_mapping")
+	var httpResp *http.Response
+	if resp != nil {
+		httpResp = resp.(*http.Response)
+		if detectEventStream {
+			info.IsStream = info.IsStream || strings.HasPrefix(httpResp.Header.Get("Content-Type"), "text/event-stream")
+		}
+		if httpResp.StatusCode != http.StatusOK {
+			newAPIError := service.RelayErrorHandler(c.Request.Context(), httpResp, false)
+			// reset status code 重置状态码
+			service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+			return nil, newAPIError
+		}
+	}
+
+	usage, newAPIError := adaptor.DoResponse(c, httpResp, info)
+	if newAPIError != nil {
+		// reset status code 重置状态码
+		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+		return nil, newAPIError
+	}
+	return usage, nil
 }

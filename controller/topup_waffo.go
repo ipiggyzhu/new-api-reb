@@ -91,16 +91,7 @@ func getWaffoPayMoney(amount float64, group string) float64 {
 	if operation_setting.GetQuotaDisplayType() == operation_setting.QuotaDisplayTypeTokens {
 		amount = amount / common.QuotaPerUnit
 	}
-	topupGroupRatio := common.GetTopupGroupRatio(group)
-	if topupGroupRatio == 0 {
-		topupGroupRatio = 1
-	}
-	discount := 1.0
-	if ds, ok := operation_setting.GetPaymentSetting().AmountDiscount[int(originalAmount)]; ok {
-		if ds > 0 {
-			discount = ds
-		}
-	}
+	topupGroupRatio, discount := topupScaleFactors(int(originalAmount), group)
 	return amount * setting.WaffoUnitPrice * topupGroupRatio * discount
 }
 

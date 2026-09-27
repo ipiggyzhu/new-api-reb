@@ -74,6 +74,28 @@ func ClaudeData(c *gin.Context, resp dto.ClaudeResponse) error {
 	return nil
 }
 
+// GeminiData writes one converted Gemini stream chunk as an SSE data frame,
+// mirroring ClaudeData for the Gemini relay format. A nil resp is a no-op (the
+// converter emits nil for openai's empty priming/trailing chunks), so callers no
+// longer need their own nil guard. A marshal failure is returned so a caller that
+// treats it as fatal can abort the stream.
+func GeminiData(c *gin.Context, resp *dto.GeminiChatResponse) error {
+	if resp == nil {
+		return nil
+	}
+	if requestContextDone(c) {
+		return nil
+	}
+	jsonData, err := common.Marshal(resp)
+	if err != nil {
+		common.SysError("error marshalling gemini stream response: " + err.Error())
+		return err
+	}
+	c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonData)})
+	_ = FlushWriter(c)
+	return nil
+}
+
 func ClaudeChunkData(c *gin.Context, resp dto.ClaudeResponse, data string) {
 	if requestContextDone(c) {
 		return

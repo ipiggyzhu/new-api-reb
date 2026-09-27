@@ -234,16 +234,10 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 	}
 
 	sendGeminiResponse := func(geminiResponse *dto.GeminiChatResponse) bool {
-		if geminiResponse == nil {
-			return true
-		}
-		geminiResponseStr, err := common.Marshal(geminiResponse)
-		if err != nil {
+		if err := helper.GeminiData(c, geminiResponse); err != nil {
 			streamErr = types.NewOpenAIError(err, types.ErrorCodeJsonMarshalFailed, http.StatusInternalServerError)
 			return false
 		}
-		c.Render(-1, common.CustomEvent{Data: "data: " + string(geminiResponseStr)})
-		_ = helper.FlushWriter(c)
 		return true
 	}
 

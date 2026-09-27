@@ -17,10 +17,20 @@ import (
 
 	"github.com/Calcium-Ion/go-epay/epay"
 	"github.com/gin-gonic/gin"
-	"github.com/samber/lo"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
+
+// appendPayMethodIfAbsent appends method to methods unless a method with the
+// same "type" is already present, returning the possibly-extended slice.
+func appendPayMethodIfAbsent(methods []map[string]string, method map[string]string) []map[string]string {
+	for _, existing := range methods {
+		if existing["type"] == method["type"] {
+			return methods
+		}
+	}
+	return append(methods, method)
+}
 
 func GetTopUpInfo(c *gin.Context) {
 	complianceConfirmed := operation_setting.IsPaymentComplianceConfirmed()
@@ -33,67 +43,34 @@ func GetTopUpInfo(c *gin.Context) {
 
 	// 如果启用了 Stripe 支付，添加到支付方法列表
 	if isStripeTopUpEnabled() {
-		// 检查是否已经包含 Stripe
-		hasStripe := false
-		for _, method := range payMethods {
-			if method["type"] == "stripe" {
-				hasStripe = true
-				break
-			}
-		}
-
-		if !hasStripe {
-			stripeMethod := map[string]string{
-				"name":      "Stripe",
-				"type":      "stripe",
-				"color":     "rgba(var(--semi-purple-5), 1)",
-				"min_topup": strconv.Itoa(setting.StripeMinTopUp),
-			}
-			payMethods = append(payMethods, stripeMethod)
-		}
+		payMethods = appendPayMethodIfAbsent(payMethods, map[string]string{
+			"name":      "Stripe",
+			"type":      "stripe",
+			"color":     "rgba(var(--semi-purple-5), 1)",
+			"min_topup": strconv.Itoa(setting.StripeMinTopUp),
+		})
 	}
 
 	// Waffo Pancake displayed above the legacy Waffo gateway.
 	enableWaffoPancake := isWaffoPancakeTopUpEnabled()
 	if enableWaffoPancake {
-		hasWaffoPancake := false
-		for _, method := range payMethods {
-			if method["type"] == model.PaymentMethodWaffoPancake {
-				hasWaffoPancake = true
-				break
-			}
-		}
-
-		if !hasWaffoPancake {
-			payMethods = append(payMethods, map[string]string{
-				"name":      "Waffo Pancake",
-				"type":      model.PaymentMethodWaffoPancake,
-				"color":     "rgba(var(--semi-orange-5), 1)",
-				"min_topup": strconv.Itoa(setting.WaffoPancakeMinTopUp),
-			})
-		}
+		payMethods = appendPayMethodIfAbsent(payMethods, map[string]string{
+			"name":      "Waffo Pancake",
+			"type":      model.PaymentMethodWaffoPancake,
+			"color":     "rgba(var(--semi-orange-5), 1)",
+			"min_topup": strconv.Itoa(setting.WaffoPancakeMinTopUp),
+		})
 	}
 
 	// 如果启用了 Waffo 支付，添加到支付方法列表
 	enableWaffo := isWaffoTopUpEnabled()
 	if enableWaffo {
-		hasWaffo := false
-		for _, method := range payMethods {
-			if method["type"] == model.PaymentMethodWaffo {
-				hasWaffo = true
-				break
-			}
-		}
-
-		if !hasWaffo {
-			waffoMethod := map[string]string{
-				"name":      "Waffo (Global Payment)",
-				"type":      model.PaymentMethodWaffo,
-				"color":     "rgba(var(--semi-blue-5), 1)",
-				"min_topup": strconv.Itoa(setting.WaffoMinTopUp),
-			}
-			payMethods = append(payMethods, waffoMethod)
-		}
+		payMethods = appendPayMethodIfAbsent(payMethods, map[string]string{
+			"name":      "Waffo (Global Payment)",
+			"type":      model.PaymentMethodWaffo,
+			"color":     "rgba(var(--semi-blue-5), 1)",
+			"min_topup": strconv.Itoa(setting.WaffoMinTopUp),
+		})
 	}
 
 	data := gin.H{
@@ -147,6 +124,23 @@ func GetEpayClient() *epay.Client {
 	return withUrl
 }
 
+// topupScaleFactors resolves the two multipliers every top-up gateway applies
+// to the charged amount: the user's top-up group ratio (defaulting to 1 when
+// unset) and the optional preset discount configured per original request
+// amount in payment settings (defaulting to 1). Kept together so all payment
+// providers scale price identically.
+func topupScaleFactors(amount int, group string) (groupRatio, discount float64) {
+	groupRatio = common.GetTopupGroupRatio(group)
+	if groupRatio == 0 {
+		groupRatio = 1
+	}
+	discount = 1.0
+	if ds, ok := operation_setting.GetPaymentSetting().AmountDiscount[amount]; ok && ds > 0 {
+		discount = ds
+	}
+	return
+}
+
 func getPayMoney(amount int64, group string) float64 {
 	dAmount := decimal.NewFromInt(amount)
 	// 充值金额以“展示类型”为准：
@@ -158,20 +152,10 @@ func getPayMoney(amount int64, group string) float64 {
 		dAmount = dAmount.Div(dQuotaPerUnit).Truncate(0)
 	}
 
-	topupGroupRatio := common.GetTopupGroupRatio(group)
-	if topupGroupRatio == 0 {
-		topupGroupRatio = 1
-	}
+	topupGroupRatio, discount := topupScaleFactors(int(amount), group)
 
 	dTopupGroupRatio := decimal.NewFromFloat(topupGroupRatio)
 	dPrice := decimal.NewFromFloat(operation_setting.Price)
-	// apply optional preset discount by the original request amount (if configured), default 1.0
-	discount := 1.0
-	if ds, ok := operation_setting.GetPaymentSetting().AmountDiscount[int(amount)]; ok {
-		if ds > 0 {
-			discount = ds
-		}
-	}
 	dDiscount := decimal.NewFromFloat(discount)
 
 	payMoney := dAmount.Mul(dPrice).Mul(dTopupGroupRatio).Mul(dDiscount)
@@ -368,6 +352,17 @@ func settleEpayOrder(topUp *model.TopUp) (int, error) {
 	return quotaToAdd, nil
 }
 
+// flattenValues collapses url.Values into a single-valued map, keeping the
+// first value for each key (matching url.Values.Get). Used to normalize epay
+// webhook form/query parameters before signature verification.
+func flattenValues(values url.Values) map[string]string {
+	out := make(map[string]string, len(values))
+	for key := range values {
+		out[key] = values.Get(key)
+	}
+	return out
+}
+
 func EpayNotify(c *gin.Context) {
 	if !isEpayWebhookEnabled() {
 		logger.LogWarn(c.Request.Context(), fmt.Sprintf("易支付 webhook 被拒绝 reason=webhook_disabled path=%q client_ip=%s", c.Request.RequestURI, c.ClientIP()))
@@ -384,16 +379,10 @@ func EpayNotify(c *gin.Context) {
 			_, _ = c.Writer.Write([]byte("fail"))
 			return
 		}
-		params = lo.Reduce(lo.Keys(c.Request.PostForm), func(r map[string]string, t string, i int) map[string]string {
-			r[t] = c.Request.PostForm.Get(t)
-			return r
-		}, map[string]string{})
+		params = flattenValues(c.Request.PostForm)
 	} else {
 		// GET 请求：从 URL Query 解析参数
-		params = lo.Reduce(lo.Keys(c.Request.URL.Query()), func(r map[string]string, t string, i int) map[string]string {
-			r[t] = c.Request.URL.Query().Get(t)
-			return r
-		}, map[string]string{})
+		params = flattenValues(c.Request.URL.Query())
 	}
 	logger.LogInfo(c.Request.Context(), fmt.Sprintf("易支付 webhook 收到请求 path=%q client_ip=%s method=%s params=%q", c.Request.RequestURI, c.ClientIP(), c.Request.Method, common.GetJsonString(params)))
 

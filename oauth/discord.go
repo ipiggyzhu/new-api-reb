@@ -2,13 +2,13 @@ package oauth
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
@@ -71,20 +71,16 @@ func (p *DiscordProvider) ExchangeToken(ctx context.Context, code string, c *gin
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	client := http.Client{
-		Timeout: 5 * time.Second,
-	}
-	res, err := client.Do(req)
+	res, err := oauthDo(ctx, req, 5*time.Second, "[OAuth-Discord] ExchangeToken", "Discord")
 	if err != nil {
-		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] ExchangeToken error: %s", err.Error()))
-		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthConnectFailed, map[string]any{"Provider": "Discord"}, err.Error())
+		return nil, err
 	}
 	defer res.Body.Close()
 
 	logger.LogDebug(ctx, "[OAuth-Discord] ExchangeToken response status: %d", res.StatusCode)
 
 	var discordResponse discordOAuthResponse
-	err = json.NewDecoder(res.Body).Decode(&discordResponse)
+	err = common.DecodeJson(res.Body, &discordResponse)
 	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] ExchangeToken decode error: %s", err.Error()))
 		return nil, err
@@ -116,13 +112,9 @@ func (p *DiscordProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*
 	}
 	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
 
-	client := http.Client{
-		Timeout: 5 * time.Second,
-	}
-	res, err := client.Do(req)
+	res, err := oauthDo(ctx, req, 5*time.Second, "[OAuth-Discord] GetUserInfo", "Discord")
 	if err != nil {
-		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] GetUserInfo error: %s", err.Error()))
-		return nil, NewOAuthErrorWithRaw(i18n.MsgOAuthConnectFailed, map[string]any{"Provider": "Discord"}, err.Error())
+		return nil, err
 	}
 	defer res.Body.Close()
 
@@ -134,7 +126,7 @@ func (p *DiscordProvider) GetUserInfo(ctx context.Context, token *OAuthToken) (*
 	}
 
 	var discordUser discordUser
-	err = json.NewDecoder(res.Body).Decode(&discordUser)
+	err = common.DecodeJson(res.Body, &discordUser)
 	if err != nil {
 		logger.LogError(ctx, fmt.Sprintf("[OAuth-Discord] GetUserInfo decode error: %s", err.Error()))
 		return nil, err

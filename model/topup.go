@@ -84,11 +84,7 @@ func UpdatePendingTopUpStatus(tradeNo string, expectedPaymentProvider string, ta
 		return errors.New("未提供支付单号")
 	}
 
-	refCol := "`trade_no`"
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		refCol = `"trade_no"`
-	}
-
+	refCol := commonTradeNoCol
 	return DB.Transaction(func(tx *gorm.DB) error {
 		topUp := &TopUp{}
 		if err := lockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(topUp).Error; err != nil {
@@ -114,11 +110,7 @@ func Recharge(referenceId string, customerId string, callerIp string) (err error
 	var quota float64
 	topUp := &TopUp{}
 
-	refCol := "`trade_no`"
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		refCol = `"trade_no"`
-	}
-
+	refCol := commonTradeNoCol
 	err = DB.Transaction(func(tx *gorm.DB) error {
 		err := lockForUpdate(tx).Where(refCol+" = ?", referenceId).First(topUp).Error
 		if err != nil {
@@ -326,11 +318,7 @@ func ManualCompleteTopUp(tradeNo string, callerIp string) error {
 		return errors.New("未提供订单号")
 	}
 
-	refCol := "`trade_no`"
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		refCol = `"trade_no"`
-	}
-
+	refCol := commonTradeNoCol
 	var userId int
 	var quotaToAdd int
 	var payMoney float64
@@ -408,11 +396,7 @@ func RechargeCreem(referenceId string, customerEmail string, customerName string
 	var quota int64
 	topUp := &TopUp{}
 
-	refCol := "`trade_no`"
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		refCol = `"trade_no"`
-	}
-
+	refCol := commonTradeNoCol
 	err = DB.Transaction(func(tx *gorm.DB) error {
 		err := lockForUpdate(tx).Where(refCol+" = ?", referenceId).First(topUp).Error
 		if err != nil {
@@ -487,11 +471,7 @@ func RechargeWaffo(tradeNo string, callerIp string) (err error) {
 	var quotaToAdd int
 	topUp := &TopUp{}
 
-	refCol := "`trade_no`"
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		refCol = `"trade_no"`
-	}
-
+	refCol := commonTradeNoCol
 	err = DB.Transaction(func(tx *gorm.DB) error {
 		err := lockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(topUp).Error
 		if err != nil {
@@ -553,11 +533,7 @@ func RechargeWaffoPancake(tradeNo string) (err error) {
 	var quotaToAdd int
 	topUp := &TopUp{}
 
-	refCol := "`trade_no`"
-	if common.UsingMainDatabase(common.DatabaseTypePostgreSQL) {
-		refCol = `"trade_no"`
-	}
-
+	refCol := commonTradeNoCol
 	err = DB.Transaction(func(tx *gorm.DB) error {
 		err := lockForUpdate(tx).Where(refCol+" = ?", tradeNo).First(topUp).Error
 		if err != nil {
