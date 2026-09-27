@@ -375,6 +375,10 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 		break
 	}
 
+	if blockErr := helper.CheckNonStreamResponseSensitive(c, responseBody); blockErr != nil {
+		return nil, blockErr
+	}
+
 	service.IOCopyBytesGracefully(c, resp, responseBody)
 
 	return &usage, nil

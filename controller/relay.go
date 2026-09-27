@@ -189,7 +189,18 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		contains, words := service.CheckSensitiveText(meta.CombineText)
 		if contains {
 			logger.LogWarn(c, fmt.Sprintf("user sensitive words detected: %s", strings.Join(words, ", ")))
-			newAPIError = types.NewError(err, types.ErrorCodeSensitiveWordsDetected)
+			// err is nil here (GenRelayInfo returned successfully above), and
+			// types.NewError stamps 500 with no message when handed a nil error: the
+			// caller used to get an unexplained "sensitive_words_detected" 500 that
+			// shouldRetry then replayed onto other channels, multiplying one rejected
+			// prompt into a burst of upstream calls. It is the request that is being
+			// refused, so it is a 400, it says why, and it is not retried.
+			newAPIError = types.NewErrorWithStatusCode(
+				errors.New("request blocked: sensitive words detected ("+service.DescribeSensitiveWords(words)+")"),
+				types.ErrorCodeSensitiveWordsDetected,
+				http.StatusBadRequest,
+				types.ErrOptionWithSkipRetry(),
+			)
 			return
 		}
 	}
@@ -311,8 +322,16 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			// that actually served the request, and only after StreamStatus has been
 			// consulted above: a stream that committed a 200 and then died reaches
 			// this point as an error, so it cannot be credited as a success.
+			//
+			// In the background because with Redis it is a script round trip, and the
+			// response has already been written: nothing in this request reads the
+			// result. The fault report below stays inline, since the retry that follows
+			// it selects against the demotion it records.
 			if !relayInfo.IsChannelTest && channel_score.Enabled() {
-				channel_score.Report(channel.Id, relayInfo.UsingGroup, relayInfo.OriginModelName, channel_score.OutcomeSuccess)
+				channelId, group, modelName := channel.Id, relayInfo.UsingGroup, relayInfo.OriginModelName
+				gopool.Go(func() {
+					channel_score.Report(channelId, group, modelName, channel_score.OutcomeSuccess)
+				})
 			}
 			return
 		}

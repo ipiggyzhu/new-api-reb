@@ -43,12 +43,12 @@ const (
 // rebuilding an image to change one string. They are only defaults:
 // operation_setting.MonitorSetting.ChannelTestClientHeaders overrides any of
 // them from the admin UI. Values were taken from the package registries and the
-// shipped clients on 2026-08-02, not invented.
+// shipped clients on 2026-09-22, not invented.
 
 // anthropicClientHeaders mirrors Claude Code CLI. The parenthesised suffix is a
 // comma-separated list of run-context tags, which is how the CLI builds it.
 var anthropicClientHeaders = ClientHeaderProfile{
-	"user-agent":        "claude-cli/2.1.220 (external, cli)",
+	"user-agent":        "claude-cli/2.1.278 (external, cli)",
 	"anthropic-version": "2023-06-01",
 	"x-app":             "cli",
 	"accept-language":   "*",
@@ -57,9 +57,9 @@ var anthropicClientHeaders = ClientHeaderProfile{
 // openAIClientHeaders mirrors the official openai-python SDK, whose
 // x-stainless-* headers are what "looks like the real SDK" means in practice.
 var openAIClientHeaders = ClientHeaderProfile{
-	"user-agent":                  "OpenAI/Python 2.52.0",
+	"user-agent":                  "OpenAI/Python 3.17.0",
 	"x-stainless-lang":            "python",
-	"x-stainless-package-version": "2.52.0",
+	"x-stainless-package-version": "3.17.0",
 	"x-stainless-runtime":         "CPython",
 	"x-stainless-runtime-version": "3.12.3",
 	"x-stainless-os":              "Linux",
@@ -69,15 +69,15 @@ var openAIClientHeaders = ClientHeaderProfile{
 
 // codexClientHeaders mirrors the Codex CLI, a distinct client from the Python SDK.
 var codexClientHeaders = ClientHeaderProfile{
-	"user-agent":      "codex_cli_rs/0.146.0 (Linux 6.8.0; x86_64) terminal",
+	"user-agent":      "codex_cli_rs/0.155.1 (Linux 6.8.0; x86_64) terminal",
 	"originator":      "codex_cli_rs",
 	"accept-language": "*",
 }
 
 // geminiClientHeaders mirrors google-genai.
 var geminiClientHeaders = ClientHeaderProfile{
-	"user-agent":        "google-genai-sdk/2.16.0 gl-python/3.12.3",
-	"x-goog-api-client": "google-genai-sdk/2.16.0 gl-python/3.12.3",
+	"user-agent":        "google-genai-sdk/2.24.0 gl-python/3.12.3",
+	"x-goog-api-client": "google-genai-sdk/2.24.0 gl-python/3.12.3",
 	"accept-language":   "*",
 }
 

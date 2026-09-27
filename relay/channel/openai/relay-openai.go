@@ -179,11 +179,12 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 
 			lastStreamData = data
 			lastStreamDataSent = false
-			if err := processTokenData(info.RelayMode, data, &responseTextBuilder, &toolCount); err != nil {
-				logger.LogError(c, "error processing stream token data: "+err.Error())
-				sr.Error(err)
-			}
-			if canForwardChunkImmediately(info, data) {
+			// Parse the chunk once and hand the same result to both readers, so a
+			// chunk is decoded once per arrival instead of re-parsed for token
+			// accounting and again for the forward-immediately decision.
+			parsed := gjson.Parse(data)
+			processTokenData(info.RelayMode, parsed, &responseTextBuilder, &toolCount)
+			if canForwardChunkImmediately(info, parsed) {
 				if err := HandleStreamFormat(c, info, data, info.ChannelSetting.ForceFormat, info.ChannelSetting.ThinkingToContent); err != nil {
 					common.SysLog("error handling stream format: " + err.Error())
 					sr.Error(err)
@@ -258,7 +259,13 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		}
 	}
 
-	HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
+	// For Claude and Gemini the tail is converted exactly once, here, with the
+	// settled usage. A tail that was already forwarded is a plain delta on a
+	// stream that ended without a finish reason: converting it again would
+	// duplicate its content, and it cannot close the message anyway.
+	if info.RelayFormat == types.RelayFormatOpenAI || !lastStreamDataSent {
+		HandleFinalResponse(c, info, lastStreamData, responseId, createAt, model, systemFingerprint, usage, containStreamUsage)
+	}
 
 	return usage, nil
 }
@@ -374,6 +381,10 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 			return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 		}
 		responseBody = geminiRespStr
+	}
+
+	if sensitiveErr := helper.CheckNonStreamResponseSensitive(c, responseBody); sensitiveErr != nil {
+		return nil, sensitiveErr
 	}
 
 	service.IOCopyBytesGracefully(c, resp, responseBody)

@@ -63,14 +63,22 @@ var relayDialer = &net.Dialer{
 }
 
 // applyRelayTransportTimeouts sets the connection-establishment bounds shared by
-// the default and proxy transports. Deliberately no ResponseHeaderTimeout:
-// reasoning models can legitimately take minutes before the first byte.
+// the default and proxy transports. No ResponseHeaderTimeout by default:
+// reasoning models can legitimately take minutes before the first byte, so a
+// cap on the wait for upstream response headers is opt-in via
+// RELAY_RESPONSE_HEADER_TIMEOUT (seconds). It applies to streaming and
+// non-streaming requests alike, so it must exceed the slowest expected
+// first-token time; on expiry the attempt fails and may be retried elsewhere
+// instead of holding the request until the client gives up.
 func applyRelayTransportTimeouts(transport *http.Transport) {
 	if transport.DialContext == nil {
 		transport.DialContext = relayDialer.DialContext
 	}
 	transport.TLSHandshakeTimeout = time.Duration(common.GetEnvOrDefault("RELAY_TLS_HANDSHAKE_TIMEOUT", 10)) * time.Second
 	transport.ExpectContinueTimeout = 1 * time.Second
+	if headerTimeout := common.GetEnvOrDefault("RELAY_RESPONSE_HEADER_TIMEOUT", 0); headerTimeout > 0 {
+		transport.ResponseHeaderTimeout = time.Duration(headerTimeout) * time.Second
+	}
 }
 
 func InitHttpClient() {

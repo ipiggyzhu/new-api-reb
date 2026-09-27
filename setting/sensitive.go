@@ -5,7 +5,11 @@ import "strings"
 var CheckSensitiveEnabled = true
 var CheckSensitiveOnPromptEnabled = true
 
-//var CheckSensitiveOnCompletionEnabled = true
+// CheckSensitiveOnCompletionEnabled 是否检查上游返回的内容（防提示词注入）。
+// 默认关闭：开启后每个响应体、流模式下每个分片都要多走一次 JSON 遍历和敏感词
+// 匹配，而且误报会直接掐断一个已经计费的请求。这种代价必须由管理员显式承担，
+// 而不是升级后悄悄生效。
+var CheckSensitiveOnCompletionEnabled = false
 
 // StopOnSensitiveEnabled 如果检测到敏感词，是否立刻停止生成，否则替换敏感词
 var StopOnSensitiveEnabled = true
@@ -38,6 +42,6 @@ func ShouldCheckPromptSensitive() bool {
 	return CheckSensitiveEnabled && CheckSensitiveOnPromptEnabled
 }
 
-//func ShouldCheckCompletionSensitive() bool {
-//	return CheckSensitiveEnabled && CheckSensitiveOnCompletionEnabled
-//}
+func ShouldCheckCompletionSensitive() bool {
+	return CheckSensitiveEnabled && CheckSensitiveOnCompletionEnabled
+}

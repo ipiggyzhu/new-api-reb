@@ -328,6 +328,10 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		c.Set("claude_web_search_requests", claudeResponse.Usage.ServerToolUse.WebSearchRequests)
 	}
 
+	if sensitiveErr := helper.CheckNonStreamResponseSensitive(c, responseData); sensitiveErr != nil {
+		return sensitiveErr
+	}
+
 	service.IOCopyBytesGracefully(c, httpResp, responseData)
 	return nil
 }

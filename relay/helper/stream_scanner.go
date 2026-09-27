@@ -288,6 +288,12 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		sr := newStreamResult(info.StreamStatus)
 		for data := range dataChan {
 			sr.reset()
+			// Scanned before dataHandler, not after: the handler is what writes the
+			// chunk to the caller, so a check placed after it would only report an
+			// injection that had already been delivered.
+			if blockStreamChunkOnSensitive(c, data, sr) {
+				return
+			}
 			func() {
 				writeMutex.Lock()
 				defer writeMutex.Unlock()

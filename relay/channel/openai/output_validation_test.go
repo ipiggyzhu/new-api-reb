@@ -428,13 +428,13 @@ func TestNativeCompactionOutputValidation(t *testing.T) {
 
 func TestNativeStreamForwardsNonTextWithUsageImmediately(t *testing.T) {
 	chunk := `{"choices":[{"index":0,"delta":{"refusal":"I cannot help with that."}}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}`
-	payload := runOaiStream(t, false, true, chunk, finishChunk)
+	payload := runOaiStream(t, types.RelayFormatOpenAI, false, true, chunk, finishChunk)
 	assert.Equal(t, []string{chunk, finishChunk, "[DONE]"}, payload)
 }
 
 func TestNativeStreamPreservesInitialRole(t *testing.T) {
 	role := `{"choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}`
-	payload := runOaiStream(t, false, false, role, delta("answer"), finishChunk)
+	payload := runOaiStream(t, types.RelayFormatOpenAI, false, false, role, delta("answer"), finishChunk)
 	assert.Equal(t, []string{role, delta("answer"), finishChunk, "[DONE]"}, payload)
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/cachex"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
+	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 	"github.com/samber/hot"
 	"github.com/tidwall/gjson"
@@ -1012,9 +1013,21 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 		ttlSeconds = 3600
 	}
 	cache := getChannelAffinityCache()
-	if err := cache.SetWithTTL(cacheKey, channelID, time.Duration(ttlSeconds)*time.Second); err != nil {
-		common.SysError(fmt.Sprintf("channel affinity cache set failed: key=%s, err=%v", cacheKey, err))
+	ttl := time.Duration(ttlSeconds) * time.Second
+	pin := func() {
+		if err := cache.SetWithTTL(cacheKey, channelID, ttl); err != nil {
+			common.SysError(fmt.Sprintf("channel affinity cache set failed: key=%s, err=%v", cacheKey, err))
+		}
 	}
+	// With Redis the pin is a network round trip at the tail of every successful
+	// request, after the response is already written, so it runs in the
+	// background. A request racing it would have raced the inline write just the
+	// same. The in-memory write costs nothing and stays inline.
+	if common.RedisEnabled && common.RDB != nil {
+		gopool.Go(pin)
+		return
+	}
+	pin()
 }
 
 type ChannelAffinityUsageCacheStats struct {
@@ -1116,42 +1129,59 @@ func observeChannelAffinityUsageCache(statsCtx ChannelAffinityStatsContext, usag
 		return
 	}
 
-	cache := getChannelAffinityUsageCacheStatsCache()
-	ttl := time.Duration(windowSeconds) * time.Second
+	// Everything taken from usage is read here, before the update can move to the
+	// background: the caller keeps using usage after this returns.
+	currentMode := normalizeCachedTokenRateMode(cachedTokenRateMode)
+	hit, cachedTokens, promptCacheHitTokens := usageCacheSignals(usage)
+	promptTokens := int64(usagePromptTokens(usage))
+	completionTokens := int64(usageCompletionTokens(usage))
+	totalTokens := int64(usageTotalTokens(usage))
+	seenAt := time.Now().Unix()
 
-	lock := channelAffinityUsageCacheStatsLock(entryKey)
-	lock.Lock()
-	defer lock.Unlock()
+	record := func() {
+		cache := getChannelAffinityUsageCacheStatsCache()
+		ttl := time.Duration(windowSeconds) * time.Second
 
-	prev, found, err := cache.Get(entryKey)
-	if err != nil {
+		lock := channelAffinityUsageCacheStatsLock(entryKey)
+		lock.Lock()
+		defer lock.Unlock()
+
+		prev, found, err := cache.Get(entryKey)
+		if err != nil {
+			return
+		}
+		next := prev
+		if !found {
+			next = ChannelAffinityUsageCacheCounters{}
+		}
+		if currentMode != "" {
+			if next.CachedTokenRateMode == "" {
+				next.CachedTokenRateMode = currentMode
+			} else if next.CachedTokenRateMode != currentMode && next.CachedTokenRateMode != cacheTokenRateModeMixed {
+				next.CachedTokenRateMode = cacheTokenRateModeMixed
+			}
+		}
+		next.Total++
+		if hit {
+			next.Hit++
+		}
+		next.WindowSeconds = windowSeconds
+		next.LastSeenAt = seenAt
+		next.CachedTokens += cachedTokens
+		next.PromptCacheHitTokens += promptCacheHitTokens
+		next.PromptTokens += promptTokens
+		next.CompletionTokens += completionTokens
+		next.TotalTokens += totalTokens
+		_ = cache.SetWithTTL(entryKey, next, ttl)
+	}
+	// With Redis this is a read and a write under the stripe lock, at the tail of
+	// the request; the counters only feed the admin view, so they are updated in
+	// the background. In memory it stays inline.
+	if common.RedisEnabled && common.RDB != nil {
+		gopool.Go(record)
 		return
 	}
-	next := prev
-	if !found {
-		next = ChannelAffinityUsageCacheCounters{}
-	}
-	currentMode := normalizeCachedTokenRateMode(cachedTokenRateMode)
-	if currentMode != "" {
-		if next.CachedTokenRateMode == "" {
-			next.CachedTokenRateMode = currentMode
-		} else if next.CachedTokenRateMode != currentMode && next.CachedTokenRateMode != cacheTokenRateModeMixed {
-			next.CachedTokenRateMode = cacheTokenRateModeMixed
-		}
-	}
-	next.Total++
-	hit, cachedTokens, promptCacheHitTokens := usageCacheSignals(usage)
-	if hit {
-		next.Hit++
-	}
-	next.WindowSeconds = windowSeconds
-	next.LastSeenAt = time.Now().Unix()
-	next.CachedTokens += cachedTokens
-	next.PromptCacheHitTokens += promptCacheHitTokens
-	next.PromptTokens += int64(usagePromptTokens(usage))
-	next.CompletionTokens += int64(usageCompletionTokens(usage))
-	next.TotalTokens += int64(usageTotalTokens(usage))
-	_ = cache.SetWithTTL(entryKey, next, ttl)
+	record()
 }
 
 func normalizeCachedTokenRateMode(mode string) string {

@@ -4223,11 +4223,39 @@ export function ChannelMutateDrawer({
                                       {t('Synthesize Client Headers')}
                                     </FormLabel>
                                     <Select
+                                      items={[
+                                        {
+                                          value: 'off',
+                                          label: t(
+                                            'Off — send no client profile'
+                                          ),
+                                        },
+                                        {
+                                          value: 'claude',
+                                          label: t('Claude Code CLI'),
+                                        },
+                                        {
+                                          value: 'openai',
+                                          label: t('openai-python SDK'),
+                                        },
+                                        {
+                                          value: 'codex',
+                                          label: t('Codex CLI'),
+                                        },
+                                        {
+                                          value: 'gemini',
+                                          label: t('google-genai SDK'),
+                                        },
+                                        {
+                                          value: 'generic',
+                                          label: t('Generic HTTP client'),
+                                        },
+                                      ]}
                                       onValueChange={field.onChange}
                                       value={field.value ?? 'off'}
                                     >
                                       <FormControl>
-                                        <SelectTrigger>
+                                        <SelectTrigger className='w-full sm:w-72'>
                                           <SelectValue
                                             placeholder={t(
                                               'Select client profile'

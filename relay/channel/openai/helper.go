@@ -142,27 +142,39 @@ func ProcessStreamResponse(streamResponse dto.ChatCompletionsStreamResponse, res
 	return nil
 }
 
-func processTokenData(relayMode int, data string, responseTextBuilder *strings.Builder, toolCount *int) error {
+// processTokenData accumulates the delivered text and tool-call count from a
+// stream chunk the handler already parsed, so the chunk is read once instead of
+// being decoded into a DTO a second time. It mirrors ProcessStreamResponse (the
+// DTO reading still used by xAI) exactly, including the reasoning_content →
+// reasoning fallback and the tool-call counting; helper_test.go pins the two
+// readings together.
+func processTokenData(relayMode int, chunk gjson.Result, responseTextBuilder *strings.Builder, toolCount *int) {
 	switch relayMode {
 	case relayconstant.RelayModeChatCompletions:
-		var streamResponse dto.ChatCompletionsStreamResponse
-		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
-			return err
+		for _, choice := range chunk.Get("choices").Array() {
+			delta := choice.Get("delta")
+			responseTextBuilder.WriteString(delta.Get("content").String())
+			if rc := delta.Get("reasoning_content"); rc.Exists() && rc.Type != gjson.Null {
+				responseTextBuilder.WriteString(rc.String())
+			} else if r := delta.Get("reasoning"); r.Exists() && r.Type != gjson.Null {
+				responseTextBuilder.WriteString(r.String())
+			}
+			if tools := delta.Get("tool_calls"); tools.IsArray() {
+				calls := tools.Array()
+				if len(calls) > *toolCount {
+					*toolCount = len(calls)
+				}
+				for _, tool := range calls {
+					fn := tool.Get("function")
+					responseTextBuilder.WriteString(fn.Get("name").String())
+					responseTextBuilder.WriteString(fn.Get("arguments").String())
+				}
+			}
 		}
-		return ProcessStreamResponse(streamResponse, responseTextBuilder, toolCount)
 	case relayconstant.RelayModeCompletions:
-		var streamResponse dto.CompletionsStreamResponse
-		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
-			return err
+		for _, choice := range chunk.Get("choices").Array() {
+			responseTextBuilder.WriteString(choice.Get("text").String())
 		}
-		processCompletionsStreamResponse(streamResponse, responseTextBuilder)
-	}
-	return nil
-}
-
-func processCompletionsStreamResponse(streamResponse dto.CompletionsStreamResponse, responseTextBuilder *strings.Builder) {
-	for _, choice := range streamResponse.Choices {
-		responseTextBuilder.WriteString(choice.Text)
 	}
 }
 
@@ -177,26 +189,37 @@ func processCompletionsStreamResponse(streamResponse dto.CompletionsStreamRespon
 // full upstream inter-chunk interval, so it is only worth paying on chunks that
 // could actually be suppressed.
 //
-// Suppression requires a chunk carrying usage, so the "usage" substring is a
-// conservative filter: a chunk without it can never be suppressed and goes out
-// at once, which covers every content delta — the entire visible response.
+// Suppression requires a chunk carrying usage, so the absence of a "usage" key
+// is a conservative filter: a chunk without it can never be suppressed and goes
+// out at once, which covers every content delta — the entire visible response.
 // If usage is present, inspect the output too: a chunk carrying text, a tool
 // call, or another output cannot be suppressed and must not delay delivery.
-func canForwardChunkImmediately(info *relaycommon.RelayInfo, data string) bool {
+func canForwardChunkImmediately(info *relaycommon.RelayInfo, chunk gjson.Result) bool {
 	if info.RelayFormat != types.RelayFormatOpenAI {
 		// Claude and Gemini rebuild the tail chunk in HandleFinalResponse using
-		// the settled usage, so for them the last chunk must stay buffered.
-		return false
+		// the settled usage, so a chunk that can close the message — one that
+		// carries a finish reason or usage — must stay buffered. A plain delta
+		// can never be that tail and goes out at once; holding it cost every
+		// visible token a full upstream inter-chunk interval.
+		if chunk.Get("usage").IsObject() {
+			return false
+		}
+		for _, choice := range chunk.Get("choices").Array() {
+			if choice.Get("finish_reason").String() != "" {
+				return false
+			}
+		}
+		return true
 	}
 	if info.ShouldIncludeUsage {
 		// The caller asked for usage, so nothing is ever suppressed.
 		return true
 	}
-	if !strings.Contains(data, `"usage"`) {
+	if !chunk.Get("usage").Exists() {
 		return true
 	}
 	var output chatOutputState
-	output.observe(gjson.Parse(data))
+	output.observe(chunk)
 	return output.hasOutput
 }
 
