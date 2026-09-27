@@ -489,3 +489,135 @@ func TestRecordChannelAffinityKeepsAnExistingPinWhenSwitchOnSuccessIsOff(t *test
 	assert.Equal(t, pinnedChannel, affinityPinnedChannelForTest(t, model, userID),
 		"with SwitchOnSuccess off an established pin must not follow the fallback channel")
 }
+
+// newChatRequestForTest builds a relay request context the way the distributor
+// sees it: TokenAuth has already stamped the caller's token id.
+func newChatRequestForTest(t *testing.T, path string, body string, tokenID int) *gin.Context {
+	t.Helper()
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+	if tokenID > 0 {
+		ctx.Set("token_id", tokenID)
+	}
+	return ctx
+}
+
+// TestDefaultChannelAffinityRulesKeyEveryChatRequest runs the shipped default
+// rules. Production stopped matching any rule once its client quit sending
+// metadata.user_id, and /v1/chat/completions had no rule at all, so every request
+// went back through cold selection and affinity never held.
+func TestDefaultChannelAffinityRulesKeyEveryChatRequest(t *testing.T) {
+	defaults := operation_setting.GetChannelAffinitySetting().Rules
+
+	cases := []struct {
+		name          string
+		path          string
+		body          string
+		tokenID       int
+		model         string
+		wantRule      string
+		wantKeySource string
+	}{
+		{
+			name:          "claude code session keeps its session key",
+			path:          "/v1/messages",
+			body:          `{"model":"claude-opus-5","metadata":{"user_id":"session-a"}}`,
+			tokenID:       7,
+			model:         "claude-opus-5",
+			wantRule:      "claude cli trace",
+			wantKeySource: "gjson",
+		},
+		{
+			name:          "messages without metadata falls back to the token",
+			path:          "/v1/messages",
+			body:          `{"model":"claude-opus-5"}`,
+			tokenID:       7,
+			model:         "claude-opus-5",
+			wantRule:      "token fallback",
+			wantKeySource: "context_int",
+		},
+		{
+			name:          "chat completions falls back to the token",
+			path:          "/v1/chat/completions",
+			body:          `{"model":"claude-opus-5"}`,
+			tokenID:       7,
+			model:         "claude-opus-5",
+			wantRule:      "token fallback",
+			wantKeySource: "context_int",
+		},
+		{
+			name:          "model outside the claude rule falls back to the token",
+			path:          "/v1/messages",
+			body:          `{"model":"gemini-3.7-flash","metadata":{"user_id":"session-a"}}`,
+			tokenID:       7,
+			model:         "gemini-3.7-flash",
+			wantRule:      "token fallback",
+			wantKeySource: "context_int",
+		},
+		{
+			name:    "no session key and no token matches nothing",
+			path:    "/v1/chat/completions",
+			body:    `{"model":"claude-opus-5"}`,
+			tokenID: 0,
+			model:   "claude-opus-5",
+		},
+		{
+			name:    "endpoints outside chat are left alone",
+			path:    "/v1/embeddings",
+			body:    `{"model":"text-embedding-3-small"}`,
+			tokenID: 7,
+			model:   "text-embedding-3-small",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			useChannelAffinityRulesForTest(t, true, defaults...)
+
+			ctx := newChatRequestForTest(t, tc.path, tc.body, tc.tokenID)
+			_, found := GetPreferredChannelByAffinity(ctx, tc.model, "default")
+			require.False(t, found, "cache is cold, no rule can report a hit")
+
+			meta, matched := getChannelAffinityMeta(ctx)
+			require.Equal(t, tc.wantRule != "", matched)
+			assert.Equal(t, tc.wantRule, meta.RuleName)
+			assert.Equal(t, tc.wantKeySource, meta.KeySourceType)
+		})
+	}
+}
+
+// TestTokenFallbackAffinityPinsPerModelAndRetries checks the two properties the
+// token key needs to be safe. One token calls many models, so each model must
+// keep its own pin; and a failure on the pinned channel must still be retried on
+// another one instead of going straight back to the client.
+func TestTokenFallbackAffinityPinsPerModelAndRetries(t *testing.T) {
+	const (
+		tokenID       = 11
+		pinnedChannel = 61
+	)
+	useChannelAffinityRulesForTest(t, true, operation_setting.GetChannelAffinitySetting().Rules...)
+
+	seed := newChatRequestForTest(t, "/v1/chat/completions", `{"model":"claude-opus-5"}`, tokenID)
+	_, found := GetPreferredChannelByAffinity(seed, "claude-opus-5", "default")
+	require.False(t, found, "precondition: the key is cold")
+	SetChannelAffinityRelayOutcome(seed, true)
+	RecordChannelAffinity(seed, pinnedChannel)
+
+	same := newChatRequestForTest(t, "/v1/chat/completions", `{"model":"claude-opus-5"}`, tokenID)
+	preferred, found := GetPreferredChannelByAffinity(same, "claude-opus-5", "default")
+	require.True(t, found, "the same token and model must hit the pin")
+	assert.Equal(t, pinnedChannel, preferred)
+	MarkChannelAffinityUsed(same, "default", preferred)
+	assert.False(t, ShouldSkipRetryAfterChannelAffinityFailure(same),
+		"a failure on the pinned channel must still fail over")
+
+	otherModel := newChatRequestForTest(t, "/v1/chat/completions", `{"model":"claude-haiku-4-5"}`, tokenID)
+	_, found = GetPreferredChannelByAffinity(otherModel, "claude-haiku-4-5", "default")
+	assert.False(t, found, "another model of the same token must not inherit the pin")
+
+	otherToken := newChatRequestForTest(t, "/v1/chat/completions", `{"model":"claude-opus-5"}`, tokenID+1)
+	_, found = GetPreferredChannelByAffinity(otherToken, "claude-opus-5", "default")
+	assert.False(t, found, "another token must not inherit the pin")
+}

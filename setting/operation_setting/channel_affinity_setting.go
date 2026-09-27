@@ -145,10 +145,33 @@ var channelAffinitySetting = ChannelAffinitySetting{
 			ValueRegex:            "",
 			TTLSeconds:            0,
 			ParamOverrideTemplate: buildPassHeaderTemplate(claudeCliPassThroughHeaders),
-			SkipRetryOnFailure:    true,
-			IncludeUsingGroup:     true,
-			IncludeRuleName:       true,
-			UserAgentInclude:      nil,
+			// Messages requests carry no server-side conversation state, so a pinned
+			// channel that fails can hand the request to another one. Refusing to
+			// retry sent every such failure straight back to the client.
+			SkipRetryOnFailure: false,
+			IncludeUsingGroup:  true,
+			IncludeRuleName:    true,
+			UserAgentInclude:   nil,
+		},
+		{
+			// Catches the chat traffic the client-specific rules above cannot key:
+			// clients that send no session id, and every model outside their
+			// model_regex. The API token is the one stable per-caller identity such a
+			// request carries. The model is part of the key so a token calling several
+			// models keeps a separate pin for each.
+			Name:       "token fallback",
+			ModelRegex: []string{".*"},
+			PathRegex:  []string{"/v1/chat/completions", "/v1/messages", "/v1/responses"},
+			KeySources: []ChannelAffinityKeySource{
+				{Type: "context_int", Key: "token_id"},
+			},
+			ValueRegex:         "",
+			TTLSeconds:         0,
+			SkipRetryOnFailure: false,
+			IncludeUsingGroup:  true,
+			IncludeModelName:   true,
+			IncludeRuleName:    true,
+			UserAgentInclude:   nil,
 		},
 	},
 }

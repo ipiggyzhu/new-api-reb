@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/pkg/channel_score"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -141,17 +142,85 @@ func TestValidateChannelAffinityPinIgnoresDynamicScores(t *testing.T) {
 		group     = "default"
 		modelName = "gpt-test"
 	)
+	enableScoringForTest(t)
 	useChannelCacheForTest(t, []*Channel{
 		channelWithPriority(1, 10),
 		channelWithPriority(2, 10),
 	}, group, modelName)
 
-	// Verdicts are computed from configured priority only, so repeated calls are
-	// stable no matter what the scores are doing.
+	// Five straight successes promote channel 2 one tier above the pinned channel.
 	for i := 0; i < 5; i++ {
-		require.Equal(t, ChannelAffinityPinValid,
-			ValidateChannelAffinityPin(1, group, modelName, ""),
-			"the verdict must not depend on dynamic score state")
+		channel_score.Report(2, group, modelName, channel_score.OutcomeSuccess)
+	}
+	scored := applyDynamicScores(group, modelName, []channelCandidate{
+		{channelId: 1, priority: 10},
+		{channelId: 2, priority: 10},
+	})
+	require.Greater(t, scored[1].priority, scored[0].priority, "precondition: channel 2 now ranks above the pin")
+
+	assert.Equal(t, ChannelAffinityPinValid,
+		ValidateChannelAffinityPin(1, group, modelName, ""),
+		"a promotion alone must not break the pin")
+}
+
+// TestValidateChannelAffinityPinKeepsPinBelowADemotedChannel is the reported
+// "affinity and dynamic priority fight" case. A top-priority channel that scoring
+// had demoted for failing used to outrank every pin below it, so the pin on the
+// channel actually answering was dropped on every request and selection kept
+// walking back into the failing channel.
+func TestValidateChannelAffinityPinKeepsPinBelowADemotedChannel(t *testing.T) {
+	const (
+		group     = "default"
+		modelName = "gpt-test"
+		higher    = 30
+		pinned    = 21
+	)
+
+	cases := []struct {
+		name     string
+		channels []*Channel
+		faults   int
+		want     ChannelAffinityPinVerdict
+		explain  string
+	}{
+		{
+			name:     "healthy higher channel outranks the pin",
+			channels: []*Channel{channelWithPriority(higher, 10), channelWithPriority(pinned, 7), channelWithPriority(5, 0)},
+			want:     ChannelAffinityPinOutranked,
+			explain:  "the admin ranked it higher and nothing has demoted it",
+		},
+		{
+			name:     "higher channel demoted into the pin's tier",
+			channels: []*Channel{channelWithPriority(higher, 10), channelWithPriority(pinned, 7), channelWithPriority(5, 0)},
+			faults:   1,
+			want:     ChannelAffinityPinValid,
+			explain:  "selection no longer prefers it, so dropping the pin buys nothing",
+		},
+		{
+			name:     "higher channel demoted below the pin",
+			channels: []*Channel{channelWithPriority(higher, 10), channelWithPriority(pinned, 7), channelWithPriority(5, 0)},
+			faults:   2,
+			want:     ChannelAffinityPinValid,
+			explain:  "a channel ranked below the pin cannot displace it",
+		},
+		{
+			name:     "demotion that stops short of the pin's tier",
+			channels: []*Channel{channelWithPriority(higher, 50), channelWithPriority(40, 30), channelWithPriority(pinned, 10)},
+			faults:   1,
+			want:     ChannelAffinityPinOutranked,
+			explain:  "still above the pin after scoring, so the admin ranking stands",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			enableScoringForTest(t)
+			useChannelCacheForTest(t, tc.channels, group, modelName)
+			for i := 0; i < tc.faults; i++ {
+				channel_score.Report(higher, group, modelName, channel_score.OutcomeFault)
+			}
+			assert.Equal(t, tc.want, ValidateChannelAffinityPin(pinned, group, modelName, ""), tc.explain)
+		})
 	}
 }
 

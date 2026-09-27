@@ -32,13 +32,19 @@ const (
 // a higher-priority channel that cannot serve this path never invalidates a pin
 // that can.
 //
-// Priority is compared using the ADMIN-CONFIGURED value only; dynamic scores are
-// deliberately not consulted. The pin exists to keep a conversation on one
-// upstream so its prompt cache stays warm, and dynamic offsets move on ordinary
-// traffic — letting them break the pin would churn it constantly and cost far
-// more in lost cache hits than the reordering could win. An admin editing
+// A channel outranks the pin only when the admin configured it strictly higher
+// AND it is still strictly higher after dynamic scoring. Scores alone never
+// break a pin: the pin exists to keep a conversation on one upstream so its
+// prompt cache stays warm, and dynamic offsets move on ordinary traffic —
+// letting them outrank would churn the pin constantly. An admin editing
 // priority is a different matter: that is an explicit instruction, and it takes
 // effect on the next request instead of waiting out the affinity TTL.
+//
+// Scores can, however, keep a pin. Comparing configured priority alone let a
+// top-priority channel that scoring had demoted for failing retire every pin
+// below it on every request, so each request went back through selection, and
+// every time the demotion decayed it landed on the failing channel again.
+// Affinity never held anywhere except on the channel that was broken.
 func ValidateChannelAffinityPin(channelId int, group string, modelName string, requestPath string) ChannelAffinityPinVerdict {
 	if channelId <= 0 {
 		return ChannelAffinityPinUnusable
@@ -51,13 +57,21 @@ func ValidateChannelAffinityPin(channelId int, group string, modelName string, r
 		// the distributor's own usability check still catches it.
 		return ChannelAffinityPinValid
 	}
+	// applyDynamicScores keeps order and length, so index i names the same channel
+	// in both slices.
+	scored := applyDynamicScores(group, modelName, candidates)
 
-	pinnedPriority, found := int64(0), false
-	highestPriority, haveHighest := int64(0), false
-	for _, candidate := range candidates {
+	pinnedIndex := -1
+	for i, candidate := range candidates {
 		if candidate.channelId == channelId {
-			pinnedPriority, found = candidate.priority, true
+			pinnedIndex = i
+			break
 		}
+	}
+	if pinnedIndex < 0 {
+		return ChannelAffinityPinUnusable
+	}
+	for i, candidate := range candidates {
 		// A saturated channel cannot take this request, so it is in no position to
 		// displace the pin. Counting it anyway produced pure churn: the pin was
 		// dropped for a channel selection would then skip, selection fell back to the
@@ -68,15 +82,9 @@ func ValidateChannelAffinityPin(channelId int, group string, modelName string, r
 		if candidate.isSaturated() {
 			continue
 		}
-		if !haveHighest || candidate.priority > highestPriority {
-			highestPriority, haveHighest = candidate.priority, true
+		if candidate.priority > candidates[pinnedIndex].priority && scored[i].priority > scored[pinnedIndex].priority {
+			return ChannelAffinityPinOutranked
 		}
-	}
-	if !found {
-		return ChannelAffinityPinUnusable
-	}
-	if haveHighest && pinnedPriority < highestPriority {
-		return ChannelAffinityPinOutranked
 	}
 	return ChannelAffinityPinValid
 }

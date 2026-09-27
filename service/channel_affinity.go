@@ -661,9 +661,10 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 			// until the TTL expired (an hour by default), which read as "raising a
 			// channel's priority does nothing".
 			//
-			// Only the admin-configured priority is compared. Dynamic scores are
-			// excluded on purpose: they move with ordinary traffic, and letting them
-			// break the pin would defeat what the pin is for.
+			// Only a channel the admin configured higher can outrank the pin, and
+			// only while dynamic scoring has not demoted it to or below the pin's
+			// tier. Scores never break the pin on their own: they move with ordinary
+			// traffic, and letting them would defeat what the pin is for.
 			switch model.ValidateChannelAffinityPin(channelID, usingGroup, modelName, path) {
 			case model.ChannelAffinityPinUnusable:
 				info["cache"] = "stale_unusable"
