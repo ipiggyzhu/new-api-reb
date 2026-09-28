@@ -186,6 +186,7 @@ import {
   ChannelApiAccessSection,
   ChannelAuthSection,
   ChannelBasicSection,
+  ChannelClientIdentityFields,
   ChannelEditorLoadingState,
   ChannelModelsSection,
 } from './sections'
@@ -287,6 +288,11 @@ const SENSITIVE_FORM_FIELDS = [
   'websocket_transport',
   'synthetic_client_headers',
   'synthetic_client_headers_profile',
+  'tls_fingerprint_enabled',
+  'tls_fingerprint',
+  'custom_client_identity_enabled',
+  'client_device_seed',
+  'client_session_seed',
   'system_prompt',
   'system_prompt_override',
   'allow_service_tier',
@@ -343,6 +349,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.pass_through_body_enabled ||
     values.websocket_transport ||
     (values.synthetic_client_headers_profile ?? 'off') !== 'off' ||
+    values.custom_client_identity_enabled ||
     values.system_prompt_override ||
     values.claude_beta_query ||
     values.upstream_model_update_check_enabled ||
@@ -750,6 +757,9 @@ export function ChannelMutateDrawer({
   const currentSyntheticClientHeadersProfile = form.watch(
     'synthetic_client_headers_profile'
   )
+  const currentCustomClientIdentityEnabled = form.watch(
+    'custom_client_identity_enabled'
+  )
   const currentDisableTaskPollingSleep = form.watch(
     'disable_task_polling_sleep'
   )
@@ -1019,6 +1029,7 @@ export function ChannelMutateDrawer({
     currentThinkingToContent ||
     currentPassThroughBodyEnabled ||
     (currentSyntheticClientHeadersProfile ?? 'off') !== 'off' ||
+    currentCustomClientIdentityEnabled ||
     currentDisableTaskPollingSleep ||
     currentProxy?.trim() ||
     currentSystemPrompt?.trim() ||
@@ -4214,13 +4225,15 @@ export function ChannelMutateDrawer({
                                 )}
                               />
 
+                              <ChannelClientIdentityFields />
+
                               <FormField
                                 control={form.control}
                                 name='synthetic_client_headers_profile'
                                 render={({ field }) => (
                                   <FormItem className='px-4 py-3'>
                                     <FormLabel>
-                                      {t('Synthesize Client Headers')}
+                                      {t('Synthesize Client Headers and Body')}
                                     </FormLabel>
                                     <Select
                                       items={[
@@ -4290,9 +4303,23 @@ export function ChannelMutateDrawer({
                                     </Select>
                                     <FormDescription>
                                       {t(
-                                        'Choose the client accepted by the upstream. The gateway generates its User-Agent and other client headers. Client versions can be updated in the header presets in system settings.'
+                                        'Claude Code (Messages) and Codex (Responses) also align body structure, cache markers and behavior headers. Device/session IDs are isolated; explicit parameters are preserved. Other protocols stay unchanged. Off keeps new-api defaults. Client versions remain configurable in system settings.'
                                       )}
                                     </FormDescription>
+                                    {(field.value === 'claude' ||
+                                      field.value === 'codex') && (
+                                      <p className='text-warning mt-2 text-xs'>
+                                        {t(
+                                          'Body alignment requires the upstream {{endpoint}} protocol. Selecting a client profile does not switch endpoints: requests using other protocols only receive the selected headers. Configure a protocol converter separately if needed.',
+                                          {
+                                            endpoint:
+                                              field.value === 'claude'
+                                                ? 'Messages (/v1/messages)'
+                                                : 'Responses (/v1/responses)',
+                                          }
+                                        )}
+                                      </p>
+                                    )}
                                   </FormItem>
                                 )}
                               />

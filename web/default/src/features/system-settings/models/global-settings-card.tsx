@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
@@ -229,7 +229,6 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
   const [runningUpdate, setRunningUpdate] = useState(false)
   const [runningSweep, setRunningSweep] = useState(false)
   const [headerPresets, setHeaderPresets] = useState<ClientHeaderPreset[]>([])
-  const [selectedPreset, setSelectedPreset] = useState('')
   const [builtinPrompts, setBuiltinPrompts] = useState<string[]>([])
 
   // The built-in test prompt pool comes from the backend, so the "fill built-in
@@ -290,7 +289,6 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
   // Merging rather than replacing: an admin who set up openai headers should
   // not lose them by picking a claude preset.
   const applyHeaderPreset = (presetId: string | null) => {
-    setSelectedPreset(presetId ?? '')
     const preset = headerPresets.find((item) => item.id === presetId)
     if (!preset) return
 
@@ -343,6 +341,35 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
   const autoUpdateEnabled = form.watch(
     'monitor_setting.upstream_model_update_enabled'
   )
+
+  // The dropdown has to reflect what is actually configured. It used to be local
+  // state seeded to '' and never derived from the saved JSON, so a stored
+  // override showed a blank control that reads as "no preset" — and re-picking
+  // the same entry produced identical JSON, which onSubmit then reported as "no
+  // changes to save". Derive the active preset from the current JSON instead, by
+  // matching each family's headers against the known presets.
+  const currentClientHeaders = form.watch(
+    'monitor_setting.channel_test_client_headers'
+  )
+  const activePreset = useMemo(() => {
+    if (!currentClientHeaders || !currentClientHeaders.trim()) return ''
+    let parsed: Record<string, Record<string, string>>
+    try {
+      const obj = JSON.parse(currentClientHeaders)
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return ''
+      parsed = obj as Record<string, Record<string, string>>
+    } catch {
+      return ''
+    }
+    const match = headerPresets.find((preset) => {
+      const familyHeaders = parsed[preset.family]
+      if (!familyHeaders || typeof familyHeaders !== 'object') return false
+      const presetKeys = Object.keys(preset.headers)
+      if (presetKeys.length !== Object.keys(familyHeaders).length) return false
+      return presetKeys.every((key) => familyHeaders[key] === preset.headers[key])
+    })
+    return match?.id ?? ''
+  }, [currentClientHeaders, headerPresets])
   // The upstream-rejection rule only widens what counts as a model failure; with
   // removal itself off it would have nothing to act on, so the switch follows it.
   const removeFailedEnabled = form.watch(
@@ -1038,7 +1065,7 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
                   <div className='mb-2 flex flex-wrap items-center gap-2'>
                     <Select
                       items={presetSelectItems}
-                      value={selectedPreset}
+                      value={activePreset}
                       onValueChange={applyHeaderPreset}
                     >
                       <SelectTrigger className='w-[420px] max-w-full min-w-0'>
@@ -1101,7 +1128,6 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
                           '{}',
                           { shouldDirty: true }
                         )
-                        setSelectedPreset('')
                       }}
                     >
                       {t('Reset to built-in')}

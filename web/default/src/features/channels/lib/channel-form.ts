@@ -286,6 +286,14 @@ export const channelFormSchema = z
     synthetic_client_headers_profile: z
       .enum(SYNTHETIC_CLIENT_HEADER_PROFILES)
       .optional(),
+    // Off: the TLS fingerprint follows the header profile. On: tls_fingerprint
+    // replaces only the TLS layer. buildSettingJSON writes '' when off.
+    tls_fingerprint_enabled: z.boolean().optional(),
+    tls_fingerprint: z.string().optional(),
+    // UI-only master switch. Off clears all three overrides on save.
+    custom_client_identity_enabled: z.boolean().optional(),
+    client_device_seed: z.string().optional(),
+    client_session_seed: z.string().optional(),
     system_prompt: z.string().optional(),
     system_prompt_override: z.boolean().optional(),
     // Type-specific settings (stored in settings JSON)
@@ -430,6 +438,11 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   websocket_transport: false,
   synthetic_client_headers: false,
   synthetic_client_headers_profile: 'off',
+  tls_fingerprint_enabled: false,
+  tls_fingerprint: '',
+  custom_client_identity_enabled: false,
+  client_device_seed: '',
+  client_session_seed: '',
   system_prompt: '',
   system_prompt_override: false,
   // Type-specific settings
@@ -471,6 +484,11 @@ export function transformChannelToFormDefaults(
     websocket_transport: false,
     synthetic_client_headers: false,
     synthetic_client_headers_profile: 'off' as SyntheticClientHeaderProfile,
+    tls_fingerprint_enabled: false,
+    tls_fingerprint: '',
+    custom_client_identity_enabled: false,
+    client_device_seed: '',
+    client_session_seed: '',
     system_prompt: '',
     system_prompt_override: false,
   }
@@ -478,6 +496,18 @@ export function transformChannelToFormDefaults(
   if (channel.setting) {
     try {
       const parsed = JSON.parse(channel.setting)
+      const tlsFingerprint =
+        typeof parsed.tls_fingerprint === 'string'
+          ? parsed.tls_fingerprint.trim()
+          : ''
+      const deviceSeed =
+        typeof parsed.client_device_seed === 'string'
+          ? parsed.client_device_seed.trim()
+          : ''
+      const sessionSeed =
+        typeof parsed.client_session_seed === 'string'
+          ? parsed.client_session_seed.trim()
+          : ''
       extraSettings = {
         force_format: parsed.force_format || false,
         thinking_to_content: parsed.thinking_to_content || false,
@@ -489,6 +519,12 @@ export function transformChannelToFormDefaults(
           parsed,
           channel.type
         ),
+        tls_fingerprint_enabled: tlsFingerprint !== '',
+        tls_fingerprint: tlsFingerprint,
+        custom_client_identity_enabled:
+          tlsFingerprint !== '' || deviceSeed !== '' || sessionSeed !== '',
+        client_device_seed: deviceSeed,
+        client_session_seed: sessionSeed,
         system_prompt: parsed.system_prompt || '',
         system_prompt_override: parsed.system_prompt_override || false,
       }
@@ -603,6 +639,7 @@ export function transformChannelToFormDefaults(
  */
 function buildSettingJSON(formData: ChannelFormValues): string {
   const syntheticProfile = formData.synthetic_client_headers_profile ?? 'off'
+  const customIdentity = formData.custom_client_identity_enabled !== false
   const settingObj = {
     force_format: formData.force_format || false,
     thinking_to_content: formData.thinking_to_content || false,
@@ -617,6 +654,18 @@ function buildSettingJSON(formData: ChannelFormValues): string {
     synthetic_client_headers: syntheticProfile !== 'off',
     synthetic_client_headers_profile:
       syntheticProfile === 'off' ? '' : syntheticProfile,
+    // This object replaces the whole setting JSON, so the fingerprint must be
+    // written here or saving the drawer would silently drop it.
+    tls_fingerprint:
+      customIdentity && formData.tls_fingerprint_enabled
+        ? (formData.tls_fingerprint ?? '').trim()
+        : '',
+    client_device_seed: customIdentity
+      ? (formData.client_device_seed ?? '').trim()
+      : '',
+    client_session_seed: customIdentity
+      ? (formData.client_session_seed ?? '').trim()
+      : '',
     system_prompt: formData.system_prompt || '',
     system_prompt_override: formData.system_prompt_override || false,
   }

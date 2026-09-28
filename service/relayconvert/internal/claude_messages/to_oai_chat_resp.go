@@ -35,6 +35,13 @@ type ClaudeResponseInfo struct {
 	// message ending in message_stop alone was still not cut short, and callers
 	// deciding whether a reply was truncated must not blame the channel for it.
 	SawTerminator bool
+	// SawMessageStop records that the stream's final frame — message_stop —
+	// arrived, which SawTerminator cannot tell apart from a message_delta that
+	// precedes it. The stream handler reads it to stop the moment the message is
+	// complete instead of reading on until the upstream closes the body: some
+	// upstreams hold the connection open for tens of seconds after message_stop,
+	// and without this the caller waits out that whole tail.
+	SawMessageStop bool
 	// StopReason is the stop_reason the upstream put on its terminator, in
 	// Anthropic's vocabulary: end_turn, max_tokens, tool_use, stop_sequence or
 	// refusal.
@@ -374,6 +381,9 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 	// cannot be set from a branch of its own.
 	if claudeResponse.Type == "message_delta" || claudeResponse.Type == "message_stop" {
 		claudeInfo.SawTerminator = true
+		if claudeResponse.Type == "message_stop" {
+			claudeInfo.SawMessageStop = true
+		}
 		// Read here rather than from a branch below, for the same reason as the
 		// flag: message_stop has no branch there. Delta first, because that is
 		// where a streaming terminator carries the field; the top-level one is the

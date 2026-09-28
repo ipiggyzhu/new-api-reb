@@ -57,6 +57,8 @@ export const channelsQueryKeys = {
   inFlight: () => [...channelsQueryKeys.all, 'in-flight'] as const,
   dynamicScoreSummary: () =>
     [...channelsQueryKeys.all, 'dynamic-score-summary'] as const,
+  tlsFingerprints: () =>
+    [...channelsQueryKeys.all, 'tls-fingerprints'] as const,
 }
 
 /**

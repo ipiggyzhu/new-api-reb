@@ -183,6 +183,53 @@ func TestClaudeStreamHandler_TruncatedToolCall(t *testing.T) {
 	assert.False(t, info.StreamStatus.IsNormalEnd())
 }
 
+// An upstream that finishes the message with message_stop but then holds the
+// connection open must not make the caller wait. The handler stops as soon as
+// message_stop has been forwarded, instead of blocking on the read until the
+// upstream finally closes the body. anyrouter and similar gateways keep the
+// socket alive for ~30s after the final frame, which stalled every reply by
+// that long; before the fix this test blocks until the streaming timeout.
+//
+// Driven through a pipe left open on purpose: the whole message is written and
+// the writer never closes, so the only thing that can end the stream promptly
+// is the handler recognising message_stop as the terminator.
+func TestClaudeStreamHandler_StopsOnMessageStopWithoutWaitingForEOF(t *testing.T) {
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+
+	c, resp, info := newClaudeStreamTest(t, "")
+	resp.Body = pr
+
+	go func() {
+		_, _ = io.WriteString(pw, claudeMessageStart)
+		_, _ = io.WriteString(pw, claudeTextDelta)
+		_, _ = io.WriteString(pw, claudeMessageDelta)
+		_, _ = io.WriteString(pw, claudeMessageStop)
+		// Deliberately left open: the upstream sent the whole message but keeps the
+		// connection alive.
+	}()
+
+	done := make(chan *types.NewAPIError, 1)
+	go func() {
+		_, apiErr := ClaudeStreamHandler(c, resp, info)
+		done <- apiErr
+	}()
+
+	select {
+	case apiErr := <-done:
+		require.Nil(t, apiErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("handler blocked after message_stop instead of ending the stream")
+	}
+
+	assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason,
+		"the stream ended because the message completed, not because the transport closed")
+	assert.False(t, info.StreamStatus.MissingTerminator(),
+		"message_stop closes the message off; the reply was not cut short")
+	assert.True(t, info.StreamStatus.IsNormalEnd())
+	assert.Nil(t, info.StreamStatus.FailureError())
+}
+
 // The caller hanging up produces the same wire shape as an upstream truncation:
 // content delivered, no message_delta. The channel must not be demoted for it.
 //

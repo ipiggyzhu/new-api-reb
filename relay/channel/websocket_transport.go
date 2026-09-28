@@ -522,6 +522,14 @@ type WebsocketAttempt struct {
 // Callers gate on ShouldTryResponsesWebsocket first, then fall back to
 // DoApiRequest with attempt.FallbackBody whenever Response is nil.
 func TryResponsesWebsocket(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*WebsocketAttempt, error) {
+	httpURL, err := a.GetRequestURL(info)
+	if err != nil {
+		return nil, fmt.Errorf("get request url failed: %w", err)
+	}
+	httpURL, requestBody, cliHeaders, err := prepareCLIRequest(c, info, httpURL, requestBody)
+	if err != nil {
+		return nil, err
+	}
 	// Buffered up front because io.Reader is single-read: a failed handshake has to
 	// replay these exact bytes over HTTP, and by then the caller's reader is drained.
 	// Cheap here — responses_handler already held this payload in memory to build it.
@@ -533,10 +541,6 @@ func TryResponsesWebsocket(a Adaptor, c *gin.Context, info *common.RelayInfo, re
 		return &WebsocketAttempt{FallbackBody: bytes.NewReader(body)}
 	}
 
-	httpURL, err := a.GetRequestURL(info)
-	if err != nil {
-		return nil, fmt.Errorf("get request url failed: %w", err)
-	}
 	wsURL, err := buildResponsesWebsocketURL(httpURL)
 	if err != nil {
 		// A base URL this transport cannot express is a configuration shape the HTTP
@@ -548,6 +552,9 @@ func TryResponsesWebsocket(a Adaptor, c *gin.Context, info *common.RelayInfo, re
 	header := make(http.Header)
 	if err := a.SetupRequestHeader(c, &header, info); err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)
+	}
+	for name, values := range cliHeaders {
+		header[name] = values
 	}
 	// Same precedence as DoApiRequest: overrides win over adaptor defaults, so an
 	// admin's Authorization or Host reaches the handshake too.

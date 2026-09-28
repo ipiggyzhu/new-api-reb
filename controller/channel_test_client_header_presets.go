@@ -3,6 +3,7 @@ package controller
 import (
 	"net/http"
 
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/gin-gonic/gin"
@@ -46,7 +47,24 @@ func claudeCodePreset(version string) map[string]string {
 		"user-agent":        "claude-cli/" + version + " (external, cli)",
 		"x-app":             "cli",
 		"anthropic-version": "2023-06-01",
-		"accept-language":   "*",
+		// The CLI rides the Anthropic TypeScript SDK, which sends these x-stainless-*
+		// telemetry headers plus the direct-browser-access flag; carrying them is what
+		// "looks like the real Claude Code" means to an upstream that inspects more
+		// than the user-agent. Identity only — anthropic-beta is intentionally absent
+		// because it changes API behaviour and must be an explicit, deliberate add.
+		// The SDK/runtime versions below are pinned to a 2.1.282 capture and, like
+		// every version here, are a starting point to edit, not a guarantee. The
+		// runtime is the Node behind the claude-code TLS fingerprint.
+		"anthropic-dangerous-direct-browser-access": "true",
+		"x-stainless-lang":                          "js",
+		"x-stainless-package-version":               "0.112.1",
+		"x-stainless-os":                            "Linux",
+		"x-stainless-arch":                          "x64",
+		"x-stainless-runtime":                       "node",
+		"x-stainless-runtime-version":               "v24.19.0",
+		"x-stainless-retry-count":                   "0",
+		"x-stainless-timeout":                       "600",
+		"accept-language":                           "*",
 	}
 }
 
@@ -64,8 +82,9 @@ func openAIPythonPreset(version string) map[string]string {
 }
 
 func codexPreset(version string) map[string]string {
+	// Windows, to agree with the codex-cli TLS fingerprint (SChannel, Windows-only).
 	return map[string]string{
-		"user-agent":      "codex_cli_rs/" + version + " (Linux 6.8.0; x86_64) terminal",
+		"user-agent":      "codex_cli_rs/" + version + " (Windows 10.0.26100; x86_64) WindowsTerminal",
 		"originator":      "codex_cli_rs",
 		"accept-language": "*",
 	}
@@ -84,7 +103,8 @@ func googleGenAIPreset(version string) map[string]string {
 // is the order the dropdown renders.
 var builtinClientHeaderPresets = []clientHeaderPreset{
 	// Claude Code CLI — npm @anthropic-ai/claude-code, versions as published.
-	{ID: "claude-code-2.1.278", Label: "Claude Code CLI 2.1.278 (latest)", Family: "claude", Endpoint: "anthropic", Headers: claudeCodePreset("2.1.278")},
+	{ID: "claude-code-2.1.282", Label: "Claude Code CLI 2.1.282 (latest)", Family: "claude", Endpoint: "anthropic", Headers: claudeCodePreset("2.1.282")},
+	{ID: "claude-code-2.1.278", Label: "Claude Code CLI 2.1.278", Family: "claude", Endpoint: "anthropic", Headers: claudeCodePreset("2.1.278")},
 	{ID: "claude-code-2.1.220", Label: "Claude Code CLI 2.1.220", Family: "claude", Endpoint: "anthropic", Headers: claudeCodePreset("2.1.220")},
 	{ID: "claude-code-2.1.216", Label: "Claude Code CLI 2.1.216", Family: "claude", Endpoint: "anthropic", Headers: claudeCodePreset("2.1.216")},
 	{ID: "claude-code-2.1.210", Label: "Claude Code CLI 2.1.210", Family: "claude", Endpoint: "anthropic", Headers: claudeCodePreset("2.1.210")},
@@ -100,7 +120,8 @@ var builtinClientHeaderPresets = []clientHeaderPreset{
 	{ID: "openai-python-1.99.1", Label: "openai-python 1.99.1 (older)", Family: "openai", Endpoint: "openai", Headers: openAIPythonPreset("1.99.1")},
 
 	// Codex CLI — npm @openai/codex. Talks to /v1/responses, not chat completions.
-	{ID: "codex-cli-0.155.1", Label: "Codex CLI 0.155.1 (latest) — /v1/responses", Family: "codex", Endpoint: "openai-response", Headers: codexPreset("0.155.1")},
+	{ID: "codex-cli-0.156.1", Label: "Codex CLI 0.156.1 (latest) — /v1/responses", Family: "codex", Endpoint: "openai-response", Headers: codexPreset("0.156.1")},
+	{ID: "codex-cli-0.155.1", Label: "Codex CLI 0.155.1 — /v1/responses", Family: "codex", Endpoint: "openai-response", Headers: codexPreset("0.155.1")},
 	{ID: "codex-cli-0.146.0", Label: "Codex CLI 0.146.0 — /v1/responses", Family: "codex", Endpoint: "openai-response", Headers: codexPreset("0.146.0")},
 	{ID: "codex-cli-0.145.0", Label: "Codex CLI 0.145.0 — /v1/responses", Family: "codex", Endpoint: "openai-response", Headers: codexPreset("0.145.0")},
 	{ID: "codex-cli-0.144.1", Label: "Codex CLI 0.144.1 — /v1/responses", Family: "codex", Endpoint: "openai-response", Headers: codexPreset("0.144.1")},
@@ -129,6 +150,17 @@ func ListChannelTestClientHeaderPresets(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data":    GetChannelTestClientHeaderPresets(),
+	})
+}
+
+// ListChannelTLSFingerprints serves the selectable TLS fingerprints, including
+// which header profile each one is the default for, so the channel drawer shows
+// the fingerprint a channel will actually use from the backend's own list.
+func ListChannelTLSFingerprints(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    service.SupportedTLSFingerprints(),
 	})
 }
 

@@ -86,6 +86,7 @@ require (
 require (
 	github.com/Azure/go-ntlmssp v0.1.1
 	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/refraction-networking/utls v1.8.2
 )
 
 require (

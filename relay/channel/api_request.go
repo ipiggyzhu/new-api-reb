@@ -413,6 +413,10 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 		return nil, fmt.Errorf("get request url failed: %w", err)
 	}
 	logger.LogDebug(c, "fullRequestURL: %s", common.SanitizeURLForLog(fullRequestURL))
+	fullRequestURL, requestBody, cliHeaders, err := prepareCLIRequest(c, info, fullRequestURL, requestBody)
+	if err != nil {
+		return nil, err
+	}
 	req, err := newUpstreamRequest(c, fullRequestURL, requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("new request failed: %w", err)
@@ -422,6 +426,9 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	err = a.SetupRequestHeader(c, &headers, info)
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)
+	}
+	for name, values := range cliHeaders {
+		req.Header[name] = values
 	}
 	// 在 SetupRequestHeader 之后应用 Header Override，确保用户设置优先级最高
 	// 这样可以覆盖默认的 Authorization header 设置
@@ -580,7 +587,13 @@ func DoRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
 	var client *http.Client
 	var err error
-	if info.ChannelSetting.Proxy != "" {
+	fingerprint := service.ResolveTLSFingerprint(info.ChannelSetting.TLSFingerprint, info.ChannelSetting.SyntheticClientHeadersProfile)
+	if fingerprint != "" {
+		client, err = service.GetFingerprintHTTPClient(info.ChannelSetting.Proxy, fingerprint)
+		if err != nil {
+			return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+	} else if info.ChannelSetting.Proxy != "" {
 		client, err = service.NewProxyHttpClient(info.ChannelSetting.Proxy)
 		if err != nil {
 			return nil, fmt.Errorf("new proxy http client failed: %w", err)

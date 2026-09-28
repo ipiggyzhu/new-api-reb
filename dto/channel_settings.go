@@ -36,6 +36,8 @@ type ChannelSettings struct {
 	// SyntheticClientHeadersProfile replaces header passthrough with a generated
 	// client profile: instead of forwarding whatever the caller sent, upstream
 	// receives the headers a real client of that family would send.
+	// Claude/Codex profiles also align the matching Messages/Responses body,
+	// cache markers and behavior headers. Off preserves the original relay body.
 	//
 	// Header passthrough strips credentials via a fixed deny-list
 	// (shouldSkipPassthroughHeader), which by construction only knows the header
@@ -54,6 +56,19 @@ type ChannelSettings struct {
 	// not which client identity its provider allows. Legacy "auto" values are
 	// resolved to their former default before storage and use.
 	SyntheticClientHeadersProfile string `json:"synthetic_client_headers_profile,omitempty"`
+
+	// TLSFingerprint overrides the TLS ClientHello this channel's upstream
+	// requests carry ("claude-code", "codex-cli", "chrome", ...). Only the TLS
+	// layer changes; headers and body are untouched. Empty means the fingerprint
+	// follows SyntheticClientHeadersProfile — Claude Code headers get the captured
+	// Claude Code handshake, Codex headers the Codex one — and a channel with
+	// neither keeps Go's default transport (see service.ResolveTLSFingerprint).
+	TLSFingerprint string `json:"tls_fingerprint,omitempty"`
+	// Independently rotatable identity seeds. Empty keeps the existing isolated
+	// defaults; saved seeds keep custom identities stable across process restarts.
+	// These are not upstream credentials or literal device/session identifiers.
+	ClientDeviceSeed  string `json:"client_device_seed,omitempty"`
+	ClientSessionSeed string `json:"client_session_seed,omitempty"`
 
 	// WebsocketTransport opts this channel's /v1/responses traffic onto the
 	// Responses API WebSocket transport instead of HTTP+SSE.
@@ -93,6 +108,13 @@ func (s *ChannelSettings) Normalize(apiType int) {
 	}
 	// Keep the deprecated bool in step so a reader of either field agrees.
 	s.SyntheticClientHeaders = s.SyntheticClientHeadersProfile != ""
+
+	// Normalize the fingerprint id to the lowercase form the service layer keys
+	// on. Validity is checked at request time (service.GetFingerprintHTTPClient)
+	// because dto cannot import service.
+	s.TLSFingerprint = strings.ToLower(strings.TrimSpace(s.TLSFingerprint))
+	s.ClientDeviceSeed = strings.TrimSpace(s.ClientDeviceSeed)
+	s.ClientSessionSeed = strings.TrimSpace(s.ClientSessionSeed)
 }
 
 type VertexKeyType string

@@ -47,11 +47,32 @@ const (
 
 // anthropicClientHeaders mirrors Claude Code CLI. The parenthesised suffix is a
 // comma-separated list of run-context tags, which is how the CLI builds it.
+//
+// The CLI is built on the Anthropic TypeScript SDK, which stamps every request
+// with the x-stainless-* telemetry set and the direct-browser-access flag, so an
+// upstream that gates on "is this really Claude Code" checks for them and the
+// profile carries them too. Behavior headers such as anthropic-beta are applied
+// together with body shaping in client_body.go, only on matching CLI requests;
+// they must not leak into unrelated endpoints. x-stainless values were read
+// from a 2.1.282 capture on 2026-09-27;
+// os is Linux because that is what this gateway runs on. runtime-version is the
+// Node that produced the claude-code TLS fingerprint: Node bundles its OpenSSL,
+// so that handshake is the same on any OS but differs across Node lines (22.14
+// does not offer the X25519MLKEM768 key share the capture carries).
 var anthropicClientHeaders = ClientHeaderProfile{
-	"user-agent":        "claude-cli/2.1.278 (external, cli)",
+	"user-agent":        "claude-cli/2.1.282 (external, cli)",
 	"anthropic-version": "2023-06-01",
 	"x-app":             "cli",
-	"accept-language":   "*",
+	"anthropic-dangerous-direct-browser-access": "true",
+	"x-stainless-lang":                          "js",
+	"x-stainless-package-version":               "0.112.1",
+	"x-stainless-os":                            "Linux",
+	"x-stainless-arch":                          "x64",
+	"x-stainless-runtime":                       "node",
+	"x-stainless-runtime-version":               "v24.19.0",
+	"x-stainless-retry-count":                   "0",
+	"x-stainless-timeout":                       "600",
+	"accept-language":                           "*",
 }
 
 // openAIClientHeaders mirrors the official openai-python SDK, whose
@@ -68,8 +89,12 @@ var openAIClientHeaders = ClientHeaderProfile{
 }
 
 // codexClientHeaders mirrors the Codex CLI, a distinct client from the Python SDK.
+// The platform is Windows because the codex-cli TLS fingerprint is Windows-only
+// (reqwest over SChannel); a Linux user-agent on that handshake would contradict
+// itself. The format follows a 0.156.1 `codex exec` capture on 2026-09-28, with
+// the interactive CLI's originator.
 var codexClientHeaders = ClientHeaderProfile{
-	"user-agent":      "codex_cli_rs/0.155.1 (Linux 6.8.0; x86_64) terminal",
+	"user-agent":      "codex_cli_rs/0.156.1 (Windows 10.0.26100; x86_64) WindowsTerminal",
 	"originator":      "codex_cli_rs",
 	"accept-language": "*",
 }

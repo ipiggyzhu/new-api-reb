@@ -568,6 +568,11 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 	if err := channel.ValidateSettings(); err != nil {
 		return fmt.Errorf("渠道额外设置[channel setting] 格式错误：%s", err.Error())
 	}
+	// 未知指纹要到请求时才报错，且该错误不重试、不禁用，渠道会留在轮转里每次都失败，
+	// 所以在保存时拦下。
+	if fingerprint := channel.GetSetting().TLSFingerprint; !service.IsSupportedTLSFingerprint(fingerprint) {
+		return fmt.Errorf("不支持的 TLS 指纹：%s", fingerprint)
+	}
 
 	// 如果是添加操作，检查 key 是否为空
 	if isAdd {

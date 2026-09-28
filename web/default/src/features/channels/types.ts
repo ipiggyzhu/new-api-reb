@@ -128,6 +128,15 @@ export interface ChannelSettings {
   synthetic_client_headers?: boolean
   /** '' off, or an explicit client family; legacy 'auto' is normalized on read/save */
   synthetic_client_headers_profile?: string
+  /**
+   * Explicit TLS ClientHello id. '' means the fingerprint follows
+   * synthetic_client_headers_profile (Claude Code / Codex headers bring that
+   * CLI's handshake); a value replaces only the TLS layer.
+   */
+  tls_fingerprint?: string
+  /** Saved rotation seeds, not literal upstream device/session IDs. */
+  client_device_seed?: string
+  client_session_seed?: string
   system_prompt?: string
   system_prompt_override?: boolean
   /**
@@ -281,6 +290,19 @@ export interface ChannelScoreSummary {
  * instance's mirror rather than the cluster, so a cell that showed the numbers
  * without them would present a partial view as the whole truth.
  */
+export interface ChannelTLSFingerprint {
+  id: string
+  label: string
+  /** Header profile this fingerprint is the default for, if any */
+  client_family?: string
+}
+
+export interface ChannelTLSFingerprintsResponse {
+  success: boolean
+  message?: string
+  data?: ChannelTLSFingerprint[]
+}
+
 export interface ChannelDynamicScoreSummaryResponse {
   success: boolean
   message?: string

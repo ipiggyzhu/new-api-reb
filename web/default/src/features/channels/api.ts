@@ -29,6 +29,7 @@ import type {
   ChannelInFlightResponse,
   ChannelOpsResponse,
   ChannelTestResponse,
+  ChannelTLSFingerprintsResponse,
   CopyChannelParams,
   CopyChannelResponse,
   FetchModelsResponse,
@@ -142,6 +143,18 @@ export async function getChannelInFlight(): Promise<ChannelInFlightResponse> {
 export async function getChannelDynamicScoreSummary(): Promise<ChannelDynamicScoreSummaryResponse> {
   const res = await api.get(
     '/api/channel/dynamic_score_summary',
+    channelActionConfig()
+  )
+  return res.data
+}
+
+/**
+ * Get the selectable TLS fingerprints, each tagged with the header profile it
+ * is the default for, so the drawer shows what a channel will actually send.
+ */
+export async function getChannelTLSFingerprints(): Promise<ChannelTLSFingerprintsResponse> {
+  const res = await api.get(
+    '/api/channel/tls_fingerprints',
     channelActionConfig()
   )
   return res.data

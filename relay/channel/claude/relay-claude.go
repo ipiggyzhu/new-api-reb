@@ -225,6 +225,17 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 		err = HandleStreamResponseData(c, info, claudeInfo, data)
 		if err != nil {
 			sr.Stop(err)
+			return
+		}
+		// message_stop is the last frame of a Claude stream. Stop as soon as it has
+		// been forwarded, rather than reading on until the upstream closes the body:
+		// some upstreams (e.g. anyrouter) hold the connection open for ~30s after the
+		// final frame, and StreamScannerHandler would otherwise make the caller wait
+		// out that tail. HandleStreamResponseData has already written the frame and the
+		// billing usage from the preceding message_delta is already recorded, so
+		// nothing is lost. Mirrors the terminal-event handling in relay_responses.go.
+		if claudeInfo.SawMessageStop {
+			sr.Done()
 		}
 	})
 	if err != nil {

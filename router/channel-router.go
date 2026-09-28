@@ -46,6 +46,7 @@ var channelPermissionRoutes = []permissionRoute{
 	// Must precede "/:id": gin would otherwise bind "dynamic_score" as an id.
 	{method: http.MethodGet, path: "/dynamic_score", permission: authz.ChannelRead, handler: controller.GetChannelDynamicScore},
 	{method: http.MethodGet, path: "/dynamic_score_summary", permission: authz.ChannelRead, handler: controller.GetChannelDynamicScoreSummary},
+	{method: http.MethodGet, path: "/tls_fingerprints", permission: authz.ChannelRead, handler: controller.ListChannelTLSFingerprints},
 	{method: http.MethodGet, path: "/:id", permission: authz.ChannelRead, handler: controller.GetChannel},
 	{method: http.MethodGet, path: "/test", permission: authz.ChannelOperate, handler: controller.TestAllChannels},
 	{method: http.MethodGet, path: "/test/:id", permission: authz.ChannelOperate, handler: controller.TestChannel},

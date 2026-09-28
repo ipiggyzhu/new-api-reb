@@ -74,11 +74,17 @@ func applyRelayTransportTimeouts(transport *http.Transport) {
 	if transport.DialContext == nil {
 		transport.DialContext = relayDialer.DialContext
 	}
-	transport.TLSHandshakeTimeout = time.Duration(common.GetEnvOrDefault("RELAY_TLS_HANDSHAKE_TIMEOUT", 10)) * time.Second
+	transport.TLSHandshakeTimeout = relayTLSHandshakeTimeout()
 	transport.ExpectContinueTimeout = 1 * time.Second
 	if headerTimeout := common.GetEnvOrDefault("RELAY_RESPONSE_HEADER_TIMEOUT", 0); headerTimeout > 0 {
 		transport.ResponseHeaderTimeout = time.Duration(headerTimeout) * time.Second
 	}
+}
+
+// relayTLSHandshakeTimeout bounds a TLS handshake (and, on the fingerprint
+// transport, the proxy CONNECT exchange before it).
+func relayTLSHandshakeTimeout() time.Duration {
+	return time.Duration(common.GetEnvOrDefault("RELAY_TLS_HANDSHAKE_TIMEOUT", 10)) * time.Second
 }
 
 func InitHttpClient() {
@@ -147,6 +153,7 @@ func ResetProxyClientCache() {
 		}
 	}
 	proxyClients = make(map[string]*http.Client)
+	resetFingerprintClientCache()
 }
 
 // NewProxyHttpClient 创建支持代理的 HTTP 客户端
