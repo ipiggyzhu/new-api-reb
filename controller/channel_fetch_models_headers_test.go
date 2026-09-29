@@ -46,7 +46,7 @@ func TestBuildFetchModelsHeadersHonorsChannelProfile(t *testing.T) {
 		{
 			name:       "explicit codex replaces the API type default",
 			settings:   dto.ChannelSettings{SyntheticClientHeadersProfile: constant.ClientHeaderFamilyCodex},
-			wantClient: "codex_cli_rs/", wantOrigin: "codex_cli_rs",
+			wantClient: "codex_exec/", wantOrigin: "codex_exec",
 		},
 		{
 			name:       "auto keeps the API type default",

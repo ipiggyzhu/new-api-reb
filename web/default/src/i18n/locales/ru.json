@@ -1,7 +1,9 @@
 {
   "translation": {
+    "Client synthesis is off. TLS, headers and body use the standard new-api relay behavior.": "Синтез клиента отключён. TLS, заголовки и тело используют стандартную передачу new-api.",
+    "Saved legacy TLS preset: {{id}}": "Сохранённый устаревший профиль TLS: {{id}}",
     "Custom TLS, Device and Session Identity": "Свои TLS и идентификаторы устройства и сеанса",
-    "Choose a TLS preset and manually regenerate device/session identities. Save to apply. Off restores the current client profile defaults.": "Выберите профиль TLS и вручную создайте новые идентификаторы устройства/сеанса. Сохраните для применения. Отключение восстановит настройки текущего профиля клиента по умолчанию.",
+    "Enabling this switch changes nothing by itself. Only manually selected TLS or regenerated identities are overridden after saving; off restores the selected client defaults.": "Само включение ничего не меняет. После сохранения заменяются только выбранный TLS или обновлённые идентификаторы; отключение возвращает настройки выбранного клиента.",
     "Device Identity": "Идентификатор устройства",
     "Regenerate Device Identity": "Сменить идентификатор устройства",
     "Session Identity": "Идентификатор сеанса",
@@ -2338,7 +2340,7 @@
     "Select TLS fingerprint": "Выберите отпечаток TLS",
     "Off: follows the client headers and uses the {{label}} handshake.": "Выкл.: следует заголовкам клиента и использует рукопожатие {{label}}.",
     "Off: no captured handshake matches the client headers, so the default Go handshake is used.": "Выкл.: для заголовков клиента нет захваченного рукопожатия, используется рукопожатие Go по умолчанию.",
-    "Only the TLS handshake changes; request headers and body are left as they are.": "Меняется только рукопожатие TLS; заголовки и тело запроса остаются без изменений.",
+    "TLS and existing Claude runtime headers follow the preset. Prompt, tools and identities stay unchanged. Different Node versions may share a handshake shape.": "TLS и заголовки среды исполнения из образца Claude следуют профилю. Промпт, инструменты и идентификаторы не меняются. Разные версии Node могут иметь одинаковую структуру рукопожатия.",
     "Use the Responses API WebSocket transport for /v1/responses. Requires an upstream that supports WebSocket mode; pointing at an HTTP-only relay falls back to SSE automatically.": "Use the Responses API WebSocket transport for /v1/responses. Requires an upstream that supports WebSocket mode; pointing at an HTTP-only relay falls back to SSE automatically.",
     "Upstream refused the WebSocket upgrade, so this channel is running on SSE. Save the channel to try again.": "Upstream refused the WebSocket upgrade, so this channel is running on SSE. Save the channel to try again.",
     "Dynamic Channel Priority": "Dynamic Channel Priority",

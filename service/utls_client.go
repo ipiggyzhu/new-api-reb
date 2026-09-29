@@ -2,6 +2,7 @@ package service
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -33,7 +34,7 @@ import (
 // and never touch this file.
 //
 // The claude-code and codex-cli entries replay handshakes captured from the real
-// CLIs (tls_fingerprint_captures.go). The browser entries are utls presets.
+// CLIs (tls_fingerprint_captures.go). The selectable catalog is CLI-only.
 
 const http2NextProto = "h2"
 
@@ -47,22 +48,26 @@ type tlsFingerprintOption struct {
 	// ClientFamily is the synthetic client header profile this fingerprint is
 	// the default for, so a channel that sends that CLI's headers also sends its
 	// handshake unless the admin picks a fingerprint explicitly.
-	ClientFamily string `json:"client_family,omitempty"`
-	helloID      utls.ClientHelloID
-	rawHello     string
+	ClientFamily   string `json:"client_family,omitempty"`
+	RuntimeVersion string `json:"runtime_version,omitempty"`
+	helloID        utls.ClientHelloID
+	rawHello       string
 }
 
-// supportedTLSFingerprints is ordered for display. The captured native-CLI
-// entries come first because they are the reason this feature exists (matching
-// the exact handshake a gating upstream expects from an official CLI). The
-// browser *_Auto ids track the newest handshake utls implements for that client,
-// so they age forward with the library instead of pinning a stale version.
+// supportedTLSFingerprints is the CLI-only catalog returned to the admin UI.
 //
 // Every entry is one fixed handshake. There is deliberately no randomized
 // preset: a channel should look like one real client, consistently.
 var supportedTLSFingerprints = []tlsFingerprintOption{
-	{ID: "claude-code", Label: "Claude Code (Node.js)", ClientFamily: constant.ClientHeaderFamilyClaude, helloID: utls.HelloCustom, rawHello: claudeCodeClientHello},
-	{ID: "codex-cli", Label: "Codex CLI (Windows)", ClientFamily: constant.ClientHeaderFamilyCodex, helloID: utls.HelloCustom, rawHello: codexCLIClientHello},
+	{ID: "claude-code", Label: "Claude Code 2.1.282 / Node 26.3.0 / Windows x64 (JSON)", ClientFamily: constant.ClientHeaderFamilyClaude, RuntimeVersion: "v26.3.0", helloID: utls.HelloCustom, rawHello: claudeCodeClientHello},
+	{ID: "codex-cli", Label: "Codex exec 0.156.1 / Windows x64 (JSON)", ClientFamily: constant.ClientHeaderFamilyCodex, helloID: utls.HelloCustom, rawHello: codexCLIClientHello},
+	{ID: "claude-node-22.14.0", Label: "Node 22.14.0 / OpenSSL 3.0.15+quic / Windows x64 (Claude Code 2.1.76)", RuntimeVersion: "v22.14.0", helloID: utls.HelloCustom, rawHello: claudeNode22140Hello},
+	{ID: "claude-node-24.19.0", Label: "Node 24.19.0 / OpenSSL 3.5.7 / Windows x64 (Claude Code 2.1.76)", RuntimeVersion: "v24.19.0", helloID: utls.HelloCustom, rawHello: claudeNode24190Hello},
+}
+
+// Already saved browser overrides remain readable, but are no longer offered
+// for selection. This avoids silently changing an existing channel on upgrade.
+var legacyTLSFingerprints = []tlsFingerprintOption{
 	{ID: "chrome", Label: "Chrome (latest)", helloID: utls.HelloChrome_Auto},
 	{ID: "firefox", Label: "Firefox (latest)", helloID: utls.HelloFirefox_Auto},
 	{ID: "safari", Label: "Safari (latest)", helloID: utls.HelloSafari_Auto},
@@ -76,17 +81,15 @@ func SupportedTLSFingerprints() []tlsFingerprintOption {
 	return supportedTLSFingerprints
 }
 
-// ResolveTLSFingerprint picks the fingerprint a channel's upstream requests
-// use. An explicit choice always wins and changes only the TLS layer. Without
-// one, the fingerprint follows the synthetic client header profile, so a
-// channel set to Claude Code or Codex headers handshakes like that CLI as well.
-// "" means no family default applies and the default transport is used.
+// ResolveTLSFingerprint keeps synthesis-off on the original Go transport,
+// including channels with a stale saved override. Otherwise explicit TLS wins;
+// without it, the selected CLI supplies its sample handshake.
 func ResolveTLSFingerprint(explicit, clientFamily string) string {
+	if clientFamily == "" || clientFamily == "off" {
+		return ""
+	}
 	if explicit = strings.TrimSpace(explicit); explicit != "" {
 		return explicit
-	}
-	if clientFamily == "" {
-		return ""
 	}
 	for _, opt := range supportedTLSFingerprints {
 		if opt.ClientFamily == clientFamily {
@@ -96,12 +99,30 @@ func ResolveTLSFingerprint(explicit, clientFamily string) string {
 	return ""
 }
 
+// TLSFingerprintRuntimeHeaders contains only the runtime declarations that
+// exist in the Claude sample. Callers must not add these to Codex requests.
+func TLSFingerprintRuntimeHeaders(fingerprint string) map[string]string {
+	opt, ok := lookupTLSFingerprint(fingerprint)
+	if !ok || opt.RuntimeVersion == "" {
+		return nil
+	}
+	return map[string]string{
+		"x-stainless-runtime": "node", "x-stainless-runtime-version": opt.RuntimeVersion,
+		"x-stainless-os": "Windows", "x-stainless-arch": "x64",
+	}
+}
+
 // lookupTLSFingerprint resolves a fingerprint id (case-insensitive, trimmed) to
 // its option. It is the single source both the ClientHelloID and the captured
 // raw-hello lookups build on.
 func lookupTLSFingerprint(fingerprint string) (tlsFingerprintOption, bool) {
 	fingerprint = strings.ToLower(strings.TrimSpace(fingerprint))
 	for _, opt := range supportedTLSFingerprints {
+		if opt.ID == fingerprint {
+			return opt, true
+		}
+	}
+	for _, opt := range legacyTLSFingerprints {
 		if opt.ID == fingerprint {
 			return opt, true
 		}
@@ -190,6 +211,7 @@ func GetFingerprintHTTPClient(proxyURL, fingerprint string) (*http.Client, error
 	if err != nil {
 		return nil, fmt.Errorf("configure http2 transport: %w", err)
 	}
+	h2Transport.DisableCompression = opt.rawHello != ""
 	rt.h2 = h2Transport
 	client := &http.Client{Transport: rt, CheckRedirect: checkRedirect}
 	if common.RelayTimeout > 0 {
@@ -252,6 +274,34 @@ func (b *connClosingBody) Close() error {
 	return err
 }
 
+// uTLS v1.8.2 always writes 0x0301 on the first record, independently of
+// ApplyPreset. The Windows Codex capture uses 0x0303. Adjust only the plaintext
+// record header, never the ClientHello transcript or later encrypted records.
+type clientHelloRecordConn struct {
+	net.Conn
+	version [2]byte
+	written int
+}
+
+func (c *clientHelloRecordConn) Write(p []byte) (int, error) {
+	if c.written >= 3 {
+		return c.Conn.Write(p)
+	}
+	p = bytes.Clone(p)
+	for i := range p {
+		position := c.written + i
+		if position >= 3 {
+			break
+		}
+		if position > 0 {
+			p[i] = c.version[position-1]
+		}
+	}
+	n, err := c.Conn.Write(p)
+	c.written += n
+	return n, err
+}
+
 func (rt *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if !strings.EqualFold(req.URL.Scheme, "https") {
 		// No TLS layer to fingerprint: the ordinary client for this proxy sends
@@ -292,6 +342,9 @@ func (rt *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		return nil, err
 	}
 
+	if len(rt.customHello) >= 3 && rt.customHello[2] != 1 {
+		raw = &clientHelloRecordConn{Conn: raw, version: [2]byte{rt.customHello[1], rt.customHello[2]}}
+	}
 	uconn := utls.UClient(raw, &utls.Config{ServerName: host, InsecureSkipVerify: rt.insecure}, rt.helloID)
 	if rt.customHello != nil {
 		// AllowBluntMimicry passes any extension utls doesn't natively model
@@ -305,6 +358,12 @@ func (rt *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		if err := uconn.ApplyPreset(spec); err != nil {
 			_ = raw.Close()
 			return nil, fmt.Errorf("apply captured client hello: %w", err)
+		}
+		// Fingerprinter omits the legacy session-ID length. ApplyPreset always
+		// generates 32 bytes, but the Codex TLS 1.2 capture sends an empty ID.
+		// Offset: record(5) + handshake(4) + version(2) + random(32).
+		if len(rt.customHello) > 43 && rt.customHello[43] == 0 {
+			uconn.HandshakeState.Hello.SessionId = nil
 		}
 	}
 	handshakeCtx, cancel := context.WithTimeout(ctx, relayTLSHandshakeTimeout())
@@ -342,7 +401,7 @@ func (rt *utlsRoundTripper) roundTripOverConn(req *http.Request, conn net.Conn) 
 	// the real CLIs do not send, so the fingerprint would change the headers too.
 	// A negative per-host idle limit refuses the conn back into the pool instead,
 	// so it is still closed once the response body is.
-	tr := &http.Transport{MaxIdleConnsPerHost: -1}
+	tr := &http.Transport{MaxIdleConnsPerHost: -1, DisableCompression: rt.customHello != nil}
 	applyRelayTransportTimeouts(tr)
 
 	handedOut := false

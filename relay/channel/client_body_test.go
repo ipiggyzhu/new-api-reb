@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	appcommon "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -28,6 +29,7 @@ func cliTestRequest(profile string) (*gin.Context, *relaycommon.RelayInfo) {
 	c.Request.Header.Set("session-id", "caller-session")
 	return c, &relaycommon.RelayInfo{
 		UserId: 42, TokenId: 7, RequestId: "request-one", IsStream: true,
+		StartTime: time.UnixMilli(1700000000000),
 		ChannelMeta: &relaycommon.ChannelMeta{
 			ChannelId: 9, ApiType: constant.APITypeOpenAI,
 			ChannelSetting: dto.ChannelSettings{SyntheticClientHeadersProfile: profile},
@@ -252,6 +254,16 @@ func TestCLIRejectsMalformedBodyBeforeSending(t *testing.T) {
 		_, _, _, err := prepareCLIRequest(c, info, "https://upstream.test/v1/responses", strings.NewReader(body))
 		require.Error(t, err)
 	}
+}
+
+func TestClaudeDeferredToolKeepsCapturedSchemaShape(t *testing.T) {
+	c, info := cliTestRequest("claude")
+	input := `{"messages":[],"tools":[{"name":"DeferredToolPlaceholder","defer_loading":true,"input_schema":{"type":"object","properties":{}}}]}`
+	_, reader, _, err := prepareCLIRequest(c, info, "https://upstream.test/v1/messages", strings.NewReader(input))
+	require.NoError(t, err)
+	output, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	assert.JSONEq(t, gjson.Get(input, "tools").Raw, gjson.GetBytes(output, "tools").Raw)
 }
 
 // Embed the interface so only the two hooks used by the real transport need

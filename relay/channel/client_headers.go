@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 )
 
@@ -37,42 +38,22 @@ const (
 	AcceptSSE  = "text/event-stream"
 )
 
-// The version numbers below are the weak part of this file: a real client sends
-// its own build's version and some upstreams gate on a minimum, so anything
-// hardcoded here eventually goes stale — and on a gateway that would mean
-// rebuilding an image to change one string. They are only defaults:
-// operation_setting.MonitorSetting.ChannelTestClientHeaders overrides any of
-// them from the admin UI. Values were taken from the package registries and the
-// shipped clients on 2026-09-22, not invented.
-
-// anthropicClientHeaders mirrors Claude Code CLI. The parenthesised suffix is a
-// comma-separated list of run-context tags, which is how the CLI builds it.
-//
-// The CLI is built on the Anthropic TypeScript SDK, which stamps every request
-// with the x-stainless-* telemetry set and the direct-browser-access flag, so an
-// upstream that gates on "is this really Claude Code" checks for them and the
-// profile carries them too. Behavior headers such as anthropic-beta are applied
-// together with body shaping in client_body.go, only on matching CLI requests;
-// they must not leak into unrelated endpoints. x-stainless values were read
-// from a 2.1.282 capture on 2026-09-27;
-// os is Linux because that is what this gateway runs on. runtime-version is the
-// Node that produced the claude-code TLS fingerprint: Node bundles its OpenSSL,
-// so that handshake is the same on any OS but differs across Node lines (22.14
-// does not offer the X25519MLKEM768 key share the capture carries).
+// CLI defaults match the user-supplied Claude Code 2.1.282 and Codex exec
+// 0.156.1 JSON captures. Runtime declarations describe the captured client,
+// not this gateway's operating system. Admin overrides remain authoritative.
 var anthropicClientHeaders = ClientHeaderProfile{
-	"user-agent":        "claude-cli/2.1.282 (external, cli)",
+	"user-agent":        "claude-cli/2.1.282 (external, sdk-cli)",
 	"anthropic-version": "2023-06-01",
 	"x-app":             "cli",
 	"anthropic-dangerous-direct-browser-access": "true",
 	"x-stainless-lang":                          "js",
 	"x-stainless-package-version":               "0.112.1",
-	"x-stainless-os":                            "Linux",
+	"x-stainless-os":                            "Windows",
 	"x-stainless-arch":                          "x64",
 	"x-stainless-runtime":                       "node",
-	"x-stainless-runtime-version":               "v24.19.0",
+	"x-stainless-runtime-version":               "v26.3.0",
 	"x-stainless-retry-count":                   "0",
 	"x-stainless-timeout":                       "600",
-	"accept-language":                           "*",
 }
 
 // openAIClientHeaders mirrors the official openai-python SDK, whose
@@ -88,15 +69,10 @@ var openAIClientHeaders = ClientHeaderProfile{
 	"accept-language":             "*",
 }
 
-// codexClientHeaders mirrors the Codex CLI, a distinct client from the Python SDK.
-// The platform is Windows because the codex-cli TLS fingerprint is Windows-only
-// (reqwest over SChannel); a Linux user-agent on that handshake would contradict
-// itself. The format follows a 0.156.1 `codex exec` capture on 2026-09-28, with
-// the interactive CLI's originator.
+// Codex's sample has no Node/x-stainless runtime declarations.
 var codexClientHeaders = ClientHeaderProfile{
-	"user-agent":      "codex_cli_rs/0.156.1 (Windows 10.0.26100; x86_64) WindowsTerminal",
-	"originator":      "codex_cli_rs",
-	"accept-language": "*",
+	"user-agent": "codex_exec/0.156.1 (Windows 10.0.26100; x86_64) WindowsTerminal (codex_exec; 0.156.1)",
+	"originator": "codex_exec",
 }
 
 // geminiClientHeaders mirrors google-genai.
@@ -158,13 +134,22 @@ func ClientHeaderProfileForAPIType(apiType int) ClientHeaderProfile {
 // that lets an admin set something globally and still special-case one family.
 // An empty override value means "drop this built-in header" rather than "send an
 // empty one", which is the only way to remove something the profile adds.
-func EffectiveClientHeaders(family string) ClientHeaderProfile {
+func EffectiveClientHeaders(family string, fingerprint ...string) ClientHeaderProfile {
 	profile := ClientHeaderProfileForFamily(family)
 	overrides := operation_setting.GetMonitorSetting().ChannelTestClientHeaders
 
 	effective := make(ClientHeaderProfile, len(profile)+len(overrides))
 	for name, value := range profile {
 		effective[name] = value
+	}
+	// Only declarations present in the Claude capture follow a Node preset.
+	// Codex never gains x-stainless headers from a TLS selection.
+	if family == ClientHeaderFamilyClaude && len(fingerprint) > 0 {
+		for name, value := range service.TLSFingerprintRuntimeHeaders(fingerprint[0]) {
+			if _, exists := effective[name]; exists {
+				effective[name] = value
+			}
+		}
 	}
 	for _, scope := range []string{ClientHeaderFamilyAll, family} {
 		for name, value := range overrides[scope] {
@@ -202,7 +187,7 @@ func ApplyClientHeaderProfile(header http.Header, apiType int, profile string, i
 	}
 
 	if header.Get("accept") == "" {
-		if isStream {
+		if isStream && family != ClientHeaderFamilyClaude {
 			header.Set("accept", AcceptSSE)
 		} else {
 			header.Set("accept", AcceptJSON)

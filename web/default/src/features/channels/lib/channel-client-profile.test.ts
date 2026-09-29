@@ -171,7 +171,9 @@ describe('custom TLS, device and session identity', () => {
   })
 
   test('device and session configuration survives create, update and reopening', () => {
-    const form = transformChannelToFormDefaults(channelWithSettings(14, {}))
+    const form = transformChannelToFormDefaults(
+      channelWithSettings(14, { synthetic_client_headers_profile: 'claude' })
+    )
     form.custom_client_identity_enabled = true
     form.tls_fingerprint_enabled = true
     form.tls_fingerprint = 'chrome'
@@ -219,6 +221,7 @@ describe('custom TLS, device and session identity', () => {
   test('rotating a device keeps the session and TLS selections', () => {
     const form = transformChannelToFormDefaults(
       channelWithSettings(14, {
+        synthetic_client_headers_profile: 'claude',
         tls_fingerprint: 'firefox',
         client_device_seed: 'device-profile-one',
         client_session_seed: 'session-profile-one',
@@ -231,5 +234,46 @@ describe('custom TLS, device and session identity', () => {
     assert.equal(saved.client_device_seed, 'device-profile-two')
     assert.equal(saved.client_session_seed, 'session-profile-one')
     assert.equal(saved.tls_fingerprint, 'firefox')
+  })
+})
+
+describe('independent synthesis controls', () => {
+  test('enabling custom controls alone leaves default identities and TLS intact', () => {
+    const form = transformChannelToFormDefaults(
+      channelWithSettings(14, {
+        synthetic_client_headers_profile: 'claude',
+      })
+    )
+    const before = transformFormDataToUpdatePayload(form, 25).setting
+    form.custom_client_identity_enabled = true
+    assert.equal(transformFormDataToUpdatePayload(form, 25).setting, before)
+    form.tls_fingerprint_enabled = true
+    form.tls_fingerprint = 'claude-node-22.14.0'
+    const saved = JSON.parse(
+      transformFormDataToUpdatePayload(form, 25).setting ?? '{}'
+    )
+    assert.equal(saved.tls_fingerprint, 'claude-node-22.14.0')
+    assert.equal(saved.client_device_seed, '')
+    assert.equal(saved.client_session_seed, '')
+  })
+
+  test('synthesis off clears every override even with custom controls left on', () => {
+    const form = transformChannelToFormDefaults(
+      channelWithSettings(14, {
+        synthetic_client_headers_profile: 'claude',
+        tls_fingerprint: 'claude-node-22.14.0',
+        client_device_seed: 'device-one',
+        client_session_seed: 'session-one',
+      })
+    )
+    form.synthetic_client_headers_profile = 'off'
+    const saved = JSON.parse(
+      transformFormDataToUpdatePayload(form, 25).setting ?? '{}'
+    )
+    assert.equal(saved.synthetic_client_headers, false)
+    assert.equal(saved.synthetic_client_headers_profile, '')
+    assert.equal(saved.tls_fingerprint, '')
+    assert.equal(saved.client_device_seed, '')
+    assert.equal(saved.client_session_seed, '')
   })
 })

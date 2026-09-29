@@ -57,12 +57,10 @@ type ChannelSettings struct {
 	// resolved to their former default before storage and use.
 	SyntheticClientHeadersProfile string `json:"synthetic_client_headers_profile,omitempty"`
 
-	// TLSFingerprint overrides the TLS ClientHello this channel's upstream
-	// requests carry ("claude-code", "codex-cli", "chrome", ...). Only the TLS
-	// layer changes; headers and body are untouched. Empty means the fingerprint
-	// follows SyntheticClientHeadersProfile — Claude Code headers get the captured
-	// Claude Code handshake, Codex headers the Codex one — and a channel with
-	// neither keeps Go's default transport (see service.ResolveTLSFingerprint).
+	// TLSFingerprint selects a captured CLI handshake while synthesis is enabled.
+	// Node presets also update the runtime declarations present in the Claude
+	// sample; prompt, tools and device/session identity are unaffected. Empty
+	// follows the chosen CLI profile. Synthesis off ignores any saved override.
 	TLSFingerprint string `json:"tls_fingerprint,omitempty"`
 	// Independently rotatable identity seeds. Empty keeps the existing isolated
 	// defaults; saved seeds keep custom identities stable across process restarts.

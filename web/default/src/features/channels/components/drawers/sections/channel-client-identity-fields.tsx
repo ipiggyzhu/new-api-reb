@@ -44,6 +44,11 @@ export function ChannelClientIdentityFields() {
     control: form.control,
     name: 'websocket_transport',
   })
+  const profile = useWatch({
+    control: form.control,
+    name: 'synthetic_client_headers_profile',
+  })
+  const profileEnabled = (profile ?? 'off') !== 'off'
 
   return (
     <>
@@ -59,33 +64,29 @@ export function ChannelClientIdentityFields() {
                 </FormLabel>
                 <FormDescription>
                   {t(
-                    'Choose a TLS preset and manually regenerate device/session identities. Save to apply. Off restores the current client profile defaults.'
+                    'Enabling this switch changes nothing by itself. Only manually selected TLS or regenerated identities are overridden after saving; off restores the selected client defaults.'
                   )}
                 </FormDescription>
               </div>
               <FormControl>
                 <Switch
-                  checked={field.value ?? false}
-                  onCheckedChange={(checked) => {
-                    field.onChange(checked)
-                    if (checked) {
-                      for (const name of [
-                        'client_device_seed',
-                        'client_session_seed',
-                      ] as const) {
-                        if (!form.getValues(name)) {
-                          form.setValue(name, nanoid(), { shouldDirty: true })
-                        }
-                      }
-                    }
-                  }}
+                  checked={profileEnabled && (field.value ?? false)}
+                  disabled={!profileEnabled}
+                  onCheckedChange={field.onChange}
                 />
               </FormControl>
             </div>
           </FormItem>
         )}
       />
-      {enabled && (
+      {!profileEnabled && (
+        <p className='text-muted-foreground px-4 pb-3 text-xs'>
+          {t(
+            'Client synthesis is off. TLS, headers and body use the standard new-api relay behavior.'
+          )}
+        </p>
+      )}
+      {profileEnabled && enabled && (
         <div className='border-border mx-4 mb-3 rounded-lg border'>
           <ChannelTLSFingerprintFields />
           <FormField

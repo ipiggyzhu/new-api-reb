@@ -44,7 +44,7 @@ type clientHeaderPreset struct {
 
 func claudeCodePreset(version string) map[string]string {
 	return map[string]string{
-		"user-agent":        "claude-cli/" + version + " (external, cli)",
+		"user-agent":        "claude-cli/" + version + " (external, sdk-cli)",
 		"x-app":             "cli",
 		"anthropic-version": "2023-06-01",
 		// The CLI rides the Anthropic TypeScript SDK, which sends these x-stainless-*
@@ -58,13 +58,12 @@ func claudeCodePreset(version string) map[string]string {
 		"anthropic-dangerous-direct-browser-access": "true",
 		"x-stainless-lang":                          "js",
 		"x-stainless-package-version":               "0.112.1",
-		"x-stainless-os":                            "Linux",
+		"x-stainless-os":                            "Windows",
 		"x-stainless-arch":                          "x64",
 		"x-stainless-runtime":                       "node",
-		"x-stainless-runtime-version":               "v24.19.0",
+		"x-stainless-runtime-version":               "v26.3.0",
 		"x-stainless-retry-count":                   "0",
 		"x-stainless-timeout":                       "600",
-		"accept-language":                           "*",
 	}
 }
 
@@ -82,11 +81,9 @@ func openAIPythonPreset(version string) map[string]string {
 }
 
 func codexPreset(version string) map[string]string {
-	// Windows, to agree with the codex-cli TLS fingerprint (SChannel, Windows-only).
 	return map[string]string{
-		"user-agent":      "codex_cli_rs/" + version + " (Windows 10.0.26100; x86_64) WindowsTerminal",
-		"originator":      "codex_cli_rs",
-		"accept-language": "*",
+		"user-agent": "codex_exec/" + version + " (Windows 10.0.26100; x86_64) WindowsTerminal (codex_exec; " + version + ")",
+		"originator": "codex_exec",
 	}
 }
 

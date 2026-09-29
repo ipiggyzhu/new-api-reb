@@ -1,7 +1,9 @@
 {
   "translation": {
+    "Client synthesis is off. TLS, headers and body use the standard new-api relay behavior.": "クライアント合成は無効です。TLS、ヘッダー、ボディには new-api の標準転送処理を使用します。",
+    "Saved legacy TLS preset: {{id}}": "保存済みの旧 TLS プリセット: {{id}}",
     "Custom TLS, Device and Session Identity": "TLS・端末・セッション ID のカスタマイズ",
-    "Choose a TLS preset and manually regenerate device/session identities. Save to apply. Off restores the current client profile defaults.": "TLS プリセットを選び、端末／セッション ID を手動で再生成します。保存後に適用されます。オフでは現在のクライアント設定の既定動作に戻ります。",
+    "Enabling this switch changes nothing by itself. Only manually selected TLS or regenerated identities are overridden after saving; off restores the selected client defaults.": "このスイッチを有効にするだけでは何も変わりません。保存後、手動で選んだ TLS または再生成した ID のみを上書きします。無効にすると選択中のクライアントの既定値に戻ります。",
     "Device Identity": "端末 ID",
     "Regenerate Device Identity": "端末 ID を再生成",
     "Session Identity": "セッション ID",
@@ -2338,7 +2340,7 @@
     "Select TLS fingerprint": "TLS フィンガープリントを選択",
     "Off: follows the client headers and uses the {{label}} handshake.": "オフ：クライアントヘッダーに従い、{{label}} のハンドシェイクを使用します。",
     "Off: no captured handshake matches the client headers, so the default Go handshake is used.": "オフ：クライアントヘッダーに対応するキャプチャ済みハンドシェイクがないため、Go のデフォルトハンドシェイクを使用します。",
-    "Only the TLS handshake changes; request headers and body are left as they are.": "TLS ハンドシェイクのみを変更し、リクエストヘッダーとボディはそのままです。",
+    "TLS and existing Claude runtime headers follow the preset. Prompt, tools and identities stay unchanged. Different Node versions may share a handshake shape.": "TLS と Claude サンプルに存在するランタイムヘッダーがプリセットに従います。プロンプト、ツール、ID は変わりません。異なる Node バージョンでも同じハンドシェイク構造になる場合があります。",
     "Use the Responses API WebSocket transport for /v1/responses. Requires an upstream that supports WebSocket mode; pointing at an HTTP-only relay falls back to SSE automatically.": "Use the Responses API WebSocket transport for /v1/responses. Requires an upstream that supports WebSocket mode; pointing at an HTTP-only relay falls back to SSE automatically.",
     "Upstream refused the WebSocket upgrade, so this channel is running on SSE. Save the channel to try again.": "Upstream refused the WebSocket upgrade, so this channel is running on SSE. Save the channel to try again.",
     "Dynamic Channel Priority": "Dynamic Channel Priority",

@@ -33,7 +33,7 @@ func TestClientHeaderProfileForAPIType(t *testing.T) {
 		{"openai gets sdk", constant.APITypeOpenAI, "OpenAI/Python"},
 		// Codex is a separate client from the Python SDK and talks to
 		// /v1/responses, so it must not inherit the SDK's identity.
-		{"codex gets codex cli", constant.APITypeCodex, "codex_cli_rs/"},
+		{"codex gets codex cli", constant.APITypeCodex, "codex_exec/"},
 		{"gemini gets genai", constant.APITypeGemini, "google-genai-sdk/"},
 	}
 
@@ -168,7 +168,7 @@ func TestChannelTestSendsSelectedClientProfile(t *testing.T) {
 			select {
 			case headers := <-captured:
 				assert.Equal(t, tc.wantAgent, headers.Get("User-Agent"))
-				assert.Equal(t, "codex_cli_rs", headers.Get("Originator"))
+				assert.Equal(t, "codex_exec", headers.Get("Originator"))
 				assert.Empty(t, headers.Get("X-Stainless-Lang"))
 				assert.Equal(t, "Bearer sk-upstream", headers.Get("Authorization"))
 				assert.Equal(t, acceptJSON, headers.Get("Accept"))
@@ -332,5 +332,5 @@ func TestPresetHeadersApplyThroughOverride(t *testing.T) {
 	header := http.Header{}
 	applyTestClientHeaders(header, constant.APITypeCodex, "", false)
 	assert.Equal(t, codexPresetHeaders["user-agent"], header.Get("user-agent"))
-	assert.Equal(t, "codex_cli_rs", header.Get("originator"))
+	assert.Equal(t, "codex_exec", header.Get("originator"))
 }

@@ -639,7 +639,9 @@ export function transformChannelToFormDefaults(
  */
 function buildSettingJSON(formData: ChannelFormValues): string {
   const syntheticProfile = formData.synthetic_client_headers_profile ?? 'off'
-  const customIdentity = formData.custom_client_identity_enabled !== false
+  const customIdentity =
+    syntheticProfile !== 'off' &&
+    formData.custom_client_identity_enabled !== false
   const settingObj = {
     force_format: formData.force_format || false,
     thinking_to_content: formData.thinking_to_content || false,

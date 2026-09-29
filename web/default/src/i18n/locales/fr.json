@@ -1,7 +1,9 @@
 {
   "translation": {
+    "Client synthesis is off. TLS, headers and body use the standard new-api relay behavior.": "La synthèse du client est désactivée. TLS, les en-têtes et le corps utilisent le relais standard de new-api.",
+    "Saved legacy TLS preset: {{id}}": "Ancien profil TLS enregistré : {{id}}",
     "Custom TLS, Device and Session Identity": "Identité TLS, appareil et session personnalisée",
-    "Choose a TLS preset and manually regenerate device/session identities. Save to apply. Off restores the current client profile defaults.": "Choisissez un profil TLS et régénérez manuellement les identités appareil/session. Enregistrez pour appliquer. Désactivé rétablit les valeurs par défaut du profil client actuel.",
+    "Enabling this switch changes nothing by itself. Only manually selected TLS or regenerated identities are overridden after saving; off restores the selected client defaults.": "Activer ce bouton ne change rien à lui seul. Après enregistrement, seuls le TLS choisi ou les identifiants régénérés sont remplacés ; désactiver rétablit les valeurs du client sélectionné.",
     "Device Identity": "Identité de l’appareil",
     "Regenerate Device Identity": "Régénérer l’identité de l’appareil",
     "Session Identity": "Identité de session",
@@ -2338,7 +2340,7 @@
     "Select TLS fingerprint": "Sélectionner une empreinte TLS",
     "Off: follows the client headers and uses the {{label}} handshake.": "Désactivé : suit les en-têtes client et utilise la poignée de main {{label}}.",
     "Off: no captured handshake matches the client headers, so the default Go handshake is used.": "Désactivé : aucune poignée de main capturée ne correspond aux en-têtes client, la poignée de main Go par défaut est utilisée.",
-    "Only the TLS handshake changes; request headers and body are left as they are.": "Seule la poignée de main TLS change ; les en-têtes et le corps de la requête restent inchangés.",
+    "TLS and existing Claude runtime headers follow the preset. Prompt, tools and identities stay unchanged. Different Node versions may share a handshake shape.": "TLS et les en-têtes d’exécution présents dans l’exemple Claude suivent le profil. Prompt, outils et identifiants restent inchangés. Différentes versions de Node peuvent partager la même structure de négociation.",
     "Use the Responses API WebSocket transport for /v1/responses. Requires an upstream that supports WebSocket mode; pointing at an HTTP-only relay falls back to SSE automatically.": "Use the Responses API WebSocket transport for /v1/responses. Requires an upstream that supports WebSocket mode; pointing at an HTTP-only relay falls back to SSE automatically.",
     "Upstream refused the WebSocket upgrade, so this channel is running on SSE. Save the channel to try again.": "Upstream refused the WebSocket upgrade, so this channel is running on SSE. Save the channel to try again.",
     "Dynamic Channel Priority": "Dynamic Channel Priority",

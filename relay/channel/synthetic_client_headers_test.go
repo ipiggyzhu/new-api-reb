@@ -239,8 +239,8 @@ func TestMigratedClientProfileStaysFixedWhenChannelTypeChanges(t *testing.T) {
 
 	got, err := processHeaderOverride(info, c)
 	require.NoError(t, err)
-	assert.Contains(t, got["user-agent"], "codex_cli_rs/")
-	assert.Equal(t, "codex_cli_rs", got["originator"])
+	assert.Contains(t, got["user-agent"], "codex_exec/")
+	assert.Equal(t, "codex_exec", got["originator"])
 	assert.NotContains(t, got, "anthropic-version")
 	for name, value := range leakyClientHeaders {
 		assert.NotEqual(t, value, got[name], "an explicit profile must not forward caller header %q", name)

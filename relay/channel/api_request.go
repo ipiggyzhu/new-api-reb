@@ -282,13 +282,24 @@ func processHeaderOverride(info *common.RelayInfo, c *gin.Context) (map[string]s
 		// EffectiveClientHeaders rather than the raw profile: the built-in client
 		// versions go stale and the admin's override map is where they get
 		// corrected, so live traffic and channel tests wear the same headers.
-		for name, value := range EffectiveClientHeaders(syntheticFamily) {
+		for name, value := range EffectiveClientHeaders(syntheticFamily, info.ChannelSetting.TLSFingerprint) {
 			headerOverride[strings.ToLower(strings.TrimSpace(name))] = value
 		}
-		if info.IsStream {
+		if info.IsStream && syntheticFamily != ClientHeaderFamilyClaude {
 			headerOverride["accept"] = AcceptSSE
 		} else {
 			headerOverride["accept"] = AcceptJSON
+		}
+	}
+
+	// Channel tests already carry synthesized headers. Apply only an explicitly
+	// selected runtime here, before the channel's static overrides below.
+	if info.IsChannelTest && info.ChannelSetting.SyntheticClientHeadersProfile == ClientHeaderFamilyClaude {
+		effective := EffectiveClientHeaders(ClientHeaderFamilyClaude, info.ChannelSetting.TLSFingerprint)
+		for name := range service.TLSFingerprintRuntimeHeaders(info.ChannelSetting.TLSFingerprint) {
+			if value, ok := effective[name]; ok {
+				headerOverride[name] = value
+			}
 		}
 	}
 
@@ -587,7 +598,9 @@ func DoRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
 	var client *http.Client
 	var err error
-	fingerprint := service.ResolveTLSFingerprint(info.ChannelSetting.TLSFingerprint, info.ChannelSetting.SyntheticClientHeadersProfile)
+	settings := info.ChannelSetting
+	settings.Normalize(info.ApiType)
+	fingerprint := service.ResolveTLSFingerprint(settings.TLSFingerprint, settings.SyntheticClientHeadersProfile)
 	if fingerprint != "" {
 		client, err = service.GetFingerprintHTTPClient(info.ChannelSetting.Proxy, fingerprint)
 		if err != nil {
@@ -645,6 +658,11 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 
 	_ = req.Body.Close()
 	_ = c.Request.Body.Close()
+	if settings.SyntheticClientHeadersProfile == ClientHeaderFamilyClaude {
+		if err := decodeCLIResponse(resp); err != nil {
+			return nil, types.NewError(err, types.ErrorCodeDoRequestFailed)
+		}
+	}
 	return resp, nil
 }
 

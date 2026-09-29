@@ -44,8 +44,8 @@ import type { ChannelFormValues } from '../../../lib/channel-form'
 /**
  * TLS fingerprint override for a channel. Off, the handshake follows the
  * synthetic client header profile (Claude Code / Codex headers bring that
- * CLI's captured handshake); on, the chosen fingerprint replaces only the TLS
- * layer and headers and body stay as they are.
+ * CLI's captured handshake). A Node override also updates only the runtime
+ * declarations that exist in the Claude sample; body and identities stay put.
  */
 export function ChannelTLSFingerprintFields() {
   const { t } = useTranslation()
@@ -64,7 +64,26 @@ export function ChannelTLSFingerprintFields() {
     queryFn: getChannelTLSFingerprints,
     staleTime: Infinity,
   })
+  const fingerprint = useWatch({
+    control: form.control,
+    name: 'tls_fingerprint',
+  })
   const options = data?.data ?? []
+  const legacySelection = Boolean(
+    data?.success &&
+    fingerprint &&
+    !options.some((option) => option.id === fingerprint)
+  )
+  const items = options.map((option) => ({
+    value: option.id,
+    label: option.label,
+  }))
+  if (legacySelection && fingerprint) {
+    items.unshift({
+      value: fingerprint,
+      label: t('Saved legacy TLS preset: {{id}}', { id: fingerprint }),
+    })
+  }
   const followed = options.find(
     (option) =>
       option.client_family !== undefined &&
@@ -127,10 +146,7 @@ export function ChannelTLSFingerprintFields() {
             <FormItem className='px-4 py-3'>
               <FormLabel>{t('TLS Fingerprint')}</FormLabel>
               <Select
-                items={options.map((option) => ({
-                  value: option.id,
-                  label: option.label,
-                }))}
+                items={items}
                 onValueChange={field.onChange}
                 value={field.value ?? ''}
               >
@@ -141,8 +157,14 @@ export function ChannelTLSFingerprintFields() {
                 </FormControl>
                 <SelectContent alignItemWithTrigger={false}>
                   <SelectGroup>
-                    {options.map((option) => (
-                      <SelectItem key={option.id} value={option.id}>
+                    {items.map((option) => (
+                      <SelectItem
+                        key={option.value}
+                        value={option.value}
+                        disabled={
+                          legacySelection && option.value === fingerprint
+                        }
+                      >
                         {option.label}
                       </SelectItem>
                     ))}
@@ -151,7 +173,7 @@ export function ChannelTLSFingerprintFields() {
               </Select>
               <FormDescription>
                 {t(
-                  'Only the TLS handshake changes; request headers and body are left as they are.'
+                  'TLS and existing Claude runtime headers follow the preset. Prompt, tools and identities stay unchanged. Different Node versions may share a handshake shape.'
                 )}
               </FormDescription>
             </FormItem>

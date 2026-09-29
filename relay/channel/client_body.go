@@ -2,6 +2,7 @@ package channel
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -35,7 +37,26 @@ func cliField(value any) json.RawMessage {
 }
 
 type cliIdentity struct {
-	device, installation, session, turn, window string
+	device, installation, session, turn, window, contextWindow string
+	startedAt                                                  int64
+}
+
+// Keep stable, tenant-isolated pseudorandom IDs while matching the sample's
+// UUID version/variant bits. UUIDv7 time comes from the source conversation's
+// timestamp (when present), otherwise the channel's creation time; turn IDs
+// use the current request time. No captured identifier is replayed.
+func isolatedCLIUUID(key, scope string, version byte, timestampMillis int64) string {
+	var id uuid.UUID
+	_, _ = hex.Decode(id[:], []byte(common.GenerateHMACWithKey([]byte(key), scope)[:32]))
+	if version == 7 {
+		for i := 5; i >= 0; i-- {
+			id[i] = byte(timestampMillis)
+			timestampMillis >>= 8
+		}
+	}
+	id[6] = (id[6] & 0x0f) | version<<4
+	id[8] = (id[8] & 0x3f) | 0x80
+	return id.String()
 }
 
 func requestCLIIdentity(c *gin.Context, info *relaycommon.RelayInfo, family string, body cliObject) cliIdentity {
@@ -76,13 +97,31 @@ func requestCLIIdentity(c *gin.Context, info *relaycommon.RelayInfo, family stri
 	if seed == "" {
 		seed = requestID
 	}
-	identity := cliIdentity{
-		device:       common.GenerateHMACWithKey([]byte(deviceKey), scope+":device"),
-		installation: uuid.NewSHA1(uuid.NameSpaceOID, []byte(common.GenerateHMACWithKey([]byte(deviceKey), scope+":installation"))).String(),
-		session:      uuid.NewSHA1(uuid.NameSpaceOID, []byte(common.GenerateHMACWithKey([]byte(sessionKey), scope+":session:"+seed))).String(),
-		turn:         uuid.NewSHA1(uuid.NameSpaceOID, []byte(common.GenerateHMACWithKey([]byte(sessionKey), scope+":turn:"+requestID))).String(),
-		window:       uuid.NewSHA1(uuid.NameSpaceOID, []byte(common.GenerateHMACWithKey([]byte(sessionKey), scope+":window:"+seed))).String(),
+	startedAt := info.StartTime
+	if startedAt.IsZero() {
+		startedAt = time.Now()
 	}
+	sessionVersion := byte(4)
+	sessionTime := info.ChannelCreateTime * 1000
+	if family == constant.ClientHeaderFamilyCodex {
+		sessionVersion = 7
+		if source, err := uuid.Parse(seed); err == nil && source.Version() == 7 {
+			sessionTime = 0
+			for _, b := range source[:6] {
+				sessionTime = sessionTime<<8 | int64(b)
+			}
+		}
+	}
+	identity := cliIdentity{
+		device:        common.GenerateHMACWithKey([]byte(deviceKey), scope+":device"),
+		installation:  isolatedCLIUUID(deviceKey, scope+":installation", 4, 0),
+		session:       isolatedCLIUUID(sessionKey, scope+":session:"+seed, sessionVersion, sessionTime),
+		turn:          isolatedCLIUUID(sessionKey, scope+":turn:"+requestID, sessionVersion, startedAt.UnixMilli()),
+		contextWindow: isolatedCLIUUID(sessionKey, scope+":context-window:"+seed, sessionVersion, sessionTime),
+		startedAt:     startedAt.UnixMilli(),
+	}
+	// Codex's window identifier is the thread UUID followed by the window index.
+	identity.window = identity.session + ":0"
 	c.Set(cacheKey, identity)
 	return identity
 }
@@ -125,12 +164,16 @@ func prepareCLIRequest(c *gin.Context, info *relaycommon.RelayInfo, requestURL s
 	// defaults must not silently turn a synchronous request into an SSE response.
 	body["stream"] = cliField(info.IsStream)
 	headers.Set("Content-Type", "application/json")
-	if info.IsStream {
+	if info.IsStream && !claude {
 		headers.Set("Accept", AcceptSSE)
 	} else {
 		headers.Set("Accept", AcceptJSON)
 	}
 	if claude {
+		if u.Scheme == "https" || u.Scheme == "http" {
+			headers.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+			headers.Set("Connection", "keep-alive")
+		}
 		err = shapeClaudeCodeBody(body, identity)
 		query := u.Query()
 		query.Set("beta", "true")
@@ -236,6 +279,11 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity) error {
 			if tool == nil {
 				return fmt.Errorf("Claude CLI tools must be objects")
 			}
+			// The sample's deferred placeholder has only type/properties. It is
+			// not a regular executable tool schema: preserve that minimal shape.
+			if gjson.ParseBytes(tool["name"]).String() == "DeferredToolPlaceholder" && gjson.ParseBytes(tool["defer_loading"]).Bool() {
+				continue
+			}
 			// Server tools do not have input_schema; do not turn them into functions.
 			if schemaRaw, ok := tool["input_schema"]; ok {
 				var schema cliObject
@@ -315,7 +363,8 @@ func shapeCodexBody(body cliObject, identity cliIdentity) error {
 		}
 	}
 	if instructions := body["instructions"]; common.GetJsonType(instructions) == "string" && gjson.ParseBytes(instructions).String() != "" {
-		input = append([]cliObject{{"role": cliField("developer"), "content": instructions}}, input...)
+		input = append([]cliObject{{"role": cliField("developer"), "content": instructions,
+			"id": cliField("msg_" + uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity.turn+":instructions")).String())}}, input...)
 		// Keep the empty field for Codex backends that require its presence.
 		body["instructions"] = cliField("")
 	}
@@ -347,7 +396,7 @@ func shapeCodexBody(body cliObject, identity cliIdentity) error {
 		}
 		item["type"] = cliField("message")
 		if _, ok := item["id"]; !ok {
-			item["id"] = cliField("msg_" + uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf("%s:%d", identity.turn, i))).String())
+			item["id"] = cliField("msg_" + isolatedCLIUUID(identity.turn, fmt.Sprintf("message:%d", i), 7, identity.startedAt))
 		}
 	}
 	if raw, ok := body["tools"]; ok && string(raw) != "null" {
@@ -359,7 +408,8 @@ func shapeCodexBody(body cliObject, identity cliIdentity) error {
 			return err
 		}
 		if len(tools) > 0 {
-			input = append([]cliObject{{"type": cliField("additional_tools"), "role": cliField("developer"), "id": cliField("tools_" + identity.turn), "tools": cliField(tools)}}, input...)
+			input = append([]cliObject{{"type": cliField("additional_tools"), "role": cliField("developer"),
+				"id": cliField("at_" + uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity.turn+":tools")).String()), "tools": cliField(tools)}}, input...)
 		}
 		delete(body, "tools")
 	}
@@ -383,10 +433,18 @@ func shapeCodexBody(body cliObject, identity cliIdentity) error {
 	// service_tier=priority is a paid routing choice, not a structural default.
 	// Keep explicit tier, max_output_tokens, and reasoning settings unchanged.
 	body["prompt_cache_key"] = cliField(identity.session)
-	turnMetadata := map[string]string{
+	// Preserve the capture's field set and JSON scalar types, including the
+	// nested JSON string. These are client metadata, not gateway permissions.
+	// Identifiers and the turn timestamp always come from this isolated request.
+	turnMetadata := map[string]any{
 		"installation_id": identity.installation, "session_id": identity.session,
 		"thread_id": identity.session, "turn_id": identity.turn, "root_turn_id": identity.turn,
 		"window_id": identity.window, "request_kind": "turn",
+		"context_window_id": identity.contextWindow, "turn_started_at_unix_ms": identity.startedAt,
+		"agent_name": "/root", "window_number": 0, "thread_source": "user", "turn_trigger": "exec",
+		"sandbox": "windows_elevated", "sandbox_mode": "workspace-write",
+		"auto_review_enabled": false, "node_repl_auto_review_required": true,
+		"node_repl_disabled": false, "analytics_enabled": true,
 		"model": gjson.ParseBytes(body["model"]).String(), "reasoning_effort": gjson.GetBytes(body["reasoning"], "effort").String(),
 	}
 	body["client_metadata"] = cliField(map[string]string{
