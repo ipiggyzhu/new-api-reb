@@ -5377,6 +5377,10 @@
     "models in catalog": "modèles au catalogue",
     "providers": "fournisseurs",
     "API endpoint types": "types de points d'accès API",
-    "tokens routed this week": "tokens routés cette semaine"
+    "tokens routed this week": "tokens routés cette semaine",
+    "Responses Reasoning Compatibility": "Compatibilité du raisonnement Responses",
+    "Retry HTTP 400 invalid_encrypted_content once without old reasoning ciphertext and IDs. Preserve visible history, summaries and requested effort; reset hidden reasoning. Skip compacted or server-side history. Off by default.": "Après une erreur HTTP 400 invalid_encrypted_content, réessayer une fois sans les anciens raisonnements chiffrés ni leurs identifiants. Conserver l’historique visible, les résumés et l’effort demandé ; réinitialiser le raisonnement caché. Exclure les historiques compactés ou référencés côté serveur. Désactivé par défaut.",
+    "Fix Responses Effort to High": "Fixer l’effort Responses sur high",
+    "Force outgoing Responses effort and existing Codex turn metadata to high, including body passthrough. Overrides effort settings only; preserves history and identity. Does not rewrite upstream replies or guarantee provider behavior. Off by default.": "Fixe l’effort Responses sortant et les métadonnées de tour Codex existantes sur high, même en transmission directe du corps. Ne remplace que l’effort ; conserve l’historique et l’identité. Ne modifie pas les réponses amont et ne garantit pas le comportement du fournisseur. Désactivé par défaut."
   }
 }

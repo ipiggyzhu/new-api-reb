@@ -113,6 +113,62 @@ describe('explicit channel client profiles', () => {
   })
 })
 
+describe('Responses reasoning compatibility setting', () => {
+  test('defaults off and survives create, reopen, update and disable', () => {
+    const form = transformChannelToFormDefaults(channelWithSettings(1, {}))
+    assert.equal(form.responses_reasoning_fallback, false)
+    form.responses_reasoning_fallback = true
+    const created = JSON.parse(
+      transformFormDataToCreatePayload(form).channel.setting ?? '{}'
+    )
+    assert.equal(created.responses_reasoning_fallback, true)
+    const reopened = transformChannelToFormDefaults(
+      channelWithSettings(1, created)
+    )
+    assert.equal(reopened.responses_reasoning_fallback, true)
+    const saved = JSON.parse(
+      transformFormDataToUpdatePayload(reopened, 25).setting ?? '{}'
+    )
+    assert.equal(saved.responses_reasoning_fallback, true)
+    reopened.responses_reasoning_fallback = false
+    const disabled = JSON.parse(
+      transformFormDataToUpdatePayload(reopened, 25).setting ?? '{}'
+    )
+    assert.equal(disabled.responses_reasoning_fallback, false)
+  })
+})
+
+describe('Responses fixed high effort setting', () => {
+  test('defaults off and remains independent of compatibility and synthesis', () => {
+    const form = transformChannelToFormDefaults(channelWithSettings(1, {}))
+    assert.equal(form.responses_force_high_effort, false)
+    form.responses_force_high_effort = true
+    form.responses_reasoning_fallback = true
+    form.pass_through_body_enabled = true
+    const created = JSON.parse(
+      transformFormDataToCreatePayload(form).channel.setting ?? '{}'
+    )
+    assert.equal(created.responses_force_high_effort, true)
+    assert.equal(created.responses_reasoning_fallback, true)
+    assert.equal(created.synthetic_client_headers_profile, '')
+    const reopened = transformChannelToFormDefaults(
+      channelWithSettings(1, created)
+    )
+    assert.equal(reopened.responses_force_high_effort, true)
+    assert.equal(reopened.pass_through_body_enabled, true)
+    const updated = JSON.parse(
+      transformFormDataToUpdatePayload(reopened, 25).setting ?? '{}'
+    )
+    assert.equal(updated.responses_force_high_effort, true)
+    reopened.responses_force_high_effort = false
+    const disabled = JSON.parse(
+      transformFormDataToUpdatePayload(reopened, 25).setting ?? '{}'
+    )
+    assert.equal(disabled.responses_force_high_effort, false)
+    assert.equal(disabled.responses_reasoning_fallback, true)
+  })
+})
+
 describe('channel TLS fingerprint override', () => {
   test('a saved fingerprint reopens as an enabled override and survives saving', () => {
     const form = transformChannelToFormDefaults(

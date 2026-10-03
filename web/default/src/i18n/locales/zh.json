@@ -5381,6 +5381,10 @@
     "models in catalog": "目录内模型",
     "providers": "供应商",
     "API endpoint types": "API 端点类型",
-    "tokens routed this week": "本周路由 tokens"
+    "tokens routed this week": "本周路由 tokens",
+    "Responses Reasoning Compatibility": "Responses 旧会话推理兼容",
+    "Retry HTTP 400 invalid_encrypted_content once without old reasoning ciphertext and IDs. Preserve visible history, summaries and requested effort; reset hidden reasoning. Skip compacted or server-side history. Off by default.": "仅遇到 HTTP 400 invalid_encrypted_content 时，不携带旧推理密文及其 ID 重试一次。保留可见历史、推理摘要和请求的推理强度，但重置旧隐藏推理。跳过含压缩记录或服务端历史引用的请求。默认关闭。",
+    "Fix Responses Effort to High": "Responses 请求固定 high",
+    "Force outgoing Responses effort and existing Codex turn metadata to high, including body passthrough. Overrides effort settings only; preserves history and identity. Does not rewrite upstream replies or guarantee provider behavior. Off by default.": "将发往上游的 Responses 推理强度及现有 Codex 回合元数据固定为 high，透传请求体时也生效。仅覆盖强度，保留历史和会话标识；不篡改上游回包，也不保证上游实际执行档位。默认关闭。"
   }
 }

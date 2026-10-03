@@ -191,7 +191,14 @@ func buildUpstreamRequestBody(c *gin.Context, info *relaycommon.RelayInfo, jsonD
 // set, a text/event-stream upstream response switches the relay to stream mode
 // before the status check.
 func doUpstreamRoundTrip(c *gin.Context, info *relaycommon.RelayInfo, adaptor channel.Adaptor, requestBody io.Reader, detectEventStream bool) (any, *types.NewAPIError) {
-	resp, err := adaptor.DoRequest(c, info, requestBody)
+	var resp any
+	var err error
+	var rememberReasoningFallback func()
+	if info.RelayMode == relayconstant.RelayModeResponses && info.ChannelSetting.ResponsesReasoningFallback {
+		resp, rememberReasoningFallback, err = doResponsesReasoningFallback(c, info, adaptor, requestBody)
+	} else {
+		resp, err = adaptor.DoRequest(c, info, requestBody)
+	}
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
 	}
@@ -216,6 +223,12 @@ func doUpstreamRoundTrip(c *gin.Context, info *relaycommon.RelayInfo, adaptor ch
 		// reset status code 重置状态码
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 		return nil, newAPIError
+	}
+	// A partially delivered failed stream can return usage without an error so
+	// billing still settles. It is not evidence of a completed recovery.
+	if rememberReasoningFallback != nil && (!info.IsStream ||
+		(info.StreamStatus.IsNormalEnd() && info.StreamStatus.FailureError() == nil)) {
+		rememberReasoningFallback()
 	}
 	return usage, nil
 }

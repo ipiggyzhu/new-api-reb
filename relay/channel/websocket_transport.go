@@ -565,6 +565,11 @@ func TryResponsesWebsocket(a Adaptor, c *gin.Context, info *common.RelayInfo, re
 	for key, value := range headerOverride {
 		header.Set(key, value)
 	}
+	if forced, err := forceResponsesHighEffort(info, httpURL, bytes.NewReader(body), header); err != nil {
+		return nil, err
+	} else if forced != nil {
+		body = forced
+	}
 	stripHTTPOnlyHandshakeHeaders(header)
 	applyResponsesWebsocketBetaHeader(header)
 

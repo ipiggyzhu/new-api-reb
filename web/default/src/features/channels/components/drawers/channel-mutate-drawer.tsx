@@ -285,6 +285,8 @@ const SENSITIVE_FORM_FIELDS = [
   'thinking_to_content',
   'proxy',
   'pass_through_body_enabled',
+  'responses_reasoning_fallback',
+  'responses_force_high_effort',
   'websocket_transport',
   'synthetic_client_headers',
   'synthetic_client_headers_profile',
@@ -347,6 +349,8 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.force_format ||
     values.thinking_to_content ||
     values.pass_through_body_enabled ||
+    values.responses_reasoning_fallback ||
+    values.responses_force_high_effort ||
     values.websocket_transport ||
     (values.synthetic_client_headers_profile ?? 'off') !== 'off' ||
     values.custom_client_identity_enabled ||
@@ -4184,6 +4188,56 @@ export function ChannelMutateDrawer({
                                     <FormControl>
                                       <Switch
                                         checked={field.value}
+                                        onCheckedChange={field.onChange}
+                                      />
+                                    </FormControl>
+                                  </FormItem>
+                                )}
+                              />
+
+                              <FormField
+                                control={form.control}
+                                name='responses_reasoning_fallback'
+                                render={({ field }) => (
+                                  <FormItem className='flex items-center justify-between gap-3 px-4 py-3'>
+                                    <div className='space-y-0.5'>
+                                      <FormLabel>
+                                        {t('Responses Reasoning Compatibility')}
+                                      </FormLabel>
+                                      <FormDescription>
+                                        {t(
+                                          'Retry HTTP 400 invalid_encrypted_content once without old reasoning ciphertext and IDs. Preserve visible history, summaries and requested effort; reset hidden reasoning. Skip compacted or server-side history. Off by default.'
+                                        )}
+                                      </FormDescription>
+                                    </div>
+                                    <FormControl>
+                                      <Switch
+                                        checked={field.value ?? false}
+                                        onCheckedChange={field.onChange}
+                                      />
+                                    </FormControl>
+                                  </FormItem>
+                                )}
+                              />
+
+                              <FormField
+                                control={form.control}
+                                name='responses_force_high_effort'
+                                render={({ field }) => (
+                                  <FormItem className='flex items-center justify-between gap-3 px-4 py-3'>
+                                    <div className='space-y-0.5'>
+                                      <FormLabel>
+                                        {t('Fix Responses Effort to High')}
+                                      </FormLabel>
+                                      <FormDescription>
+                                        {t(
+                                          'Force outgoing Responses effort and existing Codex turn metadata to high, including body passthrough. Overrides effort settings only; preserves history and identity. Does not rewrite upstream replies or guarantee provider behavior. Off by default.'
+                                        )}
+                                      </FormDescription>
+                                    </div>
+                                    <FormControl>
+                                      <Switch
+                                        checked={field.value ?? false}
                                         onCheckedChange={field.onChange}
                                       />
                                     </FormControl>

@@ -5377,6 +5377,10 @@
     "models in catalog": "カタログ内モデル",
     "providers": "プロバイダー",
     "API endpoint types": "APIエンドポイント種別",
-    "tokens routed this week": "今週ルーティングしたトークン"
+    "tokens routed this week": "今週ルーティングしたトークン",
+    "Responses Reasoning Compatibility": "Responses の推論互換性",
+    "Retry HTTP 400 invalid_encrypted_content once without old reasoning ciphertext and IDs. Preserve visible history, summaries and requested effort; reset hidden reasoning. Skip compacted or server-side history. Off by default.": "HTTP 400 invalid_encrypted_content の場合のみ、過去の推論暗号文と ID を除いて一度再試行します。表示可能な履歴、要約、要求した推論強度は保持し、非表示の推論はリセットします。圧縮済み履歴やサーバー側の履歴参照を含む場合は対象外です。既定では無効です。",
+    "Fix Responses Effort to High": "Responses のリクエスト強度を high に固定",
+    "Force outgoing Responses effort and existing Codex turn metadata to high, including body passthrough. Overrides effort settings only; preserves history and identity. Does not rewrite upstream replies or guarantee provider behavior. Off by default.": "送信する Responses の推論強度と既存の Codex ターンメタデータを high に固定します。本文のパススルー時にも適用されます。強度のみを上書きし、履歴とセッション識別情報を保持します。上流の応答は変更せず、プロバイダーの実際の動作は保証しません。既定は無効です。"
   }
 }

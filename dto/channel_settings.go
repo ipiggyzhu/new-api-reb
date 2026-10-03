@@ -82,6 +82,16 @@ type ChannelSettings struct {
 	// wins over this flag; the switch stays on so the admin can see what they
 	// asked for. Read the pair through relay/channel, never this field alone.
 	WebsocketTransport bool `json:"websocket_transport,omitempty"`
+
+	// ResponsesReasoningFallback retries an HTTP invalid_encrypted_content once
+	// without the rejected request's reasoning ciphertext/IDs. Visible history,
+	// summaries and requested effort are preserved, but hidden reasoning is not.
+	// Off by default. Compaction and server-side history references are excluded.
+	ResponsesReasoningFallback bool `json:"responses_reasoning_fallback,omitempty"`
+	// ResponsesForceHighEffort pins outgoing Responses requests and existing
+	// Codex turn metadata to high, including passthrough. It never rewrites the
+	// upstream response or guarantees the provider's actual computation budget.
+	ResponsesForceHighEffort bool `json:"responses_force_high_effort,omitempty"`
 }
 
 // SyntheticClientHeadersProfileAuto is accepted only for legacy configuration.

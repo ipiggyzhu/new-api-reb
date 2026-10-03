@@ -124,6 +124,8 @@ export interface ChannelSettings {
   thinking_to_content?: boolean
   proxy?: string
   pass_through_body_enabled?: boolean
+  responses_reasoning_fallback?: boolean
+  responses_force_high_effort?: boolean
   /** @deprecated superseded by synthetic_client_headers_profile; kept in sync by the backend */
   synthetic_client_headers?: boolean
   /** '' off, or an explicit client family; legacy 'auto' is normalized on read/save */

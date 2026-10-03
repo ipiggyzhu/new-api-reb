@@ -5377,6 +5377,10 @@
     "models in catalog": "моделей в каталоге",
     "providers": "провайдеров",
     "API endpoint types": "типов API-эндпоинтов",
-    "tokens routed this week": "токенов за неделю"
+    "tokens routed this week": "токенов за неделю",
+    "Responses Reasoning Compatibility": "Совместимость рассуждений Responses",
+    "Retry HTTP 400 invalid_encrypted_content once without old reasoning ciphertext and IDs. Preserve visible history, summaries and requested effort; reset hidden reasoning. Skip compacted or server-side history. Off by default.": "При HTTP 400 invalid_encrypted_content повторить запрос один раз без старых зашифрованных рассуждений и их ID. Сохранить видимую историю, сводки и запрошенную интенсивность; сбросить скрытые рассуждения. Не применять к сжатой истории и ссылкам на серверную историю. По умолчанию выключено.",
+    "Fix Responses Effort to High": "Фиксировать усилие Responses на high",
+    "Force outgoing Responses effort and existing Codex turn metadata to high, including body passthrough. Overrides effort settings only; preserves history and identity. Does not rewrite upstream replies or guarantee provider behavior. Off by default.": "Фиксирует усилие исходящих запросов Responses и существующие метаданные ходов Codex на high, в том числе при сквозной передаче тела. Меняет только усилие, сохраняя историю и идентификаторы. Не изменяет ответы сервера и не гарантирует поведение провайдера. По умолчанию выключено."
   }
 }

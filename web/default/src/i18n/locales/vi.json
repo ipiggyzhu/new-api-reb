@@ -5377,6 +5377,10 @@
     "models in catalog": "mô hình trong danh mục",
     "providers": "nhà cung cấp",
     "API endpoint types": "loại điểm cuối API",
-    "tokens routed this week": "token đã định tuyến tuần này"
+    "tokens routed this week": "token đã định tuyến tuần này",
+    "Responses Reasoning Compatibility": "Tương thích suy luận Responses",
+    "Retry HTTP 400 invalid_encrypted_content once without old reasoning ciphertext and IDs. Preserve visible history, summaries and requested effort; reset hidden reasoning. Skip compacted or server-side history. Off by default.": "Chỉ thử lại một lần khi gặp HTTP 400 invalid_encrypted_content, bỏ bản mã suy luận cũ và ID của chúng. Giữ lịch sử hiển thị, tóm tắt và mức suy luận đã yêu cầu; đặt lại suy luận ẩn. Bỏ qua lịch sử đã nén hoặc tham chiếu lịch sử phía máy chủ. Mặc định tắt.",
+    "Fix Responses Effort to High": "Cố định mức suy luận Responses ở high",
+    "Force outgoing Responses effort and existing Codex turn metadata to high, including body passthrough. Overrides effort settings only; preserves history and identity. Does not rewrite upstream replies or guarantee provider behavior. Off by default.": "Cố định mức suy luận Responses gửi đi và siêu dữ liệu lượt Codex hiện có ở high, kể cả khi chuyển tiếp nguyên phần thân. Chỉ ghi đè mức suy luận; giữ lịch sử và danh tính phiên. Không sửa phản hồi từ nhà cung cấp và không bảo đảm cách thực thi thực tế. Mặc định tắt."
   }
 }

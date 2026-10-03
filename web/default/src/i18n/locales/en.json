@@ -5381,6 +5381,10 @@
     "models in catalog": "models in catalog",
     "providers": "providers",
     "API endpoint types": "API endpoint types",
-    "tokens routed this week": "tokens routed this week"
+    "tokens routed this week": "tokens routed this week",
+    "Responses Reasoning Compatibility": "Responses Reasoning Compatibility",
+    "Retry HTTP 400 invalid_encrypted_content once without old reasoning ciphertext and IDs. Preserve visible history, summaries and requested effort; reset hidden reasoning. Skip compacted or server-side history. Off by default.": "Retry HTTP 400 invalid_encrypted_content once without old reasoning ciphertext and IDs. Preserve visible history, summaries and requested effort; reset hidden reasoning. Skip compacted or server-side history. Off by default.",
+    "Fix Responses Effort to High": "Fix Responses Effort to High",
+    "Force outgoing Responses effort and existing Codex turn metadata to high, including body passthrough. Overrides effort settings only; preserves history and identity. Does not rewrite upstream replies or guarantee provider behavior. Off by default.": "Force outgoing Responses effort and existing Codex turn metadata to high, including body passthrough. Overrides effort settings only; preserves history and identity. Does not rewrite upstream replies or guarantee provider behavior. Off by default."
   }
 }
