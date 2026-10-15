@@ -123,6 +123,9 @@ func buildChannelCacheSnapshot() (*channelCacheSnapshot, bool) {
 				newGroup2model2channels[group] = make(map[string][]int)
 			}
 			for _, model := range strings.Split(channel.Models, ",") {
+				if strings.TrimSpace(model) == "" {
+					continue
+				}
 				if _, duplicate := seenGroupModel[group+"|"+model]; duplicate {
 					continue
 				}
@@ -390,6 +393,9 @@ func CacheUpdateChannelStatus(id int, status int) {
 				group2model2channels[group] = model2channels
 			}
 			for _, model := range strings.Split(channel.Models, ",") {
+				if strings.TrimSpace(model) == "" {
+					continue
+				}
 				channels := model2channels[model]
 				if isChannelIDInList(channels, id) {
 					continue

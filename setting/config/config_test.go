@@ -213,7 +213,7 @@ func TestUpdateConfigFromMap_InvalidSliceKeepsCurrentValue(t *testing.T) {
 	cfg := defaultSliceConfig()
 	want := defaultSliceConfig().Rules
 
-	require.NoError(t, UpdateConfigFromMap(cfg, map[string]string{"rules": `{not json`}))
+	require.Error(t, UpdateConfigFromMap(cfg, map[string]string{"rules": `{not json`}))
 
 	assert.Equal(t, want, cfg.Rules, "an unparsable value must not clear the slice")
 }
@@ -230,4 +230,49 @@ func TestUpdateConfigFromMap_StructMergesInPlace(t *testing.T) {
 
 	assert.Equal(t, testNestedStruct{Host: "upstream.internal", Port: 9090}, cfg.Target,
 		"host was absent from the stored JSON and must survive the merge")
+}
+
+// Invalid settings must be reported without applying any portion of the update.
+func TestUpdateConfigFromMapRejectsInvalidValuesAtomically(t *testing.T) {
+	type scalarConfig struct {
+		Name    string            `json:"name"`
+		Enabled bool              `json:"enabled"`
+		Count   int8              `json:"count"`
+		Limit   uint8             `json:"limit"`
+		Ratio   float64           `json:"ratio"`
+		Modes   map[string]string `json:"modes"`
+		Target  *testNestedStruct `json:"target"`
+	}
+	cases := []struct{ key, value string }{
+		{"enabled", "not-a-bool"},
+		{"count", "not-a-number"},
+		{"count", "128"},
+		{"count", "1.5"},
+		{"limit", "-1"},
+		{"limit", "256"},
+		{"ratio", "NaN"},
+		{"ratio", "+Inf"},
+		{"modes", `{"model": 123}`},
+		{"target", `{"host":"changed","port":"invalid"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
+			target := &testNestedStruct{Host: "original", Port: 8080}
+			cfg := &scalarConfig{Name: "original", Enabled: true, Count: 3, Limit: 5, Ratio: 1, Modes: map[string]string{"model": "ratio"}, Target: target}
+			want := *cfg
+			require.Error(t, UpdateConfigFromMap(cfg, map[string]string{"name": "changed", tc.key: tc.value}))
+			assert.Equal(t, want, *cfg)
+			assert.Equal(t, testNestedStruct{Host: "original", Port: 8080}, *target)
+		})
+	}
+}
+
+func TestUpdateConfigFromMapAcceptsLegacyIntegralFloats(t *testing.T) {
+	cfg := &struct {
+		Count int  `json:"count"`
+		Limit uint `json:"limit"`
+	}{Count: 1, Limit: 1}
+	require.NoError(t, UpdateConfigFromMap(cfg, map[string]string{"count": "2.000000", "limit": "3.0"}))
+	assert.Equal(t, 2, cfg.Count)
+	assert.Equal(t, uint(3), cfg.Limit)
 }

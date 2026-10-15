@@ -20,166 +20,76 @@ import { useQuery } from '@tanstack/react-query'
 import { useFormContext, useWatch } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 
-import {
-  FormControl,
-  FormDescription,
-  FormField,
-  FormItem,
-  FormLabel,
-} from '@/components/ui/form'
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
-import { Switch } from '@/components/ui/switch'
+import { Button } from '@/components/ui/button'
 
 import { getChannelTLSFingerprints } from '../../../api'
 import { channelsQueryKeys } from '../../../lib/channel-actions'
 import type { ChannelFormValues } from '../../../lib/channel-form'
 
-/**
- * TLS fingerprint override for a channel. Off, the handshake follows the
- * synthetic client header profile (Claude Code / Codex headers bring that
- * CLI's captured handshake). A Node override also updates only the runtime
- * declarations that exist in the Claude sample; body and identities stay put.
- */
+// Legacy overrides are displayed, never silently migrated or offered as new
+// choices. CLI versions are the single selection point for complete profiles.
 export function ChannelTLSFingerprintFields() {
   const { t } = useTranslation()
   const form = useFormContext<ChannelFormValues>()
-  const headerProfile = useWatch({
+  const [family, enabled, fingerprint] = useWatch({
     control: form.control,
-    name: 'synthetic_client_headers_profile',
+    name: [
+      'synthetic_client_headers_profile',
+      'tls_fingerprint_enabled',
+      'tls_fingerprint',
+    ],
   })
-  const enabled = useWatch({
-    control: form.control,
-    name: 'tls_fingerprint_enabled',
-  })
-
-  const { data } = useQuery({
+  const { data, isError } = useQuery({
     queryKey: channelsQueryKeys.tlsFingerprints(),
     queryFn: getChannelTLSFingerprints,
     staleTime: Infinity,
   })
-  const fingerprint = useWatch({
-    control: form.control,
-    name: 'tls_fingerprint',
-  })
   const options = data?.data ?? []
-  const legacySelection = Boolean(
-    data?.success &&
-    fingerprint &&
-    !options.some((option) => option.id === fingerprint)
-  )
-  const items = options.map((option) => ({
-    value: option.id,
-    label: option.label,
-  }))
-  if (legacySelection && fingerprint) {
-    items.unshift({
-      value: fingerprint,
-      label: t('Saved legacy TLS preset: {{id}}', { id: fingerprint }),
-    })
-  }
-  const followed = options.find(
-    (option) =>
-      option.client_family !== undefined &&
-      option.client_family === headerProfile
-  )
-
-  // Until the backend list arrives nothing can say which handshake the headers
-  // imply, so no description is shown rather than a wrong one.
-  let followedDescription = ''
-  if (followed) {
-    followedDescription = t(
-      'Off: follows the client headers and uses the {{label}} handshake.',
-      { label: followed.label }
-    )
+  const hasLegacy = Boolean(enabled && fingerprint)
+  const effective = hasLegacy
+    ? options.find((option) => option.id === fingerprint)
+    : options.find((option) => option.client_family === family)
+  let label = t('Loading...')
+  if (hasLegacy) {
+    label = effective?.label ?? fingerprint ?? ''
   } else if (data?.success) {
-    followedDescription = t(
-      'Off: no captured handshake matches the client headers, so the default Go handshake is used.'
-    )
+    label = effective?.label ?? t('Default Go TLS handshake')
+  } else if (isError) {
+    label = t('Failed to load TLS fingerprints')
   }
 
   return (
-    <>
-      <FormField
-        control={form.control}
-        name='tls_fingerprint_enabled'
-        render={({ field }) => (
-          <FormItem className='px-4 py-3'>
-            <div className='flex items-center justify-between'>
-              <div className='space-y-0.5'>
-                <FormLabel>{t('Custom TLS Fingerprint')}</FormLabel>
-                {followedDescription && (
-                  <FormDescription>{followedDescription}</FormDescription>
-                )}
-              </div>
-              <FormControl>
-                <Switch
-                  checked={field.value ?? false}
-                  onCheckedChange={(checked) => {
-                    field.onChange(checked)
-                    if (checked && !form.getValues('tls_fingerprint')) {
-                      form.setValue(
-                        'tls_fingerprint',
-                        followed?.id ?? options[0]?.id ?? '',
-                        { shouldDirty: true }
-                      )
-                    }
-                  }}
-                />
-              </FormControl>
-            </div>
-          </FormItem>
-        )}
-      />
-
-      {enabled && (
-        <FormField
-          control={form.control}
-          name='tls_fingerprint'
-          render={({ field }) => (
-            <FormItem className='px-4 py-3'>
-              <FormLabel>{t('TLS Fingerprint')}</FormLabel>
-              <Select
-                items={items}
-                onValueChange={field.onChange}
-                value={field.value ?? ''}
-              >
-                <FormControl>
-                  <SelectTrigger className='w-full sm:w-72'>
-                    <SelectValue placeholder={t('Select TLS fingerprint')} />
-                  </SelectTrigger>
-                </FormControl>
-                <SelectContent alignItemWithTrigger={false}>
-                  <SelectGroup>
-                    {items.map((option) => (
-                      <SelectItem
-                        key={option.value}
-                        value={option.value}
-                        disabled={
-                          legacySelection && option.value === fingerprint
-                        }
-                      >
-                        {option.label}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-              <FormDescription>
-                {t(
-                  'TLS and existing Claude runtime headers follow the preset. Prompt, tools and identities stay unchanged. Different Node versions may share a handshake shape.'
-                )}
-              </FormDescription>
-            </FormItem>
+    <div className='space-y-2 px-4 py-3'>
+      <p className='text-sm font-medium'>{t('Effective TLS')}</p>
+      <p className='text-muted-foreground text-sm'>{label}</p>
+      {hasLegacy ? (
+        <>
+          <p className='text-warning text-xs'>
+            {t(
+              'A saved legacy TLS override is still active and may not match the client type. Opening or saving this form will not migrate it. Select a CLI version or explicitly restore matching TLS below.'
+            )}
+          </p>
+          <Button
+            type='button'
+            variant='outline'
+            size='sm'
+            onClick={() => {
+              form.setValue('tls_fingerprint', '', { shouldDirty: true })
+              form.setValue('tls_fingerprint_enabled', false, {
+                shouldDirty: true,
+              })
+            }}
+          >
+            {t('Restore TLS matching the client type')}
+          </Button>
+        </>
+      ) : (
+        <p className='text-muted-foreground text-xs'>
+          {t(
+            'TLS follows the client type. Select a CLI version above to pin TLS, headers and JSON layout together.'
           )}
-        />
+        </p>
       )}
-    </>
+    </div>
   )
 }

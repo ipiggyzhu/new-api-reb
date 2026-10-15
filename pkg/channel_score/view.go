@@ -56,7 +56,7 @@ type ScoreSnapshot struct {
 
 	// InstanceLocal and Complete describe the rows' scope. Without Redis the local
 	// store is the whole truth. With Redis these rows are a mirror of the keys this
-	// process happened to touch, and publishLocal only ever mirrors tierOffset,
+	// process observed through routing, and the mirror only contains tierOffset,
 	// total and success — so ConsecutiveSuccess and FaultCount are absent and other
 	// instances' keys are missing entirely.
 	InstanceLocal bool `json:"instance_local"`
@@ -111,10 +111,9 @@ func parseScoreKey(key string) (channelId int, group string, model string, ok bo
 
 // Snapshot copies the current scores out of the store.
 //
-// Strictly non-mutating: it only Ranges the map and copies under each entry's
-// existing lock. It must never call LoadOrStore or entryGeneration, both of which
-// create entries — a diagnostic read that materialized rows would change what a
-// later Reset has to clear.
+// Redis mirrors are refreshed before copying so another instance's reset also
+// reaches diagnostics and projections. Only existing entries are refreshed; a
+// diagnostic read never invents routes that this instance has not observed.
 //
 // Rows with nothing published yet are skipped: they carry no observable score.
 func Snapshot(filter ScoreFilter) ScoreSnapshot {
@@ -128,6 +127,15 @@ func Snapshot(filter ScoreFilter) ScoreSnapshot {
 	// Without Redis the in-process store is authoritative and every field is real.
 	result.InstanceLocal = result.RedisConfigured
 	result.Complete = !result.RedisConfigured
+
+	if result.RedisConfigured && result.Usable {
+		keys := make([]string, 0)
+		localStore.Range(func(key, _ any) bool {
+			keys = append(keys, key.(string))
+			return true
+		})
+		result.Usable = refreshShared(keys)
+	}
 
 	now := nowFunc().Unix()
 	localStore.Range(func(key, value any) bool {

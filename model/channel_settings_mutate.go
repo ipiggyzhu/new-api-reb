@@ -2,9 +2,12 @@ package model
 
 import (
 	"fmt"
+	"reflect"
 	"sync"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"gorm.io/gorm"
 )
 
 // The `settings` column holds three groups of fields with three different owners:
@@ -39,6 +42,83 @@ func channelSettingsLock(channelId int) *sync.Mutex {
 	}
 	actual, _ := channelSettingsLocks.LoadOrStore(channelId, &sync.Mutex{})
 	return actual.(*sync.Mutex)
+}
+
+// ApplyChannelModelSweep commits a validated catalogue, its routes, and a
+// confirmed-empty channel's disabled status together.
+// A channel disabled or edited during network probes must not receive stale results.
+func ApplyChannelModelSweep(expected *Channel, models string, modelMapping *string, disableIfEmpty bool) (bool, error) {
+	lock := channelSettingsLock(expected.Id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	var current Channel
+	applied := false
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).First(&current, expected.Id).Error; err != nil {
+			return err
+		}
+		if current.Status != common.ChannelStatusEnabled {
+			return nil
+		}
+		if current.Models != expected.Models || current.GetModelMapping() != expected.GetModelMapping() ||
+			current.Key != expected.Key || current.Type != expected.Type || current.GetBaseURL() != expected.GetBaseURL() ||
+			current.Other != expected.Other || !reflect.DeepEqual(current.Setting, expected.Setting) ||
+			!reflect.DeepEqual(current.ParamOverride, expected.ParamOverride) || !reflect.DeepEqual(current.HeaderOverride, expected.HeaderOverride) {
+			return fmt.Errorf("channel %d configuration changed during model validation; results not applied", expected.Id)
+		}
+		current.Models = models
+		columns := map[string]any{"models": models}
+		if disableIfEmpty && len(current.GetModels()) == 0 {
+			current.Status = common.ChannelStatusAutoDisabled
+			info := current.GetOtherInfo()
+			info["status_reason"] = "Model availability sync found no available models"
+			info["status_time"] = common.GetTimestamp()
+			current.SetOtherInfo(info)
+			columns["status"] = current.Status
+			columns["other_info"] = current.OtherInfo
+		}
+		settings := current.GetOtherSettings()
+		if settings.UpstreamModelUpdateModelHealth == nil {
+			settings.UpstreamModelUpdateModelHealth = make(map[string]dto.ModelHealthState)
+		}
+		remaining := make(map[string]bool)
+		for _, name := range current.GetModels() {
+			remaining[name] = true
+			delete(settings.UpstreamModelUpdateModelHealth, name)
+		}
+		for _, name := range expected.GetModels() {
+			if !remaining[name] {
+				// Keep removed names as retry candidates, not as routable abilities.
+				// Some upstreams have no usable /models endpoint at all.
+				settings.UpstreamModelUpdateModelHealth[name] = dto.ModelHealthState{Failures: 1, LastFailureTime: common.GetTimestamp()}
+			}
+		}
+		settings.UpstreamModelUpdateLastCheckTime = common.GetTimestamp()
+		current.SetOtherSettings(settings)
+		columns["settings"] = current.OtherSettings
+		if modelMapping != nil {
+			current.ModelMapping = modelMapping
+			columns["model_mapping"] = *modelMapping
+		}
+		if err := tx.Model(&Channel{}).Where("id = ?", current.Id).Updates(columns).Error; err != nil {
+			return err
+		}
+		if err := current.UpdateAbilities(tx); err != nil {
+			return err
+		}
+		applied = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	if applied {
+		CacheUpdateChannel(&current)
+		// The model plaza caches pricing even when channel routing uses the DB.
+		InitChannelCache()
+	}
+	return applied, nil
 }
 
 // MutateChannelSettings applies mutate to a channel's freshly loaded settings and

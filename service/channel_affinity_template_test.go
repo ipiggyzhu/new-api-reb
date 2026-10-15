@@ -199,7 +199,7 @@ func TestClearCurrentChannelAffinityCache(t *testing.T) {
 	MarkChannelAffinityUsed(ctx, "default", 9527)
 	require.True(t, ShouldSkipRetryAfterChannelAffinityFailure(ctx))
 
-	deleted := ClearCurrentChannelAffinityCache(ctx)
+	deleted := ClearCurrentChannelAffinityCache(ctx, 9527)
 	require.True(t, deleted)
 	_, found, err := cache.Get(cacheKeySuffix)
 	require.NoError(t, err)

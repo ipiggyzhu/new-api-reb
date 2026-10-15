@@ -30,6 +30,16 @@ func ApplyToCandidates(group string, model string, candidates []Candidate) []Can
 		return candidates
 	}
 
+	if redisActive() {
+		keys := make([]string, 0, len(candidates))
+		for _, candidate := range candidates {
+			keys = append(keys, scoreKey(candidate.ChannelId, group, model))
+		}
+		if !refreshShared(keys) {
+			return candidates
+		}
+	}
+
 	tiers := distinctTiersDesc(candidates)
 	adjusted := make([]Candidate, len(candidates))
 	copy(adjusted, candidates)

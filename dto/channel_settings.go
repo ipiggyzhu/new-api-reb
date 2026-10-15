@@ -56,6 +56,9 @@ type ChannelSettings struct {
 	// not which client identity its provider allows. Legacy "auto" values are
 	// resolved to their former default before storage and use.
 	SyntheticClientHeadersProfile string `json:"synthetic_client_headers_profile,omitempty"`
+	// CLIVersionProfile binds a captured CLI release to this channel. Empty
+	// preserves the existing family defaults and legacy TLS-only overrides.
+	CLIVersionProfile string `json:"cli_version_profile,omitempty"`
 
 	// TLSFingerprint selects a captured CLI handshake while synthesis is enabled.
 	// Node presets also update the runtime declarations present in the Claude
@@ -88,10 +91,6 @@ type ChannelSettings struct {
 	// summaries and requested effort are preserved, but hidden reasoning is not.
 	// Off by default. Compaction and server-side history references are excluded.
 	ResponsesReasoningFallback bool `json:"responses_reasoning_fallback,omitempty"`
-	// ResponsesForceHighEffort pins outgoing Responses requests and existing
-	// Codex turn metadata to high, including passthrough. It never rewrites the
-	// upstream response or guarantees the provider's actual computation budget.
-	ResponsesForceHighEffort bool `json:"responses_force_high_effort,omitempty"`
 }
 
 // SyntheticClientHeadersProfileAuto is accepted only for legacy configuration.
@@ -121,6 +120,7 @@ func (s *ChannelSettings) Normalize(apiType int) {
 	// on. Validity is checked at request time (service.GetFingerprintHTTPClient)
 	// because dto cannot import service.
 	s.TLSFingerprint = strings.ToLower(strings.TrimSpace(s.TLSFingerprint))
+	s.CLIVersionProfile = strings.ToLower(strings.TrimSpace(s.CLIVersionProfile))
 	s.ClientDeviceSeed = strings.TrimSpace(s.ClientDeviceSeed)
 	s.ClientSessionSeed = strings.TrimSpace(s.ClientSessionSeed)
 }

@@ -233,3 +233,177 @@ func TestProjectionUsesBaselineTiersAcrossChannels(t *testing.T) {
 			"round %d walked the projection down a tier", round)
 	}
 }
+
+// TestUpdateChannelStatusResetsScoreOnlyOnARealStatusChange: concurrent failures
+// all try to disable the same channel, and a redundant enable can arrive for one
+// that is already enabled. Neither changes the channel, so neither may discard
+// the demotion and projection learned about it.
+func TestUpdateChannelStatusResetsScoreOnlyOnARealStatusChange(t *testing.T) {
+	openProjectionTestDB(t, testChannel(1, 0, 10))
+	require.NoError(t, DB.AutoMigrate(&Ability{}))
+	require.NoError(t, reloadChannel(t, 1).AddAbilities(nil))
+	enableScoringForTest(t)
+	previousMemoryCache := common.MemoryCacheEnabled
+	common.MemoryCacheEnabled = false
+	t.Cleanup(func() { common.MemoryCacheEnabled = previousMemoryCache })
+
+	channel_score.Report(1, "default", "gpt-5.6", channel_score.OutcomeFault)
+	_, err := RunChannelScoreProjection()
+	require.NoError(t, err)
+	require.NotNil(t, reloadChannel(t, 1).EffectivePriority)
+
+	assert.False(t, UpdateChannelStatus(1, "sk-test", common.ChannelStatusEnabled, ""))
+	summaries, _ := channel_score.SummarizeByChannel()
+	assert.Equal(t, 1, summaries[1].Adjusted, "a no-op status update must keep the demotion")
+	assert.NotNil(t, reloadChannel(t, 1).EffectivePriority, "a no-op status update must keep the projection")
+
+	assert.True(t, UpdateChannelStatus(1, "sk-test", common.ChannelStatusAutoDisabled, "401 unauthorized"))
+	summaries, _ = channel_score.SummarizeByChannel()
+	assert.Zero(t, summaries[1].Adjusted)
+	assert.Nil(t, reloadChannel(t, 1).EffectivePriority)
+}
+
+// Failed persistence must leave every reader on the last committed state.
+func TestUpdateChannelStatusPersistenceFailurePreservesRoutingState(t *testing.T) {
+	cases := []struct {
+		name     string
+		cache    bool
+		multiKey bool
+		lastKey  bool
+		failure  string
+	}{
+		{name: "database read", failure: "query"},
+		{name: "cached read", cache: true, failure: "query"},
+		{name: "database save", failure: "update"},
+		{name: "cached save", cache: true, failure: "update"},
+		{name: "database partial key save", multiKey: true, failure: "update"},
+		{name: "cached partial key save", cache: true, multiKey: true, failure: "update"},
+		{name: "database last key save", multiKey: true, lastKey: true, failure: "update"},
+		{name: "cached last key save", cache: true, multiKey: true, lastKey: true, failure: "update"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			channel := testChannel(1, 0, 10)
+			usingKey := "sk-test"
+			if tc.multiKey {
+				channel.Key = "key-a\nkey-b"
+				channel.ChannelInfo = ChannelInfo{IsMultiKey: true, MultiKeySize: 2}
+				usingKey = "key-a"
+				if tc.lastKey {
+					channel.ChannelInfo.MultiKeyStatusList = map[int]int{1: common.ChannelStatusAutoDisabled}
+				}
+			}
+			db := openProjectionTestDB(t, channel)
+			require.NoError(t, db.AutoMigrate(&Ability{}))
+			require.NoError(t, channel.AddAbilities(nil))
+			enableScoringForTest(t)
+			channel_score.Report(1, "default", "gpt-5.6", channel_score.OutcomeFault)
+			_, err := RunChannelScoreProjection()
+			require.NoError(t, err)
+			before := reloadChannel(t, 1)
+			require.NotNil(t, before.EffectivePriority)
+			useChannelCacheForTest(t, []*Channel{before.CloneForCache()}, "default", "gpt-5.6")
+			common.MemoryCacheEnabled = tc.cache
+
+			callback := db.Callback().Update()
+			if tc.failure == "query" {
+				callback = db.Callback().Query()
+			}
+			active, injected := true, false
+			require.NoError(t, callback.Before("gorm:"+tc.failure).Register("test:channel_status_failure", func(tx *gorm.DB) {
+				if _, isChannel := tx.Statement.Dest.(*Channel); active && isChannel {
+					injected = true
+					tx.AddError(fmt.Errorf("injected channel %s failure", tc.failure))
+				}
+			}))
+			t.Cleanup(func() { require.NoError(t, callback.Remove("test:channel_status_failure")) })
+
+			assert.False(t, UpdateChannelStatus(1, usingKey, common.ChannelStatusAutoDisabled, "upstream rejected key"))
+			active = false
+			require.True(t, injected, "the persistence boundary must have been exercised")
+
+			after := reloadChannel(t, 1)
+			assert.Equal(t, common.ChannelStatusEnabled, after.Status)
+			assert.Equal(t, before.ChannelInfo, after.ChannelInfo)
+			assert.Equal(t, before.OtherInfo, after.OtherInfo)
+			assert.Equal(t, before.EffectivePriority, after.EffectivePriority)
+			assert.Equal(t, before.EffectiveWeight, after.EffectiveWeight)
+			summaries, _ := channel_score.SummarizeByChannel()
+			assert.Equal(t, 1, summaries[1].Adjusted, "a failed write must retain the demotion")
+			var ability Ability
+			require.NoError(t, db.First(&ability, "channel_id = ?", 1).Error)
+			assert.True(t, ability.Enabled)
+			cached, err := CacheGetChannel(1)
+			require.NoError(t, err)
+			assert.Equal(t, common.ChannelStatusEnabled, cached.Status)
+			assert.Equal(t, before.ChannelInfo, cached.ChannelInfo)
+			assert.True(t, IsChannelEnabledForGroupModel("default", "gpt-5.6", 1), "failed writes must not remove a live route")
+		})
+	}
+}
+
+func TestUpdateChannelStatusMultiKeyLifecycle(t *testing.T) {
+	for _, cacheEnabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cache=%t", cacheEnabled), func(t *testing.T) {
+			channel := testChannel(1, 0, 10)
+			channel.Key = "key-a\nkey-b"
+			channel.ChannelInfo = ChannelInfo{IsMultiKey: true, MultiKeySize: 2}
+			db := openProjectionTestDB(t, channel)
+			require.NoError(t, db.AutoMigrate(&Ability{}))
+			require.NoError(t, channel.AddAbilities(nil))
+			enableScoringForTest(t)
+			channel_score.Report(1, "default", "gpt-5.6", channel_score.OutcomeFault)
+			_, err := RunChannelScoreProjection()
+			require.NoError(t, err)
+			useChannelCacheForTest(t, []*Channel{reloadChannel(t, 1)}, "default", "gpt-5.6")
+			common.MemoryCacheEnabled = cacheEnabled
+
+			require.True(t, UpdateChannelStatus(1, "key-a", common.ChannelStatusAutoDisabled, "upstream rejected key"))
+			stored := reloadChannel(t, 1)
+			assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+			assert.Equal(t, map[int]int{0: common.ChannelStatusAutoDisabled}, stored.ChannelInfo.MultiKeyStatusList)
+			assert.NotNil(t, stored.EffectivePriority)
+			summaries, _ := channel_score.SummarizeByChannel()
+			assert.Equal(t, 1, summaries[1].Adjusted, "one disabled key must not erase channel-level scores")
+			cached, err := CacheGetChannel(1)
+			require.NoError(t, err)
+			key, _, keyErr := cached.GetNextEnabledKey()
+			require.Nil(t, keyErr)
+			assert.Equal(t, "key-b", key)
+			assert.True(t, IsChannelEnabledForGroupModel("default", "gpt-5.6", 1))
+
+			// An enabled channel can still contain a disabled key that needs restoring.
+			require.True(t, UpdateChannelStatus(1, "key-a", common.ChannelStatusEnabled, ""))
+			assert.Empty(t, reloadChannel(t, 1).ChannelInfo.MultiKeyStatusList)
+			assert.False(t, UpdateChannelStatus(1, "key-a", common.ChannelStatusEnabled, ""), "restoring an already enabled key is a no-op")
+			cached, err = CacheGetChannel(1)
+			require.NoError(t, err)
+			key, _, keyErr = cached.GetNextEnabledKey()
+			require.Nil(t, keyErr)
+			assert.Equal(t, "key-a", key)
+			summaries, _ = channel_score.SummarizeByChannel()
+			assert.Equal(t, 1, summaries[1].Adjusted)
+
+			require.True(t, UpdateChannelStatus(1, "key-a", common.ChannelStatusAutoDisabled, "upstream rejected key"))
+			require.True(t, UpdateChannelStatus(1, "key-b", common.ChannelStatusAutoDisabled, "upstream rejected key"))
+			stored = reloadChannel(t, 1)
+			assert.Equal(t, common.ChannelStatusAutoDisabled, stored.Status)
+			assert.Nil(t, stored.EffectivePriority)
+			assert.Nil(t, stored.EffectiveWeight)
+			summaries, _ = channel_score.SummarizeByChannel()
+			assert.Zero(t, summaries[1].Adjusted)
+			assert.False(t, IsChannelEnabledForGroupModel("default", "gpt-5.6", 1))
+
+			require.True(t, UpdateChannelStatus(1, "key-b", common.ChannelStatusEnabled, ""))
+			stored = reloadChannel(t, 1)
+			assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+			assert.Equal(t, map[int]int{0: common.ChannelStatusAutoDisabled}, stored.ChannelInfo.MultiKeyStatusList)
+			cached, err = CacheGetChannel(1)
+			require.NoError(t, err)
+			key, _, keyErr = cached.GetNextEnabledKey()
+			require.Nil(t, keyErr)
+			assert.Equal(t, "key-b", key)
+			assert.True(t, IsChannelEnabledForGroupModel("default", "gpt-5.6", 1), "a restored key must immediately restore the route")
+		})
+	}
+}

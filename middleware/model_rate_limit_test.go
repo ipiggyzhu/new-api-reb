@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -178,4 +179,33 @@ func TestModelRateLimitHealsLegacySuccessEntries(t *testing.T) {
 		require.Equal(t, http.StatusOK, serveModelRateLimited(limit, userId, http.StatusOK), "request %d over a legacy bucket", i)
 	}
 	assert.Equal(t, http.StatusTooManyRequests, serveModelRateLimited(limit, userId, http.StatusOK), "once refilled, the bucket limits again")
+}
+
+func TestModelRateLimitStreamFailureDoesNotUseSuccessQuota(t *testing.T) {
+	for _, mode := range modelRateLimitModes {
+		t.Run(mode.name, func(t *testing.T) {
+			mode.setup(t)
+			userID := nextModelRateLimitUserId()
+			engine := gin.New()
+			engine.Use(func(c *gin.Context) { c.Set("id", userID) }, mode.handler(60, 0, 1))
+			engine.POST("/v1/chat/completions", func(c *gin.Context) {
+				c.Header("Content-Type", "text/event-stream")
+				c.String(http.StatusOK, "data: partial\n\n")
+				c.Writer.Flush()
+				service.SetChannelAffinityRelayOutcome(c, c.Query("failed") != "true")
+			})
+			for _, request := range []struct {
+				path string
+				want int
+			}{
+				{"/v1/chat/completions?failed=true", http.StatusOK},
+				{"/v1/chat/completions", http.StatusOK},
+				{"/v1/chat/completions", http.StatusTooManyRequests},
+			} {
+				recorder := httptest.NewRecorder()
+				engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, request.path, nil))
+				require.Equal(t, request.want, recorder.Code, request.path)
+			}
+		})
+	}
 }

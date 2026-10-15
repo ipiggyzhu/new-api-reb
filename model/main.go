@@ -345,6 +345,9 @@ func migrateDB() error {
 	if err := migrateChannelClientHeaderProfiles(DB); err != nil {
 		return err
 	}
+	if err := repairChannelModelAvailability(DB); err != nil {
+		return err
+	}
 	repairLogIndexes(DB)
 	return nil
 }
@@ -420,6 +423,9 @@ func migrateDBFast() error {
 	}
 	common.SysLog("database migrated")
 	if err := migrateChannelClientHeaderProfiles(DB); err != nil {
+		return err
+	}
+	if err := repairChannelModelAvailability(DB); err != nil {
 		return err
 	}
 	repairLogIndexes(DB)

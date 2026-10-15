@@ -31,6 +31,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 
 import type { ChannelFormValues } from '../../../lib/channel-form'
+import { ChannelCLIVersionFields } from './channel-cli-version-fields'
 import { ChannelTLSFingerprintFields } from './channel-tls-fingerprint-fields'
 
 export function ChannelClientIdentityFields() {
@@ -49,9 +50,16 @@ export function ChannelClientIdentityFields() {
     name: 'synthetic_client_headers_profile',
   })
   const profileEnabled = (profile ?? 'off') !== 'off'
+  const cliVersion = useWatch({
+    control: form.control,
+    name: 'cli_version_profile',
+  })
+  const hasVersion = Boolean(cliVersion?.startsWith(`${profile}-`))
 
   return (
     <>
+      <ChannelCLIVersionFields />
+      {profileEnabled && !hasVersion && <ChannelTLSFingerprintFields />}
       <FormField
         control={form.control}
         name='custom_client_identity_enabled'
@@ -59,12 +67,10 @@ export function ChannelClientIdentityFields() {
           <FormItem className='px-4 py-3'>
             <div className='flex items-center justify-between gap-3'>
               <div className='space-y-0.5'>
-                <FormLabel>
-                  {t('Custom TLS, Device and Session Identity')}
-                </FormLabel>
+                <FormLabel>{t('Custom Device and Session Identity')}</FormLabel>
                 <FormDescription>
                   {t(
-                    'Enabling this switch changes nothing by itself. Only manually selected TLS or regenerated identities are overridden after saving; off restores the selected client defaults.'
+                    'Controls only device/session identities. Turning it off restores their isolated defaults without changing the selected CLI version or TLS.'
                   )}
                 </FormDescription>
               </div>
@@ -88,7 +94,6 @@ export function ChannelClientIdentityFields() {
       )}
       {profileEnabled && enabled && (
         <div className='border-border mx-4 mb-3 rounded-lg border'>
-          <ChannelTLSFingerprintFields />
           <FormField
             control={form.control}
             name='client_device_seed'
@@ -153,7 +158,7 @@ export function ChannelClientIdentityFields() {
           />
           <p className='text-muted-foreground px-4 pb-3 text-xs'>
             {t(
-              'Device/session overrides apply to matching Claude Code or Codex requests only. Users and conversations remain isolated. Rotating sessions changes cache keys; TLS can be configured independently.'
+              'Device/session overrides apply to matching Claude Code or Codex requests only. Users and conversations remain isolated. Rotating sessions changes cache keys; it does not change TLS.'
             )}
           </p>
           {websocket && (

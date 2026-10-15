@@ -520,6 +520,9 @@ export const STATIC_I18N_KEYS = [
   'No enabled tokens available',
   'Redirecting to chat page...',
 
+  // Channel validation
+  'CLI version profiles require HTTPS HTTP/1.1; disable WebSocket transport',
+
   // Channel upstream updates
   'No processable upstream model updates for this channel',
   'Upstream model updates applied: {{added}} added, {{removed}} removed, {{ignored}} ignored this time, {{totalIgnored}} total ignored models',
@@ -554,4 +557,7 @@ export const STATIC_I18N_KEYS = [
   'Failed to load',
   'Expired at',
   'Cancelled at',
+  'Reasoning Effort',
+  'Upstream Reasoning Effort',
+  'Not reported',
 ] as const

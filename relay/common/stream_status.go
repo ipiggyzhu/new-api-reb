@@ -64,6 +64,9 @@ type StreamStatus struct {
 	// may demote a channel — max_tokens in particular is usually the caller's
 	// own budget. What it buys is a log row that can tell the difference.
 	stopReason string
+	// thinkingOnly describes delivered content, not a transport failure.
+	// It must not change retry, channel health, or billing decisions.
+	thinkingOnly bool
 }
 
 func NewStreamStatus() *StreamStatus {
@@ -141,6 +144,24 @@ func (s *StreamStatus) StopReason() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.stopReason
+}
+
+func (s *StreamStatus) MarkThinkingOnly() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.thinkingOnly = true
+}
+
+func (s *StreamStatus) ThinkingOnly() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.thinkingOnly
 }
 
 func (s *StreamStatus) HasErrors() bool {

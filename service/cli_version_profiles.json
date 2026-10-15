@@ -1,0 +1,1545 @@
+[
+  {
+    "id": "claude-2.1.76-windows-x64",
+    "family": "claude",
+    "version": "2.1.76",
+    "label": "Claude Code 2.1.76 / Windows x64 / Node v22.14.0",
+    "ja3_md5": "1a28e69016765d92e3b381168d68922c",
+    "headers": {
+      "connection": "keep-alive",
+      "accept": "application/json",
+      "x-stainless-retry-count": "0",
+      "x-stainless-timeout": "600",
+      "x-stainless-lang": "js",
+      "x-stainless-package-version": "0.74.0",
+      "x-stainless-os": "Windows",
+      "x-stainless-arch": "x64",
+      "x-stainless-runtime": "node",
+      "x-stainless-runtime-version": "v22.14.0",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "anthropic-version": "2023-06-01",
+      "x-app": "cli",
+      "user-agent": "claude-cli/2.1.76 (external, sdk-cli)",
+      "content-type": "application/json",
+      "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,prompt-caching-scope-2026-01-05,effort-2025-11-24",
+      "accept-language": "*",
+      "sec-fetch-mode": "cors",
+      "accept-encoding": "br, gzip, deflate"
+    },
+    "header_order": [
+      "host",
+      "connection",
+      "Accept",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Timeout",
+      "X-Stainless-Lang",
+      "X-Stainless-Package-Version",
+      "X-Stainless-OS",
+      "X-Stainless-Arch",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "anthropic-dangerous-direct-browser-access",
+      "anthropic-version",
+      "x-api-key",
+      "x-app",
+      "User-Agent",
+      "content-type",
+      "anthropic-beta",
+      "accept-language",
+      "sec-fetch-mode",
+      "accept-encoding",
+      "content-length"
+    ],
+    "client_hello_hex": "160301017901000175030300000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000000076130213031301c02fc02bc030c02c009ec0270067c028006b00a3009fcca9cca8ccaac0afc0adc0a3c09fc05dc061c057c05300a2c0aec0acc0a2c09ec05cc060c056c052c024006ac0230040c00ac01400390038c009c01300330032009dc0a1c09dc051009cc0a0c09cc050003d003c0035002f00ff010000b60000000e000c0000096c6f63616c686f7374000b000403000102000a00160014001d0017001e0019001801000101010201030104002300000010000b000908687474702f312e310016000000170000000d002a0028040305030603080708080809080a080b080408050806040105010601030303010302040205020602002b00050403040303002d00020101003300260024001d00200000000000000000000000000000000000000000000000000000000000000000",
+    "body_order": {
+      "": [
+        "model",
+        "messages",
+        "system",
+        "tools",
+        "metadata",
+        "max_tokens",
+        "thinking",
+        "output_config",
+        "stream"
+      ],
+      "messages": [
+        "role",
+        "content"
+      ],
+      "content#text": [
+        "type",
+        "text",
+        "cache_control"
+      ],
+      "cache_control": [
+        "type"
+      ],
+      "system#text": [
+        "type",
+        "text",
+        "cache_control"
+      ],
+      "tools": [
+        "name",
+        "description",
+        "input_schema"
+      ],
+      "input_schema": [
+        "$schema",
+        "type",
+        "properties",
+        "required",
+        "additionalProperties"
+      ],
+      "metadata": [
+        "user_id"
+      ],
+      "thinking": [
+        "type"
+      ],
+      "output_config": [
+        "effort"
+      ],
+      "turn_metadata": []
+    },
+    "tool_order": [
+      "Agent",
+      "TaskOutput",
+      "Bash",
+      "Glob",
+      "Grep",
+      "ExitPlanMode",
+      "Read",
+      "Edit",
+      "Write",
+      "NotebookEdit",
+      "WebFetch",
+      "TodoWrite",
+      "WebSearch",
+      "TaskStop",
+      "AskUserQuestion",
+      "Skill",
+      "EnterPlanMode",
+      "EnterWorktree",
+      "ExitWorktree",
+      "CronCreate",
+      "CronDelete",
+      "CronList"
+    ],
+    "tools_in_input": false,
+    "message_ids": false,
+    "metadata_keys": [],
+    "turn_defaults": {},
+    "max_tokens": 32000,
+    "legacy_user_id": true,
+    "context_management": false,
+    "parallel_tool_calls": false,
+    "text_default": null,
+    "provenance": {
+      "source": "official npm JS CLI / Node 22.14.0",
+      "capture_sha256": "fe2008feba2740fdcede7f60de9399699c1402197d0859d524c75c305595777f",
+      "redaction": "Destination SNI replaced with localhost; captured random, TLS session ID and public key-share bytes zeroed. Runtime regenerates them; static protocol shape is unchanged."
+    }
+  },
+  {
+    "id": "claude-2.1.198-windows-x64",
+    "family": "claude",
+    "version": "2.1.198",
+    "label": "Claude Code 2.1.198 / Windows x64 / Node v26.3.0",
+    "ja3_md5": "d871d02cecbde59abbf8f4806134addf",
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json",
+      "user-agent": "claude-cli/2.1.198 (external, sdk-cli)",
+      "x-stainless-arch": "x64",
+      "x-stainless-lang": "js",
+      "x-stainless-os": "Windows",
+      "x-stainless-package-version": "0.94.0",
+      "x-stainless-retry-count": "0",
+      "x-stainless-runtime": "node",
+      "x-stainless-runtime-version": "v26.3.0",
+      "x-stainless-timeout": "600",
+      "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "anthropic-version": "2023-06-01",
+      "x-app": "cli",
+      "connection": "keep-alive",
+      "accept-encoding": "gzip, deflate, br, zstd"
+    },
+    "header_order": [
+      "Accept",
+      "Content-Type",
+      "User-Agent",
+      "X-Claude-Code-Session-Id",
+      "X-Stainless-Arch",
+      "X-Stainless-Lang",
+      "X-Stainless-OS",
+      "X-Stainless-Package-Version",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "X-Stainless-Timeout",
+      "anthropic-beta",
+      "anthropic-dangerous-direct-browser-access",
+      "anthropic-version",
+      "x-api-key",
+      "x-app",
+      "Connection",
+      "Host",
+      "Accept-Encoding",
+      "Content-Length"
+    ],
+    "client_hello_hex": "1603010200010001fc030300000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000000022130113021303c02bc02fc02cc030cca9cca8c009c013c00ac014009c009d002f0035010001910000000e000c0000096c6f63616c686f737400170000ff01000100000a00080006001d00170018000b00020100002300000010000b000908687474702f312e31000500050100000000000d0014001204030804040105030805050108060601020100120000003300260024001d00200000000000000000000000000000000000000000000000000000000000000000002d00020101002b00050403040303001500ef0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "body_order": {
+      "": [
+        "model",
+        "messages",
+        "system",
+        "tools",
+        "metadata",
+        "max_tokens",
+        "thinking",
+        "context_management",
+        "output_config",
+        "stream"
+      ],
+      "messages": [
+        "role",
+        "content"
+      ],
+      "content#text": [
+        "type",
+        "text",
+        "cache_control"
+      ],
+      "cache_control": [
+        "type"
+      ],
+      "system#text": [
+        "type",
+        "text",
+        "cache_control"
+      ],
+      "tools": [
+        "name",
+        "description",
+        "input_schema"
+      ],
+      "input_schema": [
+        "$schema",
+        "type",
+        "properties",
+        "required",
+        "additionalProperties"
+      ],
+      "metadata": [
+        "user_id"
+      ],
+      "thinking": [
+        "type",
+        "display"
+      ],
+      "context_management": [
+        "edits"
+      ],
+      "edits#clear_thinking_20251015": [
+        "type",
+        "keep"
+      ],
+      "output_config": [
+        "effort"
+      ],
+      "turn_metadata": [],
+      "user_id": [
+        "device_id",
+        "account_uuid",
+        "session_id"
+      ]
+    },
+    "tool_order": [
+      "Agent",
+      "Bash",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "Edit",
+      "EnterWorktree",
+      "ExitWorktree",
+      "Glob",
+      "Grep",
+      "NotebookEdit",
+      "Read",
+      "ReportFindings",
+      "ScheduleWakeup",
+      "SendMessage",
+      "Skill",
+      "TaskCreate",
+      "TaskGet",
+      "TaskList",
+      "TaskOutput",
+      "TaskStop",
+      "TaskUpdate",
+      "WebFetch",
+      "WebSearch",
+      "Workflow",
+      "Write"
+    ],
+    "tools_in_input": false,
+    "message_ids": false,
+    "metadata_keys": [],
+    "turn_defaults": {},
+    "max_tokens": 64000,
+    "legacy_user_id": false,
+    "context_management": true,
+    "parallel_tool_calls": false,
+    "text_default": null,
+    "provenance": {
+      "family": "claude",
+      "version": "2.1.198",
+      "package": "@anthropic-ai/claude-code-win32-x64",
+      "package_version": "2.1.198",
+      "metadata_url": "https://registry.npmjs.org/@anthropic-ai%2fclaude-code-win32-x64/2.1.198",
+      "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-code-win32-x64/-/claude-code-win32-x64-2.1.198.tgz",
+      "integrity": "sha512-UStQl408M7sWbxkp4GUdrUfpC+IisWXfEmdNBpWihDzA2XxPIf9zfd8L5uZtkJjikkIvKsiHTZrGJHCkrPkIKQ==",
+      "binary_sha256": "6afd07cb03aa981c5e918808f53a1e2b729015b695122a944f6e41aaf5393933",
+      "reported_version": "2.1.198 (Claude Code)",
+      "capture_sha256": "b025669b449cee9f3bfa85537e126e7f804b6ce3a33c6ced6d7bab90854bc04e",
+      "redaction": "Destination SNI replaced with localhost; captured random, TLS session ID and public key-share bytes zeroed. Runtime regenerates them; static protocol shape is unchanged."
+    }
+  },
+  {
+    "id": "claude-2.1.211-windows-x64",
+    "family": "claude",
+    "version": "2.1.211",
+    "label": "Claude Code 2.1.211 / Windows x64 / Node v26.3.0",
+    "ja3_md5": "d871d02cecbde59abbf8f4806134addf",
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json",
+      "user-agent": "claude-cli/2.1.211 (external, sdk-cli)",
+      "x-stainless-arch": "x64",
+      "x-stainless-lang": "js",
+      "x-stainless-os": "Windows",
+      "x-stainless-package-version": "0.94.0",
+      "x-stainless-retry-count": "0",
+      "x-stainless-runtime": "node",
+      "x-stainless-runtime-version": "v26.3.0",
+      "x-stainless-timeout": "600",
+      "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "anthropic-version": "2023-06-01",
+      "x-app": "cli",
+      "connection": "keep-alive",
+      "accept-encoding": "gzip, deflate, br, zstd"
+    },
+    "header_order": [
+      "Accept",
+      "Content-Type",
+      "User-Agent",
+      "X-Claude-Code-Session-Id",
+      "X-Stainless-Arch",
+      "X-Stainless-Lang",
+      "X-Stainless-OS",
+      "X-Stainless-Package-Version",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "X-Stainless-Timeout",
+      "anthropic-beta",
+      "anthropic-dangerous-direct-browser-access",
+      "anthropic-version",
+      "x-api-key",
+      "x-app",
+      "Connection",
+      "Host",
+      "Accept-Encoding",
+      "Content-Length"
+    ],
+    "client_hello_hex": "1603010200010001fc030300000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000000022130113021303c02bc02fc02cc030cca9cca8c009c013c00ac014009c009d002f0035010001910000000e000c0000096c6f63616c686f737400170000ff01000100000a00080006001d00170018000b00020100002300000010000b000908687474702f312e31000500050100000000000d0014001204030804040105030805050108060601020100120000003300260024001d00200000000000000000000000000000000000000000000000000000000000000000002d00020101002b00050403040303001500ef0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "body_order": {
+      "": [
+        "model",
+        "messages",
+        "system",
+        "tools",
+        "metadata",
+        "max_tokens",
+        "thinking",
+        "context_management",
+        "output_config",
+        "stream"
+      ],
+      "messages": [
+        "role",
+        "content"
+      ],
+      "content#text": [
+        "type",
+        "text",
+        "cache_control"
+      ],
+      "cache_control": [
+        "type"
+      ],
+      "system#text": [
+        "type",
+        "text",
+        "cache_control"
+      ],
+      "tools": [
+        "name",
+        "description",
+        "input_schema"
+      ],
+      "input_schema": [
+        "$schema",
+        "type",
+        "properties",
+        "required",
+        "additionalProperties"
+      ],
+      "metadata": [
+        "user_id"
+      ],
+      "thinking": [
+        "type",
+        "display"
+      ],
+      "context_management": [
+        "edits"
+      ],
+      "edits#clear_thinking_20251015": [
+        "type",
+        "keep"
+      ],
+      "output_config": [
+        "effort"
+      ],
+      "turn_metadata": [],
+      "user_id": [
+        "device_id",
+        "account_uuid",
+        "session_id"
+      ]
+    },
+    "tool_order": [
+      "Agent",
+      "Bash",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "Edit",
+      "EnterWorktree",
+      "ExitWorktree",
+      "Glob",
+      "Grep",
+      "NotebookEdit",
+      "Read",
+      "ReportFindings",
+      "ScheduleWakeup",
+      "SendMessage",
+      "Skill",
+      "TaskCreate",
+      "TaskGet",
+      "TaskList",
+      "TaskOutput",
+      "TaskStop",
+      "TaskUpdate",
+      "WebFetch",
+      "WebSearch",
+      "Workflow",
+      "Write"
+    ],
+    "tools_in_input": false,
+    "message_ids": false,
+    "metadata_keys": [],
+    "turn_defaults": {},
+    "max_tokens": 64000,
+    "legacy_user_id": false,
+    "context_management": true,
+    "parallel_tool_calls": false,
+    "text_default": null,
+    "provenance": {
+      "family": "claude",
+      "version": "2.1.211",
+      "package": "@anthropic-ai/claude-code-win32-x64",
+      "package_version": "2.1.211",
+      "metadata_url": "https://registry.npmjs.org/@anthropic-ai%2fclaude-code-win32-x64/2.1.211",
+      "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-code-win32-x64/-/claude-code-win32-x64-2.1.211.tgz",
+      "integrity": "sha512-/pXHWP02ni+xM37QP0Yrn0rG3K2MKq47nxB5xuUrMirpQG1zA5orFtCiP4hmQaiYICRgW39ZmQdEQpsvt2t+pg==",
+      "binary_sha256": "3d8509ae7de11d77dbdc711aa320fc6d5064ce795464a8670696611b57093caf",
+      "reported_version": "2.1.211 (Claude Code)",
+      "capture_sha256": "1f0ac76bc3790e14b3543d16a1000c3da938d908686f5b39947037f5ed20a8ea",
+      "redaction": "Destination SNI replaced with localhost; captured random, TLS session ID and public key-share bytes zeroed. Runtime regenerates them; static protocol shape is unchanged."
+    }
+  },
+  {
+    "id": "claude-2.1.260-windows-x64",
+    "family": "claude",
+    "version": "2.1.260",
+    "label": "Claude Code 2.1.260 / Windows x64 / Node v26.3.0",
+    "ja3_md5": "1523504b38f0fae0d881d4b6554aac1b",
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json",
+      "user-agent": "claude-cli/2.1.260 (external, sdk-cli)",
+      "x-stainless-arch": "x64",
+      "x-stainless-lang": "js",
+      "x-stainless-os": "Windows",
+      "x-stainless-package-version": "0.112.1",
+      "x-stainless-retry-count": "0",
+      "x-stainless-runtime": "node",
+      "x-stainless-runtime-version": "v26.3.0",
+      "x-stainless-timeout": "600",
+      "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "anthropic-version": "2023-06-01",
+      "x-app": "cli",
+      "connection": "keep-alive",
+      "accept-encoding": "gzip, deflate, br, zstd"
+    },
+    "header_order": [
+      "Accept",
+      "Content-Type",
+      "User-Agent",
+      "X-Claude-Code-Session-Id",
+      "X-Stainless-Arch",
+      "X-Stainless-Lang",
+      "X-Stainless-OS",
+      "X-Stainless-Package-Version",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "X-Stainless-Timeout",
+      "anthropic-beta",
+      "anthropic-dangerous-direct-browser-access",
+      "anthropic-version",
+      "x-api-key",
+      "x-app",
+      "Connection",
+      "Host",
+      "Accept-Encoding",
+      "Content-Length"
+    ],
+    "client_hello_hex": "16030105d3010005cf030300000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000000022130113021303c02bc02fc02cc030cca9cca8c009c013c00ac014009c009d002f0035010005640000000e000c0000096c6f63616c686f737400170000ff01000100000a000a000811ec001d00170018000b00020100002300000010000b000908687474702f312e31000500050100000000000d0014001204030804040105030805050108060601020100120000003304ea04e811ec04c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001d00200000000000000000000000000000000000000000000000000000000000000000002d00020101002b00050403040303",
+    "body_order": {
+      "": [
+        "model",
+        "messages",
+        "system",
+        "tools",
+        "metadata",
+        "max_tokens",
+        "thinking",
+        "context_management",
+        "output_config",
+        "stream"
+      ],
+      "messages": [
+        "role",
+        "content"
+      ],
+      "content#text": [
+        "type",
+        "text",
+        "cache_control"
+      ],
+      "cache_control": [
+        "type"
+      ],
+      "system#text": [
+        "type",
+        "text",
+        "cache_control"
+      ],
+      "tools": [
+        "name",
+        "description",
+        "input_schema"
+      ],
+      "input_schema": [
+        "$schema",
+        "type",
+        "properties",
+        "required",
+        "additionalProperties"
+      ],
+      "metadata": [
+        "user_id"
+      ],
+      "thinking": [
+        "type",
+        "display"
+      ],
+      "context_management": [
+        "edits"
+      ],
+      "edits#clear_thinking_20251015": [
+        "type",
+        "keep"
+      ],
+      "output_config": [
+        "effort"
+      ],
+      "turn_metadata": [],
+      "user_id": [
+        "device_id",
+        "account_uuid",
+        "session_id"
+      ]
+    },
+    "tool_order": [
+      "Agent",
+      "Bash",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "Edit",
+      "EnterWorktree",
+      "ExitWorktree",
+      "Glob",
+      "Grep",
+      "ListAgents",
+      "NotebookEdit",
+      "Read",
+      "ReportFindings",
+      "ScheduleWakeup",
+      "SendMessage",
+      "Skill",
+      "TaskCreate",
+      "TaskGet",
+      "TaskList",
+      "TaskOutput",
+      "TaskStop",
+      "TaskUpdate",
+      "WebFetch",
+      "WebSearch",
+      "Workflow",
+      "Write"
+    ],
+    "tools_in_input": false,
+    "message_ids": false,
+    "metadata_keys": [],
+    "turn_defaults": {},
+    "max_tokens": 64000,
+    "legacy_user_id": false,
+    "context_management": true,
+    "parallel_tool_calls": false,
+    "text_default": null,
+    "provenance": {
+      "family": "claude",
+      "version": "2.1.260",
+      "package": "@anthropic-ai/claude-code-win32-x64",
+      "package_version": "2.1.260",
+      "metadata_url": "https://registry.npmjs.org/@anthropic-ai%2fclaude-code-win32-x64/2.1.260",
+      "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-code-win32-x64/-/claude-code-win32-x64-2.1.260.tgz",
+      "integrity": "sha512-OzZY5FOJ998KGRxKCXl5P8yTK+5J+2coJZ+ZT6+RQdNhQGQ4kxgQGFTjS422SN1fS1Ugy7xzolpYjuJcUY5Yfw==",
+      "binary_sha256": "ab5fe6cb800a9faf3df1cc0f6bcb71f097296b302a16b576ca906446a22fea71",
+      "reported_version": "2.1.260 (Claude Code)",
+      "capture_sha256": "566ad44502f05cec35a8ce452e50376081377b1c02f6d18940a6d18c63afc927",
+      "redaction": "Destination SNI replaced with localhost; captured random, TLS session ID and public key-share bytes zeroed. Runtime regenerates them; static protocol shape is unchanged."
+    }
+  },
+  {
+    "id": "claude-2.1.282-windows-x64",
+    "family": "claude",
+    "version": "2.1.282",
+    "label": "Claude Code 2.1.282 / Windows x64 / Node v26.3.0",
+    "ja3_md5": "1523504b38f0fae0d881d4b6554aac1b",
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json",
+      "user-agent": "claude-cli/2.1.282 (external, sdk-cli)",
+      "x-stainless-arch": "x64",
+      "x-stainless-lang": "js",
+      "x-stainless-os": "Windows",
+      "x-stainless-package-version": "0.112.1",
+      "x-stainless-retry-count": "0",
+      "x-stainless-runtime": "node",
+      "x-stainless-runtime-version": "v26.3.0",
+      "x-stainless-timeout": "600",
+      "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "anthropic-version": "2023-06-01",
+      "x-app": "cli",
+      "connection": "keep-alive",
+      "accept-encoding": "gzip, deflate, br, zstd"
+    },
+    "header_order": [
+      "Accept",
+      "Content-Type",
+      "User-Agent",
+      "X-Claude-Code-Session-Id",
+      "X-Stainless-Arch",
+      "X-Stainless-Lang",
+      "X-Stainless-OS",
+      "X-Stainless-Package-Version",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "X-Stainless-Timeout",
+      "anthropic-beta",
+      "anthropic-dangerous-direct-browser-access",
+      "anthropic-version",
+      "x-api-key",
+      "x-app",
+      "Connection",
+      "Host",
+      "Accept-Encoding",
+      "Content-Length"
+    ],
+    "client_hello_hex": "16030105d3010005cf030300000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000000022130113021303c02bc02fc02cc030cca9cca8c009c013c00ac014009c009d002f0035010005640000000e000c0000096c6f63616c686f737400170000ff01000100000a000a000811ec001d00170018000b00020100002300000010000b000908687474702f312e31000500050100000000000d0014001204030804040105030805050108060601020100120000003304ea04e811ec04c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001d00200000000000000000000000000000000000000000000000000000000000000000002d00020101002b00050403040303",
+    "body_order": {
+      "": [
+        "model",
+        "messages",
+        "system",
+        "tools",
+        "metadata",
+        "max_tokens",
+        "thinking",
+        "context_management",
+        "output_config",
+        "stream"
+      ],
+      "messages": [
+        "role",
+        "content"
+      ],
+      "content#text": [
+        "type",
+        "text",
+        "cache_control"
+      ],
+      "cache_control": [
+        "type"
+      ],
+      "system#text": [
+        "type",
+        "text",
+        "cache_control"
+      ],
+      "tools": [
+        "name",
+        "description",
+        "input_schema"
+      ],
+      "input_schema": [
+        "$schema",
+        "type",
+        "properties",
+        "required",
+        "additionalProperties"
+      ],
+      "metadata": [
+        "user_id"
+      ],
+      "thinking": [
+        "type",
+        "display"
+      ],
+      "context_management": [
+        "edits"
+      ],
+      "edits#clear_thinking_20251015": [
+        "type",
+        "keep"
+      ],
+      "output_config": [
+        "effort"
+      ],
+      "turn_metadata": [],
+      "user_id": [
+        "device_id",
+        "account_uuid",
+        "session_id"
+      ]
+    },
+    "tool_order": [
+      "Agent",
+      "Bash",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "Edit",
+      "EnterWorktree",
+      "ExitWorktree",
+      "Glob",
+      "Grep",
+      "ListAgents",
+      "NotebookEdit",
+      "Read",
+      "ReportFindings",
+      "ScheduleWakeup",
+      "SendMessage",
+      "Skill",
+      "TaskCreate",
+      "TaskGet",
+      "TaskList",
+      "TaskStop",
+      "TaskUpdate",
+      "WebFetch",
+      "WebSearch",
+      "Workflow",
+      "Write"
+    ],
+    "tools_in_input": false,
+    "message_ids": false,
+    "metadata_keys": [],
+    "turn_defaults": {},
+    "max_tokens": 64000,
+    "legacy_user_id": false,
+    "context_management": true,
+    "parallel_tool_calls": false,
+    "text_default": null,
+    "provenance": {
+      "source": "local official CLI installation",
+      "capture_sha256": "5226b2fe91ebea5c350786dee45590207956dc070344917f4a669f670d8dea9b",
+      "redaction": "Destination SNI replaced with localhost; captured random, TLS session ID and public key-share bytes zeroed. Runtime regenerates them; static protocol shape is unchanged."
+    }
+  },
+  {
+    "id": "codex-0.134.0-windows-x64",
+    "family": "codex",
+    "version": "0.134.0",
+    "label": "Codex exec 0.134.0 / Windows x64",
+    "ja3_md5": "6a5d235ee78c6aede6a61448b4e9ff1e",
+    "headers": {
+      "x-codex-beta-features": "terminal_resize_reflow",
+      "accept": "text/event-stream",
+      "content-type": "application/json",
+      "originator": "codex_exec",
+      "user-agent": "codex_exec/0.134.0 (Windows 10.0.26100; x86_64) unknown (codex_exec; 0.134.0)"
+    },
+    "header_order": [
+      "x-codex-beta-features",
+      "x-codex-turn-metadata",
+      "x-codex-window-id",
+      "x-client-request-id",
+      "session-id",
+      "thread-id",
+      "accept",
+      "authorization",
+      "content-type",
+      "originator",
+      "user-agent",
+      "host",
+      "content-length"
+    ],
+    "client_hello_hex": "16030300a00100009c03030000000000000000000000000000000000000000000000000000000000000000000024c02cc02bc030c02fc024c023c028c027c00ac009c014c013009d009c003d003c0035002f0100004f0000000e000c0000096c6f63616c686f7374000a00080006001d00170018000b00020100000d001a00180804080508060401050102010403050302030202060106030023000000170000ff01000100",
+    "body_order": {
+      "": [
+        "model",
+        "instructions",
+        "input",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "store",
+        "stream",
+        "include",
+        "prompt_cache_key",
+        "client_metadata"
+      ],
+      "input#message": [
+        "type",
+        "role",
+        "content"
+      ],
+      "content#input_text": [
+        "type",
+        "text"
+      ],
+      "tools#function": [
+        "type",
+        "name",
+        "description",
+        "strict",
+        "parameters"
+      ],
+      "tools#namespace": [
+        "type",
+        "name",
+        "description",
+        "tools"
+      ],
+      "tools#web_search": [
+        "type",
+        "external_web_access"
+      ],
+      "client_metadata": [
+        "x-codex-installation-id"
+      ],
+      "turn_metadata": [
+        "session_id",
+        "thread_id",
+        "thread_source",
+        "turn_id",
+        "sandbox",
+        "turn_started_at_unix_ms"
+      ]
+    },
+    "tool_order": [
+      "shell_command",
+      "update_plan",
+      "get_goal",
+      "create_goal",
+      "update_goal",
+      "request_user_input",
+      "view_image",
+      "multi_agent_v1"
+    ],
+    "tools_in_input": false,
+    "message_ids": false,
+    "metadata_keys": [
+      "x-codex-installation-id"
+    ],
+    "turn_defaults": {
+      "thread_source": "user",
+      "sandbox": "none"
+    },
+    "max_tokens": 0,
+    "legacy_user_id": false,
+    "context_management": false,
+    "parallel_tool_calls": false,
+    "text_default": null,
+    "provenance": {
+      "family": "codex",
+      "version": "0.134.0",
+      "package": "@openai/codex",
+      "package_version": "0.134.0-win32-x64",
+      "metadata_url": "https://registry.npmjs.org/@openai%2fcodex/0.134.0-win32-x64",
+      "tarball": "https://registry.npmjs.org/@openai/codex/-/codex-0.134.0-win32-x64.tgz",
+      "integrity": "sha512-hW1omBcN1jKeVUVnTqWlpc42nF2qAwCEN6l1IFeKFJegYoZ39YrE7pdh56gAmaZTyT5Eexx7cgNpaEK3JElxvA==",
+      "binary_sha256": "1766ac7dfbf4c7ddb26380e55f52c6c83847a9724294d88902ea3c5650fec134",
+      "reported_version": "codex-cli 0.134.0",
+      "capture_sha256": "6a08fd64a264e4ae2b302aca2f4c73162493a4fcc2c75500448cb7a7f0b16b29",
+      "redaction": "Destination SNI replaced with localhost; captured random, TLS session ID and public key-share bytes zeroed. Runtime regenerates them; static protocol shape is unchanged."
+    }
+  },
+  {
+    "id": "codex-0.145.0-windows-x64",
+    "family": "codex",
+    "version": "0.145.0",
+    "label": "Codex exec 0.145.0 / Windows x64",
+    "ja3_md5": "6a5d235ee78c6aede6a61448b4e9ff1e",
+    "headers": {
+      "x-codex-beta-features": "remote_compaction_v2",
+      "accept": "text/event-stream",
+      "content-type": "application/json",
+      "originator": "codex_exec",
+      "user-agent": "codex_exec/0.145.0 (Windows 10.0.26100; x86_64) unknown (codex_exec; 0.145.0)"
+    },
+    "header_order": [
+      "x-codex-beta-features",
+      "x-codex-window-id",
+      "x-codex-turn-metadata",
+      "x-client-request-id",
+      "session-id",
+      "thread-id",
+      "accept",
+      "content-type",
+      "authorization",
+      "originator",
+      "user-agent",
+      "host",
+      "content-length"
+    ],
+    "client_hello_hex": "16030300a00100009c03030000000000000000000000000000000000000000000000000000000000000000000024c02cc02bc030c02fc024c023c028c027c00ac009c014c013009d009c003d003c0035002f0100004f0000000e000c0000096c6f63616c686f7374000a00080006001d00170018000b00020100000d001a00180804080508060401050102010403050302030202060106030023000000170000ff01000100",
+    "body_order": {
+      "": [
+        "model",
+        "instructions",
+        "input",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "store",
+        "stream",
+        "include",
+        "prompt_cache_key",
+        "client_metadata"
+      ],
+      "input#message": [
+        "type",
+        "role",
+        "content"
+      ],
+      "content#input_text": [
+        "type",
+        "text"
+      ],
+      "tools#function": [
+        "type",
+        "name",
+        "description",
+        "strict",
+        "parameters"
+      ],
+      "tools#namespace": [
+        "type",
+        "name",
+        "description",
+        "tools"
+      ],
+      "tools#web_search": [
+        "type",
+        "external_web_access"
+      ],
+      "reasoning": [
+        "effort",
+        "summary"
+      ],
+      "client_metadata": [
+        "x-codex-installation-id",
+        "session_id",
+        "x-codex-window-id",
+        "thread_id",
+        "turn_id",
+        "x-codex-turn-metadata"
+      ],
+      "turn_metadata": [
+        "installation_id",
+        "session_id",
+        "thread_id",
+        "turn_id",
+        "window_id",
+        "request_kind",
+        "thread_source",
+        "sandbox",
+        "turn_started_at_unix_ms"
+      ]
+    },
+    "tool_order": [
+      "shell_command",
+      "update_plan",
+      "request_user_input",
+      "view_image",
+      "multi_agent_v1",
+      "get_goal",
+      "create_goal",
+      "update_goal"
+    ],
+    "tools_in_input": false,
+    "message_ids": false,
+    "metadata_keys": [
+      "x-codex-installation-id",
+      "session_id",
+      "x-codex-window-id",
+      "thread_id",
+      "turn_id",
+      "x-codex-turn-metadata"
+    ],
+    "turn_defaults": {
+      "request_kind": "turn",
+      "thread_source": "user",
+      "sandbox": "none"
+    },
+    "max_tokens": 0,
+    "legacy_user_id": false,
+    "context_management": false,
+    "parallel_tool_calls": false,
+    "text_default": null,
+    "provenance": {
+      "family": "codex",
+      "version": "0.145.0",
+      "package": "@openai/codex",
+      "package_version": "0.145.0-win32-x64",
+      "metadata_url": "https://registry.npmjs.org/@openai%2fcodex/0.145.0-win32-x64",
+      "tarball": "https://registry.npmjs.org/@openai/codex/-/codex-0.145.0-win32-x64.tgz",
+      "integrity": "sha512-u0h9lk094CaXRSqE34SBW2dRaQTPa6fASXqehczWH9QdsU62mBsiAgAdp6tCG4i+YzPmmhjD8FdXNnYGNmwuMg==",
+      "binary_sha256": "83751f15cb6a0a7b97df67752c001e3fe1c20e18ffbfec3ff63567296205eb6c",
+      "reported_version": "codex-cli 0.145.0",
+      "capture_sha256": "11f53611e820d1f4c797bae065376a724daae53965d3045a6b1986a93cbbcf22",
+      "redaction": "Destination SNI replaced with localhost; captured random, TLS session ID and public key-share bytes zeroed. Runtime regenerates them; static protocol shape is unchanged."
+    }
+  },
+  {
+    "id": "codex-0.150.0-windows-x64",
+    "family": "codex",
+    "version": "0.150.0",
+    "label": "Codex exec 0.150.0 / Windows x64",
+    "ja3_md5": "6a5d235ee78c6aede6a61448b4e9ff1e",
+    "headers": {
+      "x-codex-beta-features": "remote_compaction_v2",
+      "accept": "text/event-stream",
+      "content-type": "application/json",
+      "originator": "codex_exec",
+      "user-agent": "codex_exec/0.150.0 (Windows 10.0.26100; x86_64) unknown (codex_exec; 0.150.0)"
+    },
+    "header_order": [
+      "x-codex-beta-features",
+      "x-codex-window-id",
+      "x-codex-turn-metadata",
+      "x-client-request-id",
+      "session-id",
+      "thread-id",
+      "accept",
+      "content-type",
+      "authorization",
+      "originator",
+      "user-agent",
+      "host",
+      "content-length"
+    ],
+    "client_hello_hex": "16030300a00100009c03030000000000000000000000000000000000000000000000000000000000000000000024c02cc02bc030c02fc024c023c028c027c00ac009c014c013009d009c003d003c0035002f0100004f0000000e000c0000096c6f63616c686f7374000a00080006001d00170018000b00020100000d001a00180804080508060401050102010403050302030202060106030023000000170000ff01000100",
+    "body_order": {
+      "": [
+        "model",
+        "instructions",
+        "input",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "store",
+        "stream",
+        "include",
+        "prompt_cache_key",
+        "client_metadata"
+      ],
+      "input#message": [
+        "type",
+        "id",
+        "role",
+        "content"
+      ],
+      "content#input_text": [
+        "type",
+        "text"
+      ],
+      "tools#function": [
+        "type",
+        "name",
+        "description",
+        "strict",
+        "parameters"
+      ],
+      "tools#namespace": [
+        "type",
+        "name",
+        "description",
+        "tools"
+      ],
+      "tools#web_search": [
+        "type",
+        "external_web_access"
+      ],
+      "reasoning": [
+        "effort",
+        "summary"
+      ],
+      "client_metadata": [
+        "root_turn_id",
+        "x-codex-turn-metadata",
+        "session_id",
+        "x-codex-window-id",
+        "turn_id",
+        "x-codex-installation-id",
+        "thread_id"
+      ],
+      "turn_metadata": [
+        "installation_id",
+        "session_id",
+        "thread_id",
+        "agent_name",
+        "turn_id",
+        "window_id",
+        "context_window_id",
+        "request_kind",
+        "root_turn_id",
+        "thread_source",
+        "sandbox",
+        "sandbox_mode",
+        "auto_review_enabled",
+        "node_repl_auto_review_required",
+        "node_repl_disabled",
+        "turn_started_at_unix_ms"
+      ]
+    },
+    "tool_order": [
+      "exec_command",
+      "write_stdin",
+      "update_plan",
+      "request_user_input",
+      "view_image",
+      "multi_agent_v1",
+      "get_goal",
+      "create_goal",
+      "update_goal"
+    ],
+    "tools_in_input": false,
+    "message_ids": true,
+    "metadata_keys": [
+      "root_turn_id",
+      "x-codex-turn-metadata",
+      "session_id",
+      "x-codex-window-id",
+      "turn_id",
+      "x-codex-installation-id",
+      "thread_id"
+    ],
+    "turn_defaults": {
+      "agent_name": "/root",
+      "request_kind": "turn",
+      "thread_source": "user",
+      "sandbox": "none",
+      "sandbox_mode": "read-only",
+      "auto_review_enabled": false,
+      "node_repl_auto_review_required": false,
+      "node_repl_disabled": false
+    },
+    "max_tokens": 0,
+    "legacy_user_id": false,
+    "context_management": false,
+    "parallel_tool_calls": true,
+    "text_default": null,
+    "provenance": {
+      "family": "codex",
+      "version": "0.150.0",
+      "package": "@openai/codex",
+      "package_version": "0.150.0-win32-x64",
+      "metadata_url": "https://registry.npmjs.org/@openai%2fcodex/0.150.0-win32-x64",
+      "tarball": "https://registry.npmjs.org/@openai/codex/-/codex-0.150.0-win32-x64.tgz",
+      "integrity": "sha512-IRo1/bzzvMRXCnjl2C2zRKPww7wX7U0ZtDUAtj1a7/OK2VKnYaUOPADNKo3ey9b4N5M8/sRi1O6M+H7CbTOTaA==",
+      "binary_sha256": "979039e504d9cc73425b010a6ee5e042b7ae5aede961a5b538e16d7dc5e9fd62",
+      "reported_version": "codex-cli 0.150.0",
+      "capture_sha256": "a87f4575a74b22706492840385a5b994a572b548a2923abc92a584da6652169b",
+      "redaction": "Destination SNI replaced with localhost; captured random, TLS session ID and public key-share bytes zeroed. Runtime regenerates them; static protocol shape is unchanged."
+    }
+  },
+  {
+    "id": "codex-0.156.1-windows-x64",
+    "family": "codex",
+    "version": "0.156.1",
+    "label": "Codex exec 0.156.1 / Windows x64",
+    "ja3_md5": "6a5d235ee78c6aede6a61448b4e9ff1e",
+    "headers": {
+      "x-codex-beta-features": "remote_compaction_v2",
+      "x-openai-internal-codex-responses-lite": "true",
+      "accept": "text/event-stream",
+      "content-type": "application/json",
+      "originator": "codex_exec",
+      "user-agent": "codex_exec/0.156.1 (Windows 10.0.26100; x86_64) WindowsTerminal (codex_exec; 0.156.1)"
+    },
+    "header_order": [
+      "x-codex-beta-features",
+      "x-codex-window-id",
+      "x-codex-turn-metadata",
+      "x-openai-internal-codex-responses-lite",
+      "x-client-request-id",
+      "session-id",
+      "thread-id",
+      "accept",
+      "content-type",
+      "authorization",
+      "originator",
+      "user-agent",
+      "host",
+      "content-length"
+    ],
+    "client_hello_hex": "16030300a00100009c03030000000000000000000000000000000000000000000000000000000000000000000024c02cc02bc030c02fc024c023c028c027c00ac009c014c013009d009c003d003c0035002f0100004f0000000e000c0000096c6f63616c686f7374000a00080006001d00170018000b00020100000d001a00180804080508060401050102010403050302030202060106030023000000170000ff01000100",
+    "body_order": {
+      "": [
+        "model",
+        "input",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "store",
+        "stream",
+        "include",
+        "service_tier",
+        "prompt_cache_key",
+        "text",
+        "client_metadata"
+      ],
+      "input#additional_tools": [
+        "type",
+        "id",
+        "role",
+        "tools"
+      ],
+      "tools#namespace": [
+        "type",
+        "name",
+        "description",
+        "tools"
+      ],
+      "tools#custom": [
+        "type",
+        "name",
+        "description",
+        "format"
+      ],
+      "tools#function": [
+        "type",
+        "name",
+        "description",
+        "strict",
+        "parameters"
+      ],
+      "input#message": [
+        "type",
+        "id",
+        "role",
+        "content"
+      ],
+      "content#input_text": [
+        "type",
+        "text"
+      ],
+      "reasoning": [
+        "effort",
+        "context"
+      ],
+      "text": [
+        "verbosity"
+      ],
+      "client_metadata": [
+        "x-codex-installation-id",
+        "turn_id",
+        "thread_id",
+        "root_turn_id",
+        "session_id",
+        "x-codex-window-id",
+        "x-codex-turn-metadata"
+      ],
+      "turn_metadata": [
+        "installation_id",
+        "session_id",
+        "thread_id",
+        "agent_name",
+        "turn_id",
+        "window_id",
+        "window_number",
+        "context_window_id",
+        "request_kind",
+        "root_turn_id",
+        "thread_source",
+        "turn_trigger",
+        "sandbox",
+        "sandbox_mode",
+        "auto_review_enabled",
+        "node_repl_auto_review_required",
+        "node_repl_disabled",
+        "turn_started_at_unix_ms",
+        "analytics_enabled",
+        "model",
+        "reasoning_effort"
+      ]
+    },
+    "tool_order": [],
+    "tools_in_input": true,
+    "message_ids": true,
+    "metadata_keys": [
+      "x-codex-installation-id",
+      "turn_id",
+      "thread_id",
+      "root_turn_id",
+      "session_id",
+      "x-codex-window-id",
+      "x-codex-turn-metadata"
+    ],
+    "turn_defaults": {
+      "agent_name": "/root",
+      "window_number": 0,
+      "request_kind": "turn",
+      "thread_source": "user",
+      "turn_trigger": "exec",
+      "sandbox": "windows_elevated",
+      "sandbox_mode": "workspace-write",
+      "auto_review_enabled": false,
+      "node_repl_auto_review_required": true,
+      "node_repl_disabled": false,
+      "analytics_enabled": true
+    },
+    "max_tokens": 0,
+    "legacy_user_id": false,
+    "context_management": false,
+    "parallel_tool_calls": false,
+    "text_default": {
+      "verbosity": "low"
+    },
+    "provenance": {
+      "source": "user-provided codex_cli_capture.json",
+      "source_sha256": "5a2a006152abbbd2caa67db6d3365e400df3fa1cc7f68961f2787c053e5b117e",
+      "official_binary": {
+        "family": "codex",
+        "version": "0.156.1",
+        "package": "@openai/codex",
+        "package_version": "0.156.1-win32-x64",
+        "metadata_url": "https://registry.npmjs.org/@openai%2fcodex/0.156.1-win32-x64",
+        "tarball": "https://registry.npmjs.org/@openai/codex/-/codex-0.156.1-win32-x64.tgz",
+        "integrity": "sha512-MJyLxbBs2zzp5kbaR/99Zwe7SmbrwUkveTcT+ayYlO48V0nYh0eU+h2lalBwvC7VJ/ya/bXnUtISJfJKhGCD/g==",
+        "binary_sha256": "70bcb05f9bf1a4e7306edd0cd1b57d02af3267ad02a34b26f45c8c4bb20a3301",
+        "reported_version": "codex-cli 0.156.1"
+      },
+      "native_clienthello_verified": true,
+      "verification_method": "passive native ClientHello; no custom CA",
+      "native_clienthello_sha256": "fbf839a55ef1ad1c4593cd95fb2a61c018b72a4b03e8f6c708fc686c67d5f006",
+      "redaction": "Destination SNI replaced with localhost; captured random, TLS session ID and public key-share bytes zeroed. Runtime regenerates them; static protocol shape is unchanged."
+    }
+  },
+  {
+    "id": "codex-0.160.0-windows-x64",
+    "family": "codex",
+    "version": "0.160.0",
+    "label": "Codex exec 0.160.0 / Windows x64",
+    "ja3_md5": "6a5d235ee78c6aede6a61448b4e9ff1e",
+    "headers": {
+      "x-codex-beta-features": "remote_compaction_v2",
+      "x-openai-internal-codex-responses-lite": "true",
+      "accept": "text/event-stream",
+      "content-type": "application/json",
+      "originator": "codex_exec",
+      "user-agent": "codex_exec/0.160.0 (Windows 10.0.26100; x86_64) unknown (codex_exec; 0.160.0)"
+    },
+    "header_order": [
+      "x-codex-beta-features",
+      "x-codex-window-id",
+      "x-codex-turn-metadata",
+      "x-openai-internal-codex-responses-lite",
+      "x-client-request-id",
+      "session-id",
+      "thread-id",
+      "accept",
+      "content-type",
+      "authorization",
+      "originator",
+      "user-agent",
+      "host",
+      "content-length"
+    ],
+    "client_hello_hex": "16030300a00100009c03030000000000000000000000000000000000000000000000000000000000000000000024c02cc02bc030c02fc024c023c028c027c00ac009c014c013009d009c003d003c0035002f0100004f0000000e000c0000096c6f63616c686f7374000a00080006001d00170018000b00020100000d001a00180804080508060401050102010403050302030202060106030023000000170000ff01000100",
+    "body_order": {
+      "": [
+        "model",
+        "input",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "store",
+        "stream",
+        "include",
+        "prompt_cache_key",
+        "text",
+        "client_metadata"
+      ],
+      "input#additional_tools": [
+        "type",
+        "id",
+        "role",
+        "tools"
+      ],
+      "tools#namespace": [
+        "type",
+        "name",
+        "description",
+        "tools"
+      ],
+      "tools#custom": [
+        "type",
+        "name",
+        "description",
+        "format"
+      ],
+      "tools#function": [
+        "type",
+        "name",
+        "description",
+        "strict",
+        "parameters"
+      ],
+      "input#message": [
+        "type",
+        "id",
+        "role",
+        "content"
+      ],
+      "content#input_text": [
+        "type",
+        "text"
+      ],
+      "reasoning": [
+        "effort",
+        "context"
+      ],
+      "text": [
+        "verbosity"
+      ],
+      "client_metadata": [
+        "turn_id",
+        "root_turn_id",
+        "x-codex-turn-metadata",
+        "session_id",
+        "x-codex-window-id",
+        "x-codex-installation-id",
+        "thread_id"
+      ],
+      "turn_metadata": [
+        "installation_id",
+        "session_id",
+        "thread_id",
+        "agent_name",
+        "turn_id",
+        "window_id",
+        "window_number",
+        "context_window_id",
+        "request_kind",
+        "root_turn_id",
+        "thread_source",
+        "turn_trigger",
+        "sandbox",
+        "sandbox_mode",
+        "auto_review_enabled",
+        "node_repl_auto_review_required",
+        "node_repl_disabled",
+        "turn_started_at_unix_ms",
+        "analytics_enabled",
+        "model",
+        "reasoning_effort"
+      ]
+    },
+    "tool_order": [],
+    "tools_in_input": true,
+    "message_ids": true,
+    "metadata_keys": [
+      "turn_id",
+      "root_turn_id",
+      "x-codex-turn-metadata",
+      "session_id",
+      "x-codex-window-id",
+      "x-codex-installation-id",
+      "thread_id"
+    ],
+    "turn_defaults": {
+      "agent_name": "/root",
+      "window_number": 0,
+      "request_kind": "turn",
+      "thread_source": "user",
+      "turn_trigger": "exec",
+      "sandbox": "none",
+      "sandbox_mode": "read-only",
+      "auto_review_enabled": false,
+      "node_repl_auto_review_required": true,
+      "node_repl_disabled": false,
+      "analytics_enabled": true
+    },
+    "max_tokens": 0,
+    "legacy_user_id": false,
+    "context_management": false,
+    "parallel_tool_calls": false,
+    "text_default": {
+      "verbosity": "low"
+    },
+    "provenance": {
+      "source": "local official CLI installation",
+      "capture_sha256": "4176da7814e08c506e3e22c7728ff92872eb94af22b9336ed4cee0bde82203ec",
+      "redaction": "Destination SNI replaced with localhost; captured random, TLS session ID and public key-share bytes zeroed. Runtime regenerates them; static protocol shape is unchanged."
+    }
+  }
+]

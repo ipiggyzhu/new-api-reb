@@ -155,9 +155,10 @@ func ListChannelTestClientHeaderPresets(c *gin.Context) {
 // the fingerprint a channel will actually use from the backend's own list.
 func ListChannelTLSFingerprints(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"data":    service.SupportedTLSFingerprints(),
+		"success":      true,
+		"message":      "",
+		"data":         service.SupportedTLSFingerprints(),
+		"cli_profiles": service.SupportedCLIVersionProfiles(),
 	})
 }
 

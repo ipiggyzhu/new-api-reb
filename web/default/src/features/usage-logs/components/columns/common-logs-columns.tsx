@@ -662,6 +662,47 @@ export function useCommonLogsColumns(isAdmin: boolean): ColumnDef<UsageLog>[] {
         meta: { mobileTitle: true },
       },
       {
+        id: 'reasoning_effort',
+        header: t('Reasoning Effort'),
+        accessorFn: (log) => parseLogOther(log.other)?.reasoning_effort,
+        cell: ({ row, getValue }) => {
+          if (!isTimingLogType(row.original.type)) return null
+          const settings = parseLogOther(row.original.other)?.request_reasoning
+          let mode = settings?.mode
+          if (mode === 'enabled') mode = t('Enabled')
+          if (mode === 'disabled') mode = t('Disabled')
+          if (mode === 'adaptive') mode = t('Adaptive thinking')
+          const effort = settings?.effort || (getValue() as string | undefined)
+          return (
+            <div className='flex flex-col gap-0.5 text-xs whitespace-nowrap'>
+              <span>{effort || (settings ? t('Effort not specified') : t('Original settings not recorded'))}</span>
+              {mode && <span className='text-muted-foreground'>{mode}</span>}
+              {settings?.budget != null && (
+                <span className='text-muted-foreground'>
+                  {t('Thinking budget')}: {settings.budget}
+                </span>
+              )}
+            </div>
+          )
+        },
+        meta: { label: t('Reasoning Effort') },
+        size: 110,
+      },
+      {
+        id: 'upstream_reasoning_effort',
+        header: t('Upstream Reasoning Effort'),
+        accessorFn: (log) =>
+          parseLogOther(log.other)?.upstream_reasoning_effort,
+        cell: ({ row, getValue }) =>
+          isTimingLogType(row.original.type) ? (
+            <span className='text-xs whitespace-nowrap'>
+              {(getValue() as string | undefined) || t('Not reported')}
+            </span>
+          ) : null,
+        meta: { label: t('Upstream Reasoning Effort') },
+        size: 150,
+      },
+      {
         accessorKey: 'is_stream',
         header: t('Stream'),
         cell: ({ row }) => {

@@ -15,7 +15,7 @@ const (
 	BillingSourceSubscription = "subscription"
 )
 
-// PreConsumeBilling 根据用户计费偏好创建 BillingSession 并执行预扣费。
+// PreConsumeBilling 创建计费会话，或为重试补充预扣额度。
 // 会话存储在 relayInfo.Billing 上，供后续 Settle / Refund 使用。
 func PreConsumeBilling(c *gin.Context, preConsumedQuota int, relayInfo *relaycommon.RelayInfo) *types.NewAPIError {
 	if relayInfo != nil && relayInfo.QuotaClamp != nil {
@@ -33,6 +33,12 @@ func PreConsumeBilling(c *gin.Context, preConsumedQuota int, relayInfo *relaycom
 			http.StatusBadRequest,
 			types.ErrOptionWithSkipRetry(),
 		)
+	}
+	if relayInfo != nil && relayInfo.Billing != nil {
+		if err := relayInfo.Billing.Reserve(preConsumedQuota); err != nil {
+			return types.NewError(err, types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
+		}
+		return nil
 	}
 	session, apiErr := NewBillingSession(c, relayInfo, preConsumedQuota)
 	if apiErr != nil {

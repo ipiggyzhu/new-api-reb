@@ -82,3 +82,35 @@ func TestInMemoryRateLimiterInitIsRaceFree(t *testing.T) {
 	assert.Equal(t, goroutines, granted,
 		"a budget of %d must admit exactly %d concurrent requests; a store replaced mid-flight would lose counted requests", goroutines, goroutines)
 }
+
+// Cleanup must use each key's request window, not the first middleware's
+// housekeeping interval, or long-window limits silently reset early.
+func TestInMemoryRateLimiterCleanupPreservesEachWindow(t *testing.T) {
+	for _, extendOnCheck := range []bool{false, true} {
+		t.Run(map[bool]string{false: "request window", true: "extended check window"}[extendOnCheck], func(t *testing.T) {
+			limiter := &InMemoryRateLimiter{}
+			limiter.Init(10 * time.Millisecond)
+			window := int64(3600)
+			if extendOnCheck {
+				window = 60
+			}
+			require.True(t, limiter.Request("long", 1, window))
+			require.True(t, limiter.Request("short", 1, 1))
+			if extendOnCheck {
+				require.False(t, limiter.Check("long", 1, 3600))
+			}
+			limiter.mutex.Lock()
+			*limiter.store["long"] = []int64{time.Now().Unix() - 120}
+			*limiter.store["short"] = []int64{time.Now().Unix() - 120}
+			limiter.mutex.Unlock()
+			// Wait for an actual cleanup pass, rather than guessing with a sleep.
+			require.Eventually(t, func() bool {
+				limiter.mutex.Lock()
+				defer limiter.mutex.Unlock()
+				_, exists := limiter.store["short"]
+				return !exists
+			}, time.Second, 5*time.Millisecond)
+			assert.False(t, limiter.Check("long", 1, 3600))
+		})
+	}
+}

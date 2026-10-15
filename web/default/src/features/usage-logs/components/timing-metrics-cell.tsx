@@ -84,11 +84,18 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
     props.completionTokens
   )
   const firstTokenLabel =
-    firstTokenSeconds == null ? t('N/A') : formatUseTime(firstTokenSeconds)
+    firstTokenSeconds == null
+      ? t('Not recorded')
+      : formatUseTime(firstTokenSeconds)
   const totalTimeLabel = formatUseTime(props.useTimeSec)
 
   const labels = (
-    <div className='flex min-h-8 min-w-0 flex-col justify-center gap-0.5 text-xs leading-tight'>
+    <div
+      className='flex min-h-8 min-w-0 flex-col justify-center gap-0.5 text-xs leading-tight'
+      title={t(
+        'Timing covers this API request, not client retries or the whole conversation turn. The first event may not contain answer text.'
+      )}
+    >
       {showFirstToken && (
         <div className='flex items-baseline gap-1.5'>
           {indicator === 'dot' && (
@@ -101,7 +108,7 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
             />
           )}
           <span className='text-muted-foreground shrink-0'>
-            {t('First token')}
+            {t('First upstream event')}
           </span>
           <span className={cn('tabular-nums', textColorMap[firstTokenVariant])}>
             {firstTokenLabel}
@@ -163,7 +170,11 @@ interface StreamTpsCellProps {
 export function StreamTpsCell(props: StreamTpsCellProps) {
   const { t } = useTranslation()
   const showStreamError =
-    props.isStream && props.streamStatus && props.streamStatus.status !== 'ok'
+    props.isStream &&
+    props.streamStatus &&
+    props.streamStatus.status !== 'ok' &&
+    props.streamStatus.status !== 'warning'
+  const thinkingOnly = props.isStream && props.streamStatus?.thinking_only
   const hitTokenLimit =
     props.isStream &&
     (props.streamStatus?.stop_reason === 'max_tokens' ||
@@ -177,6 +188,15 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
       ? `${Math.round(props.tokensPerSecond)} t/s`
       : '—'
   const streamLabel = props.isStream ? t('Stream') : t('Non-stream')
+  const thinkingOnlyDescription = t(
+    'Upstream returned thinking only, without answer text or a tool call.'
+  )
+  let alertLabel = stopReasonLabel
+  if (showStreamError) {
+    alertLabel = `${t('Stream Status')}: ${t('Error')}`
+  } else if (thinkingOnly) {
+    alertLabel = thinkingOnlyDescription
+  }
 
   return (
     <div
@@ -192,7 +212,7 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
         )}
       >
         {streamLabel}
-        {(showStreamError || hitTokenLimit) && (
+        {(showStreamError || hitTokenLimit || thinkingOnly) && (
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger
@@ -200,11 +220,7 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
                   <button
                     type='button'
                     className='inline-flex'
-                    aria-label={
-                      showStreamError
-                        ? `${t('Stream Status')}: ${t('Error')}`
-                        : stopReasonLabel
-                    }
+                    aria-label={alertLabel}
                   >
                     <CircleAlert
                       aria-hidden
@@ -231,6 +247,7 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
                       {t('Stop Reason')}: {stopReasonLabel}
                     </p>
                   )}
+                  {thinkingOnly && <p>{thinkingOnlyDescription}</p>}
                   {/* end_reason alone reads as 'eof' for a truncated reply,
                       because the connection did close cleanly. Without this the
                       tooltip flags an error and then names a healthy reason. */}
@@ -248,6 +265,11 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
           </TooltipProvider>
         )}
       </span>
+      {thinkingOnly && (
+        <span className='text-warning' title={thinkingOnlyDescription}>
+          {t('Thinking only')}
+        </span>
+      )}
       <span className='text-muted-foreground/60 px-0.5 tabular-nums'>
         {tpsLabel}
       </span>

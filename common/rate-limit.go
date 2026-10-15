@@ -7,19 +7,21 @@ import (
 
 type InMemoryRateLimiter struct {
 	store              map[string]*[]int64
+	windows            map[string]int64
 	mutex              sync.Mutex
 	once               sync.Once
 	expirationDuration time.Duration
 }
 
 // Init is called per request by the rate limit middlewares, so it must stay a
-// no-op after the first call: only the first expirationDuration is kept, and
-// sync.Once replaces the unsynchronized double-checked read of store.
+// no-op after the first call. The first expirationDuration sets the cleanup
+// cadence only; each key retains the longest request window it has used.
 func (l *InMemoryRateLimiter) Init(expirationDuration time.Duration) {
 	l.once.Do(func() {
 		l.mutex.Lock()
 		defer l.mutex.Unlock()
 		l.store = make(map[string]*[]int64)
+		l.windows = make(map[string]int64)
 		l.expirationDuration = expirationDuration
 		if expirationDuration > 0 {
 			go l.clearExpiredItems()
@@ -35,8 +37,9 @@ func (l *InMemoryRateLimiter) clearExpiredItems() {
 		for key := range l.store {
 			queue := l.store[key]
 			size := len(*queue)
-			if size == 0 || now-(*queue)[size-1] > int64(l.expirationDuration.Seconds()) {
+			if size == 0 || now-(*queue)[size-1] >= l.windows[key] {
 				delete(l.store, key)
+				delete(l.windows, key)
 			}
 		}
 		l.mutex.Unlock()
@@ -47,6 +50,9 @@ func (l *InMemoryRateLimiter) clearExpiredItems() {
 func (l *InMemoryRateLimiter) Request(key string, maxRequestNum int, duration int64) bool {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
+	if duration > l.windows[key] {
+		l.windows[key] = duration
+	}
 	// [old <-- new]
 	queue, ok := l.store[key]
 	now := time.Now().Unix()
@@ -82,6 +88,9 @@ func (l *InMemoryRateLimiter) Check(key string, maxRequestNum int, duration int6
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
 	queue, ok := l.store[key]
+	if ok && duration > l.windows[key] {
+		l.windows[key] = duration
+	}
 	if !ok || len(*queue) < maxRequestNum {
 		return true
 	}

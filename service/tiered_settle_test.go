@@ -9,6 +9,8 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/shopspring/decimal"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Claude Sonnet-style tiered expression: standard vs long-context
@@ -87,6 +89,7 @@ func TestTryTieredSettleUsesFrozenRequestInput(t *testing.T) {
 
 func TestTryTieredSettleFallsBackToFrozenPreConsumeOnExprError(t *testing.T) {
 	relayInfo := &relaycommon.RelayInfo{
+		RequestId:             "tiered-fallback-test",
 		FinalPreConsumedQuota: 321,
 		TieredBillingSnapshot: &billingexpr.BillingSnapshot{
 			BillingMode:              "tiered_expr",
@@ -96,17 +99,17 @@ func TestTryTieredSettleFallsBackToFrozenPreConsumeOnExprError(t *testing.T) {
 			EstimatedQuotaAfterGroup: 123,
 		},
 	}
-
 	ok, quota, result := TryTieredSettle(relayInfo, billingexpr.TokenParams{P: 100})
-	if !ok {
-		t.Fatal("expected tiered settle to apply")
-	}
-	if quota != 321 {
-		t.Fatalf("quota = %d, want 321", quota)
-	}
-	if result != nil {
-		t.Fatalf("result = %#v, want nil", result)
-	}
+	require.True(t, ok)
+	assert.Equal(t, 321, quota)
+	require.Nil(t, result)
+	other := map[string]interface{}{"admin_info": map[string]interface{}{"use_channel": []string{"1"}}}
+	InjectTieredBillingInfo(other, relayInfo, result)
+	admin, ok := other["admin_info"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, true, admin["tiered_billing_fallback"])
+	assert.Equal(t, []string{"1"}, admin["use_channel"])
+	assert.NotContains(t, other, "tiered_billing_fallback")
 }
 
 // ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@ package billing_setting
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/setting/config"
@@ -18,9 +19,17 @@ const (
 // BillingSetting is managed by config.GlobalConfig.Register.
 // DB keys: billing_setting.billing_mode, billing_setting.billing_expr
 type BillingSetting struct {
+	mu          sync.RWMutex
 	BillingMode map[string]string `json:"billing_mode"`
 	BillingExpr map[string]string `json:"billing_expr"`
 }
+
+// The config layer uses these locks while decoding/exporting the registered
+// maps, and request-path readers use the same lock.
+func (s *BillingSetting) Lock()    { s.mu.Lock() }
+func (s *BillingSetting) Unlock()  { s.mu.Unlock() }
+func (s *BillingSetting) RLock()   { s.mu.RLock() }
+func (s *BillingSetting) RUnlock() { s.mu.RUnlock() }
 
 var billingSetting = BillingSetting{
 	BillingMode: make(map[string]string),
@@ -36,6 +45,8 @@ func init() {
 // ---------------------------------------------------------------------------
 
 func GetBillingMode(model string) string {
+	billingSetting.RLock()
+	defer billingSetting.RUnlock()
 	if mode, ok := billingSetting.BillingMode[model]; ok {
 		return mode
 	}
@@ -43,24 +54,32 @@ func GetBillingMode(model string) string {
 }
 
 func GetBillingExpr(model string) (string, bool) {
+	billingSetting.RLock()
+	defer billingSetting.RUnlock()
 	expr, ok := billingSetting.BillingExpr[model]
 	return expr, ok
 }
 
 func GetBillingModeCopy() map[string]string {
+	billingSetting.RLock()
+	defer billingSetting.RUnlock()
 	return lo.Assign(billingSetting.BillingMode)
 }
 
 func GetBillingExprCopy() map[string]string {
+	billingSetting.RLock()
+	defer billingSetting.RUnlock()
 	return lo.Assign(billingSetting.BillingExpr)
 }
 
 func GetPricingSyncData(base map[string]any) map[string]any {
+	billingSetting.RLock()
+	defer billingSetting.RUnlock()
 	extra := make(map[string]any, 2)
-	if modes := GetBillingModeCopy(); len(modes) > 0 {
+	if modes := lo.Assign(billingSetting.BillingMode); len(modes) > 0 {
 		extra[BillingModeField] = modes
 	}
-	if exprs := GetBillingExprCopy(); len(exprs) > 0 {
+	if exprs := lo.Assign(billingSetting.BillingExpr); len(exprs) > 0 {
 		extra[BillingExprField] = exprs
 	}
 	return lo.Assign(base, extra)

@@ -465,6 +465,15 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const details = props.log.content ?? ''
   const other = parseLogOther(props.log.other)
   const typeConfig = getLogTypeConfig(props.log.type)
+  let streamStatusLabel = t('Error')
+  let streamStatusVariant: StatusBadgeProps['variant'] = 'danger'
+  if (other?.stream_status?.status === 'ok') {
+    streamStatusLabel = t('Success')
+    streamStatusVariant = 'success'
+  } else if (other?.stream_status?.status === 'warning') {
+    streamStatusLabel = t('Warning')
+    streamStatusVariant = 'warning'
+  }
 
   const isViolation = isViolationFeeLog(other)
   const isRefund = props.log.type === 6
@@ -1100,19 +1109,21 @@ export function DetailsDialog(props: DetailsDialogProps) {
                 label={t('Status')}
                 value={
                   <StatusBadge
-                    label={
-                      other.stream_status.status === 'ok'
-                        ? t('Success')
-                        : t('Error')
-                    }
-                    variant={
-                      other.stream_status.status === 'ok' ? 'success' : 'danger'
-                    }
+                    label={streamStatusLabel}
+                    variant={streamStatusVariant}
                     size='sm'
                     copyable={false}
                   />
                 }
               />
+              {other.stream_status.thinking_only && (
+                <DetailRow
+                  label={t('Thinking only')}
+                  value={t(
+                    'Upstream returned thinking only, without answer text or a tool call.'
+                  )}
+                />
+              )}
               {other.stream_status.end_reason && (
                 <DetailRow
                   label={t('End Reason')}

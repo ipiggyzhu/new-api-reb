@@ -85,6 +85,7 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 }
 
 func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claudeInfo *ClaudeResponseInfo, data string) *types.NewAPIError {
+	info.CaptureUpstreamReasoning(data)
 	var claudeResponse dto.ClaudeResponse
 	err := common.UnmarshalJsonStr(data, &claudeResponse)
 	if err != nil {
@@ -241,6 +242,10 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	if err != nil {
 		return nil, err
 	}
+	if claudeInfo.HasThinking && !claudeInfo.HasNonThinkingContent {
+		info.StreamStatus.MarkThinkingOnly()
+		logger.LogWarn(c, "upstream returned thinking without answer text or other content")
+	}
 	// Before the terminator, not after: HandleStreamFinalResponse writes
 	// [DONE], and once anything is on the wire shouldRetry refuses to move the
 	// request to another channel.
@@ -304,6 +309,7 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	if err != nil {
 		return types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
+	info.CaptureUpstreamReasoning(string(data))
 	if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
 		return types.WithClaudeError(*claudeError, http.StatusInternalServerError)
 	}

@@ -286,10 +286,10 @@ const SENSITIVE_FORM_FIELDS = [
   'proxy',
   'pass_through_body_enabled',
   'responses_reasoning_fallback',
-  'responses_force_high_effort',
   'websocket_transport',
   'synthetic_client_headers',
   'synthetic_client_headers_profile',
+  'cli_version_profile',
   'tls_fingerprint_enabled',
   'tls_fingerprint',
   'custom_client_identity_enabled',
@@ -350,7 +350,6 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.thinking_to_content ||
     values.pass_through_body_enabled ||
     values.responses_reasoning_fallback ||
-    values.responses_force_high_effort ||
     values.websocket_transport ||
     (values.synthetic_client_headers_profile ?? 'off') !== 'off' ||
     values.custom_client_identity_enabled ||
@@ -4222,31 +4221,6 @@ export function ChannelMutateDrawer({
 
                               <FormField
                                 control={form.control}
-                                name='responses_force_high_effort'
-                                render={({ field }) => (
-                                  <FormItem className='flex items-center justify-between gap-3 px-4 py-3'>
-                                    <div className='space-y-0.5'>
-                                      <FormLabel>
-                                        {t('Fix Responses Effort to High')}
-                                      </FormLabel>
-                                      <FormDescription>
-                                        {t(
-                                          'Force outgoing Responses effort and existing Codex turn metadata to high, including body passthrough. Overrides effort settings only; preserves history and identity. Does not rewrite upstream replies or guarantee provider behavior. Off by default.'
-                                        )}
-                                      </FormDescription>
-                                    </div>
-                                    <FormControl>
-                                      <Switch
-                                        checked={field.value ?? false}
-                                        onCheckedChange={field.onChange}
-                                      />
-                                    </FormControl>
-                                  </FormItem>
-                                )}
-                              />
-
-                              <FormField
-                                control={form.control}
                                 name='websocket_transport'
                                 render={({ field }) => (
                                   <FormItem className='px-4 py-3'>
@@ -4279,16 +4253,12 @@ export function ChannelMutateDrawer({
                                 )}
                               />
 
-                              <ChannelClientIdentityFields />
-
                               <FormField
                                 control={form.control}
                                 name='synthetic_client_headers_profile'
                                 render={({ field }) => (
                                   <FormItem className='px-4 py-3'>
-                                    <FormLabel>
-                                      {t('Synthesize Client Headers and Body')}
-                                    </FormLabel>
+                                    <FormLabel>{t('Client type')}</FormLabel>
                                     <Select
                                       items={[
                                         {
@@ -4318,7 +4288,25 @@ export function ChannelMutateDrawer({
                                           label: t('Generic HTTP client'),
                                         },
                                       ]}
-                                      onValueChange={field.onChange}
+                                      onValueChange={(next) => {
+                                        if (!next || next === field.value) {
+                                          return
+                                        }
+                                        field.onChange(next)
+                                        form.setValue(
+                                          'cli_version_profile',
+                                          '',
+                                          { shouldDirty: true }
+                                        )
+                                        form.setValue('tls_fingerprint', '', {
+                                          shouldDirty: true,
+                                        })
+                                        form.setValue(
+                                          'tls_fingerprint_enabled',
+                                          false,
+                                          { shouldDirty: true }
+                                        )
+                                      }}
                                       value={field.value ?? 'off'}
                                     >
                                       <FormControl>
@@ -4357,7 +4345,7 @@ export function ChannelMutateDrawer({
                                     </Select>
                                     <FormDescription>
                                       {t(
-                                        'Claude Code (Messages) and Codex (Responses) also align body structure, cache markers and behavior headers. Device/session IDs are isolated; explicit parameters are preserved. Other protocols stay unchanged. Off keeps new-api defaults. Client versions remain configurable in system settings.'
+                                        'Choose the client type first, then its version below. Changing the client type resets the version and any legacy TLS override; device/session identities and requested reasoning effort stay unchanged.'
                                       )}
                                     </FormDescription>
                                     {(field.value === 'claude' ||
@@ -4377,6 +4365,8 @@ export function ChannelMutateDrawer({
                                   </FormItem>
                                 )}
                               />
+
+                              <ChannelClientIdentityFields />
 
                               <FormField
                                 control={form.control}

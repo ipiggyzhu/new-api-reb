@@ -1,16 +1,79 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 	"gorm.io/gorm"
 )
+
+func TestApplyChannelModelSweepAtomicAndConcurrentChanges(t *testing.T) {
+	for _, scenario := range []string{"empty", "disabled", "edited", "ability write fails"} {
+		t.Run(scenario, func(t *testing.T) {
+			channel := openChannelSettingsTestDB(t)
+			require.NoError(t, DB.AutoMigrate(&Ability{}))
+			channel.Status = common.ChannelStatusEnabled
+			require.NoError(t, DB.Save(channel).Error)
+			require.NoError(t, channel.AddAbilities(nil))
+			switch scenario {
+			case "disabled":
+				require.NoError(t, DB.Model(channel).Update("status", common.ChannelStatusManuallyDisabled).Error)
+			case "edited":
+				require.NoError(t, DB.Model(&Channel{}).Where("id = ?", channel.Id).Update("models", "operator-model").Error)
+			case "ability write fails":
+				require.NoError(t, DB.Callback().Delete().Before("gorm:delete").Register("fail-sweep-abilities", func(tx *gorm.DB) {
+					if tx.Statement.Table == "abilities" {
+						tx.AddError(errors.New("injected ability delete failure"))
+					}
+				}))
+			}
+			applied, err := ApplyChannelModelSweep(channel, "", nil, true)
+			stored, loadErr := GetChannelById(channel.Id, true)
+			require.NoError(t, loadErr)
+			var abilities []Ability
+			require.NoError(t, DB.Where("channel_id = ?", channel.Id).Find(&abilities).Error)
+			switch scenario {
+			case "empty":
+				require.NoError(t, err)
+				assert.True(t, applied)
+				assert.Empty(t, stored.Models)
+				assert.Equal(t, common.ChannelStatusAutoDisabled, stored.Status)
+				assert.NotEmpty(t, stored.GetOtherInfo()["status_reason"])
+				assert.Empty(t, abilities)
+				assert.Contains(t, stored.GetOtherSettings().UpstreamModelUpdateModelHealth, "gpt-4o")
+				require.NoError(t, stored.AddAbilities(nil))
+				var count int64
+				require.NoError(t, DB.Model(&Ability{}).Where("channel_id = ?", channel.Id).Count(&count).Error)
+				assert.Zero(t, count, "rebuilding empty-channel abilities must not create an empty-model route")
+			case "disabled":
+				require.NoError(t, err)
+				assert.False(t, applied)
+				assert.Equal(t, "gpt-4o", stored.Models)
+				assert.Len(t, abilities, 1)
+			case "edited":
+				require.ErrorContains(t, err, "configuration changed")
+				assert.False(t, applied)
+				assert.Equal(t, "operator-model", stored.Models)
+			case "ability write fails":
+				require.ErrorContains(t, err, "injected ability delete failure")
+				assert.False(t, applied)
+				assert.Equal(t, "gpt-4o", stored.Models, "model write must roll back with failed ability write")
+				assert.Len(t, abilities, 1)
+				assert.Empty(t, stored.GetOtherSettings().UpstreamModelUpdateModelHealth)
+				assert.Equal(t, common.ChannelStatusEnabled, stored.Status, "disable must roll back with the model and ability changes")
+				assert.Empty(t, stored.GetOtherInfo()["status_reason"])
+			}
+		})
+	}
+}
 
 // openChannelSettingsTestDB gives each test its own channels table with one row,
 // and points the package-level DB at it for the duration of the test.
@@ -42,6 +105,101 @@ func openChannelSettingsTestDB(t *testing.T) *Channel {
 	}
 	require.NoError(t, db.Create(channel).Error)
 	return channel
+}
+
+// A model hidden by the retired availability quarantine must become routable and
+// visible in the model plaza again, while unrelated settings survive the repair.
+func TestRepairChannelModelAvailabilityRestoresListedModels(t *testing.T) {
+	channel := openChannelSettingsTestDB(t)
+	require.NoError(t, DB.AutoMigrate(&Ability{}))
+	channel.Status = common.ChannelStatusEnabled
+	channel.Models = "gpt-4o,gpt-4o-mini"
+	channel.OtherSettings = `{"model_availability":{"gpt-4o":{"state":"temporary","checked_at":1}},"upstream_model_update_last_check_time":42,"future":{"kept":true}}`
+	require.NoError(t, DB.Save(channel).Error)
+	// The quarantine built abilities for gpt-4o-mini only.
+	require.NoError(t, DB.Create(&Ability{Group: "default", Model: "gpt-4o-mini", ChannelId: channel.Id, Enabled: true}).Error)
+	require.NotContains(t, GetEnabledModels(), "gpt-4o")
+
+	require.NoError(t, repairChannelModelAvailability(DB))
+
+	stored, err := GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-4o,gpt-4o-mini", stored.Models)
+	assert.False(t, gjson.Get(stored.OtherSettings, "model_availability").Exists())
+	assert.Equal(t, int64(42), gjson.Get(stored.OtherSettings, "upstream_model_update_last_check_time").Int())
+	assert.True(t, gjson.Get(stored.OtherSettings, "future.kept").Bool())
+	assert.ElementsMatch(t, []string{"gpt-4o", "gpt-4o-mini"}, GetEnabledModels())
+	snapshot, ok := buildChannelCacheSnapshot()
+	require.True(t, ok)
+	assert.Contains(t, snapshot.group2model2channels["default"]["gpt-4o"], channel.Id)
+
+	var writes int
+	require.NoError(t, DB.Callback().Update().Before("gorm:update").Register("count_availability_repair", func(tx *gorm.DB) {
+		writes++
+	}))
+	require.NoError(t, repairChannelModelAvailability(DB))
+	assert.Zero(t, writes, "a repeated repair must not rewrite any channel")
+}
+
+// Only a confirmed failure changes routing, and it does so by deleting the model
+// from the channel: database, abilities and cache always agree with Models.
+func TestApplyChannelModelSweepRemovedModelLeavesEveryRoute(t *testing.T) {
+	channel := openChannelSettingsTestDB(t)
+	require.NoError(t, DB.AutoMigrate(&Ability{}))
+	channel.Status = common.ChannelStatusEnabled
+	channel.Models = "gpt-4o,gpt-4o-mini"
+	require.NoError(t, DB.Save(channel).Error)
+	require.NoError(t, channel.AddAbilities(nil))
+
+	applied, err := ApplyChannelModelSweep(channel, "gpt-4o-mini", nil, false)
+	require.NoError(t, err)
+	require.True(t, applied)
+
+	stored, err := GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-4o-mini", stored.Models)
+	assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+	assert.Equal(t, []string{"gpt-4o-mini"}, GetEnabledModels())
+	assert.Contains(t, stored.GetOtherSettings().UpstreamModelUpdateModelHealth, "gpt-4o", "removed model stays a retry candidate")
+	snapshot, ok := buildChannelCacheSnapshot()
+	require.True(t, ok)
+	assert.Empty(t, snapshot.group2model2channels["default"]["gpt-4o"])
+	assert.Contains(t, snapshot.group2model2channels["default"]["gpt-4o-mini"], channel.Id)
+}
+
+// An enabled channel emptied by the sweep must not keep a synthetic empty-model
+// route in the live cache while abilities correctly reports no routes.
+func TestApplyChannelModelSweepEmptyChannelHasNoRoutes(t *testing.T) {
+	channel := openChannelSettingsTestDB(t)
+	require.NoError(t, DB.AutoMigrate(&Ability{}))
+	setupChannelCacheTest(t)
+	channel.Status = common.ChannelStatusEnabled
+	require.NoError(t, DB.Save(channel).Error)
+	require.NoError(t, channel.AddAbilities(nil))
+	InitChannelCache()
+
+	applied, err := ApplyChannelModelSweep(channel, "", nil, false)
+	require.NoError(t, err)
+	require.True(t, applied)
+
+	cached, err := CacheGetChannel(channel.Id)
+	require.NoError(t, err)
+	assert.Empty(t, cached.Models)
+	assert.Equal(t, common.ChannelStatusEnabled, cached.Status)
+	assert.Empty(t, GetEnabledModels())
+	for _, phase := range []string{"sweep", "cache re-enable"} {
+		t.Run(phase, func(t *testing.T) {
+			if phase == "cache re-enable" {
+				CacheUpdateChannelStatus(channel.Id, common.ChannelStatusAutoDisabled)
+				CacheUpdateChannelStatus(channel.Id, common.ChannelStatusEnabled)
+			}
+			for _, modelName := range []string{"gpt-4o", ""} {
+				picked, err := GetRandomSatisfiedChannel("default", modelName, 0, "", nil)
+				require.NoError(t, err)
+				assert.True(t, picked == nil, "an empty channel must not serve model %q", modelName)
+			}
+		})
+	}
 }
 
 func storedSettings(t *testing.T, channelId int) dto.ChannelOtherSettings {

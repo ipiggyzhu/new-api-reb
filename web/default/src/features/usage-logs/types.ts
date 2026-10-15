@@ -191,6 +191,12 @@ export interface LogOtherData {
   expr_b64?: string
   matched_tier?: string
   reasoning_effort?: string
+  request_reasoning?: {
+    effort?: string
+    mode?: string
+    budget?: number
+  }
+  upstream_reasoning_effort?: string
   image?: boolean
   image_ratio?: number
   image_output?: number
@@ -216,6 +222,7 @@ export interface LogOtherData {
     error_count?: number
     end_error?: string
     errors?: string[]
+    thinking_only?: boolean
     // Set when the upstream delivered content and then closed without ending
     // the message. end_reason stays 'eof' in that case because the connection
     // itself closed cleanly, so this is the only field that tells a truncated

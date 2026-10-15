@@ -26,6 +26,10 @@ type ClaudeResponseInfo struct {
 	// delta at all. Callers use it to tell an upstream that produced nothing
 	// from one that produced something the caller happens not to bill for.
 	HasContent bool
+	// Content presence is not the same as an answer. Keep this observation
+	// separate from transport completion and token accounting.
+	HasThinking           bool
+	HasNonThinkingContent bool
 	// SawTerminator records that the upstream closed the message off, by either
 	// frame that can end one: message_delta or message_stop.
 	//
@@ -418,14 +422,27 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 		if claudeResponse.Delta != nil {
 			if claudeResponse.Delta.Text != nil {
 				claudeInfo.HasContent = true
+				if strings.TrimSpace(*claudeResponse.Delta.Text) != "" {
+					claudeInfo.HasNonThinkingContent = true
+				}
 				claudeInfo.ResponseText.WriteString(*claudeResponse.Delta.Text)
 			}
 			if claudeResponse.Delta.Thinking != nil {
 				claudeInfo.HasContent = true
+				claudeInfo.HasThinking = true
 				claudeInfo.ResponseText.WriteString(*claudeResponse.Delta.Thinking)
 			}
 			if claudeResponse.Delta.PartialJson != nil {
 				claudeInfo.HasContent = true
+				claudeInfo.HasNonThinkingContent = true
+			}
+			switch claudeResponse.Delta.Type {
+			case "signature_delta":
+				claudeInfo.HasThinking = true
+			case "", "thinking_delta", "text_delta", "input_json_delta":
+			default:
+				// Do not label future content types as thinking-only.
+				claudeInfo.HasNonThinkingContent = true
 			}
 		}
 	} else if claudeResponse.Type == "message_delta" {
@@ -456,6 +473,20 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 		claudeInfo.Done = true
 	} else if claudeResponse.Type == "content_block_start" {
 		claudeInfo.HasContent = true
+		if block := claudeResponse.ContentBlock; block != nil {
+			switch block.Type {
+			case "thinking", "redacted_thinking":
+				claudeInfo.HasThinking = true
+			case "text":
+				if strings.TrimSpace(block.GetText()) != "" {
+					claudeInfo.HasNonThinkingContent = true
+				}
+			default:
+				claudeInfo.HasNonThinkingContent = true
+			}
+		} else {
+			claudeInfo.HasNonThinkingContent = true
+		}
 	} else {
 		return false
 	}

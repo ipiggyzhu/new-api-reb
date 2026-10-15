@@ -117,6 +117,9 @@ func TLSFingerprintRuntimeHeaders(fingerprint string) map[string]string {
 // raw-hello lookups build on.
 func lookupTLSFingerprint(fingerprint string) (tlsFingerprintOption, bool) {
 	fingerprint = strings.ToLower(strings.TrimSpace(fingerprint))
+	if p := LookupCLIVersionProfile(fingerprint); p != nil {
+		return tlsFingerprintOption{ID: p.ID, Label: p.Label, ClientFamily: p.Family, helloID: utls.HelloCustom, rawHello: p.ClientHelloHex}, true
+	}
 	for _, opt := range supportedTLSFingerprints {
 		if opt.ID == fingerprint {
 			return opt, true
@@ -144,6 +147,11 @@ func IsSupportedTLSFingerprint(name string) bool {
 	if strings.TrimSpace(name) == "" {
 		return true
 	}
+	// Complete version profiles are selected through cli_version_profile, never
+	// the legacy TLS-only field (which could pair them with another CLI's body).
+	if LookupCLIVersionProfile(name) != nil {
+		return false
+	}
 	_, ok := clientHelloIDForFingerprint(name)
 	return ok
 }
@@ -164,10 +172,12 @@ func resetFingerprintClientCache() {
 
 // GetFingerprintHTTPClient returns a client whose TLS ClientHello matches the
 // named preset, dialing through proxyURL when set. Clients are cached per
-// (fingerprint, proxy) pair. An unknown fingerprint is an error so a channel
+// fingerprint, proxy and header-order profile. The optional client family keeps
+// TLS-only callers independent from Codex's captured HTTP/1.1 header order.
+// An unknown fingerprint is an error so a channel
 // misconfiguration surfaces on the channel test rather than silently sending
 // Go's default handshake.
-func GetFingerprintHTTPClient(proxyURL, fingerprint string) (*http.Client, error) {
+func GetFingerprintHTTPClient(proxyURL, fingerprint string, clientFamily ...string) (*http.Client, error) {
 	opt, ok := lookupTLSFingerprint(fingerprint)
 	if !ok {
 		return nil, fmt.Errorf("unsupported tls fingerprint: %q", fingerprint)
@@ -186,7 +196,12 @@ func GetFingerprintHTTPClient(proxyURL, fingerprint string) (*http.Client, error
 		}
 	}
 
-	key := fingerprint + "\x00" + proxyURL
+	orderedCodex := len(clientFamily) > 0 && clientFamily[0] == constant.ClientHeaderFamilyCodex
+	var headerOrder []string
+	if p := LookupCLIVersionProfile(fingerprint); p != nil && len(clientFamily) > 0 && p.Family == clientFamily[0] {
+		headerOrder = p.HeaderOrder
+	}
+	key := fmt.Sprintf("%s\x00%s\x00%t\x00%t", fingerprint, proxyURL, orderedCodex, headerOrder != nil)
 	fingerprintClientLock.Lock()
 	if client, ok := fingerprintClients[key]; ok {
 		fingerprintClientLock.Unlock()
@@ -195,10 +210,12 @@ func GetFingerprintHTTPClient(proxyURL, fingerprint string) (*http.Client, error
 	fingerprintClientLock.Unlock()
 
 	rt := &utlsRoundTripper{
-		helloID:     opt.helloID,
-		customHello: customHello,
-		proxyURL:    proxyURL,
-		insecure:    common.TLSInsecureSkipVerify,
+		helloID:      opt.helloID,
+		customHello:  customHello,
+		proxyURL:     proxyURL,
+		insecure:     common.TLSInsecureSkipVerify,
+		orderedCodex: orderedCodex,
+		headerOrder:  headerOrder,
 	}
 	// ConfigureTransports links a fresh http.Transport to an http2.Transport so
 	// NewClientConn can drive HTTP/2 over the utls conn. A bare &http2.Transport{}
@@ -252,10 +269,12 @@ type utlsRoundTripper struct {
 	// reconstructed into a spec per dial and replayed via HelloCustom+ApplyPreset.
 	// It is parsed fresh each handshake because a ClientHelloSpec holds mutable
 	// extension state (key shares) that must not be shared across connections.
-	customHello []byte
-	proxyURL    string
-	insecure    bool
-	h2          *http2.Transport
+	customHello  []byte
+	proxyURL     string
+	insecure     bool
+	h2           *http2.Transport
+	orderedCodex bool
+	headerOrder  []string
 }
 
 // connClosingBody closes an extra resource (the HTTP/2 ClientConn) when the
@@ -397,6 +416,9 @@ func (rt *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 // context cancellation and connection close are handled by net/http rather than
 // reimplemented.
 func (rt *utlsRoundTripper) roundTripOverConn(req *http.Request, conn net.Conn) (*http.Response, error) {
+	if rt.orderedCodex || rt.headerOrder != nil {
+		conn = &codexHeaderOrderConn{Conn: conn, order: rt.headerOrder}
+	}
 	// Not DisableKeepAlives: that makes net/http add "Connection: close", which
 	// the real CLIs do not send, so the fingerprint would change the headers too.
 	// A negative per-host idle limit refuses the conn back into the pool instead,

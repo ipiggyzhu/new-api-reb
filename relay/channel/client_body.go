@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -137,6 +138,10 @@ func prepareCLIRequest(c *gin.Context, info *relaycommon.RelayInfo, requestURL s
 	settings := info.ChannelSetting
 	settings.Normalize(info.ApiType)
 	family := settings.SyntheticClientHeadersProfile
+	version, err := service.ResolveCLIVersionProfile(settings.CLIVersionProfile, family, settings.TLSFingerprint, settings.WebsocketTransport)
+	if err != nil {
+		return requestURL, reader, nil, err
+	}
 	if family != constant.ClientHeaderFamilyClaude && family != constant.ClientHeaderFamilyCodex {
 		return requestURL, reader, nil, nil
 	}
@@ -153,6 +158,19 @@ func prepareCLIRequest(c *gin.Context, info *relaycommon.RelayInfo, requestURL s
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		return requestURL, reader, nil, fmt.Errorf("read CLI request body: %w", err)
+	}
+	reference := data
+	if codex || version != nil {
+		// Use the original request only as an ordering template, never as a
+		// source of values: conversion, overrides and fallback remain effective.
+		if cached, ok := c.Get(common.KeyBodyStorage); ok {
+			if storage, ok := cached.(common.BodyStorage); ok {
+				reference, err = storage.Bytes()
+				if err != nil {
+					return requestURL, reader, nil, err
+				}
+			}
+		}
 	}
 	var body cliObject
 	if err := common.Unmarshal(data, &body); err != nil || body == nil {
@@ -174,14 +192,21 @@ func prepareCLIRequest(c *gin.Context, info *relaycommon.RelayInfo, requestURL s
 			headers.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 			headers.Set("Connection", "keep-alive")
 		}
-		err = shapeClaudeCodeBody(body, identity)
+		err = shapeClaudeCodeBody(body, identity, version)
 		query := u.Query()
 		query.Set("beta", "true")
 		u.RawQuery = query.Encode()
 		headers.Set("anthropic-beta", claudeCodeBeta)
 		headers.Set("X-Claude-Code-Session-Id", identity.session)
+		if version != nil {
+			headers.Set("anthropic-beta", version.Headers["anthropic-beta"])
+			headers.Set("Accept-Encoding", version.Headers["accept-encoding"])
+			if version.LegacyUserID {
+				headers.Del("X-Claude-Code-Session-Id")
+			}
+		}
 	} else {
-		err = shapeCodexBody(body, identity)
+		err = shapeCodexBody(body, identity, version)
 		headers.Set("x-codex-beta-features", "remote_compaction_v2")
 		headers.Set("x-openai-internal-codex-responses-lite", "true")
 		headers.Set("session-id", identity.session)
@@ -189,13 +214,46 @@ func prepareCLIRequest(c *gin.Context, info *relaycommon.RelayInfo, requestURL s
 		headers.Set("x-client-request-id", identity.turn)
 		headers.Set("x-codex-window-id", identity.window)
 		headers.Set("x-codex-turn-metadata", gjson.GetBytes(body["client_metadata"], "x-codex-turn-metadata").String())
+		if version != nil {
+			headers.Set("x-codex-beta-features", version.Headers["x-codex-beta-features"])
+			if value := version.Headers["x-openai-internal-codex-responses-lite"]; value != "" {
+				headers.Set("x-openai-internal-codex-responses-lite", value)
+			} else {
+				headers.Del("x-openai-internal-codex-responses-lite")
+			}
+			if version.Version == "0.134.0" {
+				headers.Set("x-client-request-id", identity.session)
+			}
+			var metadata cliObject
+			_ = common.Unmarshal(body["client_metadata"], &metadata)
+			selected := cliObject{}
+			for _, key := range version.MetadataKeys {
+				if value, ok := metadata[key]; ok {
+					selected[key] = value
+				}
+			}
+			body["client_metadata"] = cliField(selected)
+		}
 	}
 	if err != nil {
 		return requestURL, reader, nil, err
 	}
+	if codex {
+		info.ReasoningEffort = gjson.GetBytes(body["reasoning"], "effort").String()
+	}
 	data, err = common.Marshal(body)
 	if err != nil {
 		return requestURL, reader, nil, fmt.Errorf("encode CLI request body: %w", err)
+	}
+	if version != nil {
+		data = orderVersionedCLIJSON(gjson.ParseBytes(data), gjson.ParseBytes(reference), "", version)
+		if codex {
+			turn := orderVersionedCLIJSON(gjson.Parse(headers.Get("x-codex-turn-metadata")), gjson.Result{}, "turn_metadata", version)
+			headers.Set("x-codex-turn-metadata", string(turn))
+		}
+	} else if codex {
+		data = orderCodexJSON(gjson.ParseBytes(data), gjson.ParseBytes(reference), "")
+		headers.Set("x-codex-turn-metadata", gjson.GetBytes(data, "client_metadata.x-codex-turn-metadata").String())
 	}
 	info.UpstreamRequestBodySize = int64(len(data))
 	return u.String(), bytes.NewReader(data), headers, nil
@@ -223,7 +281,11 @@ func cliContentBlocks(raw json.RawMessage, textType string) ([]cliObject, error)
 	return blocks, nil
 }
 
-func shapeClaudeCodeBody(body cliObject, identity cliIdentity) error {
+func shapeClaudeCodeBody(body cliObject, identity cliIdentity, versions ...*service.CLIVersionProfile) error {
+	var version *service.CLIVersionProfile
+	if len(versions) > 0 {
+		version = versions[0]
+	}
 	system, err := cliContentBlocks(body["system"], "text")
 	if err != nil {
 		return err
@@ -307,6 +369,9 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity) error {
 		// Match the captured CLI's built-in order without advertising tools the
 		// caller cannot execute. Unknown/MCP tools retain their relative order.
 		order := []string{"Agent", "Bash", "Edit", "Glob", "Grep", "ListAgents", "Read", "ReportFindings", "ScheduleWakeup", "Skill", "ToolSearch", "Workflow", "DeferredToolPlaceholder", "Write"}
+		if version != nil {
+			order = version.ToolOrder
+		}
 		rank := make(map[string]int, len(order))
 		for i, name := range order {
 			rank[name] = i - len(order)
@@ -320,10 +385,13 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity) error {
 	}
 	if _, ok := body["max_tokens"]; !ok {
 		body["max_tokens"] = json.RawMessage(`128000`)
+		if version != nil {
+			body["max_tokens"] = cliField(version.MaxTokens)
+		}
 	}
 	// Adaptive thinking is model-dependent. Do not impose an Opus 5.5-only
 	// setting on older models simply because they share the Claude wire format.
-	if strings.HasPrefix(gjson.ParseBytes(body["model"]).String(), "claude-opus-5-5") {
+	if version == nil && strings.HasPrefix(gjson.ParseBytes(body["model"]).String(), "claude-opus-5-5") {
 		if _, ok := body["thinking"]; !ok {
 			body["thinking"] = json.RawMessage(`{"type":"adaptive","display":"omitted"}`)
 		}
@@ -332,7 +400,7 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity) error {
 		}
 	}
 	thinkingType := gjson.GetBytes(body["thinking"], "type").String()
-	if _, ok := body["context_management"]; !ok && (thinkingType == "enabled" || thinkingType == "adaptive") {
+	if _, ok := body["context_management"]; !ok && (version == nil || version.ContextManagement) && (thinkingType == "enabled" || thinkingType == "adaptive") {
 		body["context_management"] = json.RawMessage(`{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`)
 	}
 	var metadata cliObject
@@ -349,11 +417,19 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity) error {
 	metadata["user_id"] = cliField(string(cliField(map[string]string{
 		"device_id": identity.device, "account_uuid": "", "session_id": identity.session,
 	})))
+	if version != nil && version.LegacyUserID {
+		metadata["user_id"] = cliField("user_" + identity.device + "_account__session_" + identity.session)
+	}
 	body["metadata"] = cliField(metadata)
 	return nil
 }
 
-func shapeCodexBody(body cliObject, identity cliIdentity) error {
+func shapeCodexBody(body cliObject, identity cliIdentity, versions ...*service.CLIVersionProfile) error {
+	var version *service.CLIVersionProfile
+	if len(versions) > 0 {
+		version = versions[0]
+	}
+	toolsInInput := version == nil || version.ToolsInInput
 	var input []cliObject
 	if common.GetJsonType(body["input"]) == "string" {
 		input = []cliObject{{"role": cliField("user"), "content": body["input"]}}
@@ -362,7 +438,21 @@ func shapeCodexBody(body cliObject, identity cliIdentity) error {
 			return fmt.Errorf("Codex CLI input must be text or an array")
 		}
 	}
-	if instructions := body["instructions"]; common.GetJsonType(instructions) == "string" && gjson.ParseBytes(instructions).String() != "" {
+	if !toolsInInput {
+		for i, item := range input {
+			if gjson.ParseBytes(item["type"]).String() != "additional_tools" {
+				continue
+			}
+			if i != 0 || len(body["tools"]) > 0 {
+				return fmt.Errorf("selected CLI version cannot represent historical additional_tools changes; select a newer CLI profile")
+			}
+			body["tools"] = item["tools"]
+		}
+		if len(input) > 0 && gjson.ParseBytes(input[0]["type"]).String() == "additional_tools" {
+			input = input[1:]
+		}
+	}
+	if instructions := body["instructions"]; toolsInInput && common.GetJsonType(instructions) == "string" && gjson.ParseBytes(instructions).String() != "" {
 		input = append([]cliObject{{"role": cliField("developer"), "content": instructions,
 			"id": cliField("msg_" + uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity.turn+":instructions")).String())}}, input...)
 		// Keep the empty field for Codex backends that require its presence.
@@ -374,8 +464,18 @@ func shapeCodexBody(body cliObject, identity cliIdentity) error {
 		}
 		role := gjson.ParseBytes(item["role"]).String()
 		kind := gjson.ParseBytes(item["type"]).String()
+		if kind == "additional_tools" {
+			var tools []cliObject
+			if err := common.Unmarshal(item["tools"], &tools); err != nil {
+				return fmt.Errorf("Codex CLI tools must be an array")
+			}
+			if err := normalizeCodexNamespaceDescriptions(tools); err != nil {
+				return err
+			}
+			item["tools"] = cliField(tools)
+		}
 		if kind != "" && kind != "message" {
-			continue // tool calls/results, reasoning, and additional_tools are opaque.
+			continue // Keep tool calls/results, reasoning, and tool snapshot positions.
 		}
 		if role == "" {
 			continue
@@ -395,7 +495,7 @@ func shapeCodexBody(body cliObject, identity cliIdentity) error {
 			item["content"] = cliField(blocks)
 		}
 		item["type"] = cliField("message")
-		if _, ok := item["id"]; !ok {
+		if _, ok := item["id"]; !ok && (version == nil || version.MessageIDs) {
 			item["id"] = cliField("msg_" + isolatedCLIUUID(identity.turn, fmt.Sprintf("message:%d", i), 7, identity.startedAt))
 		}
 	}
@@ -404,14 +504,21 @@ func shapeCodexBody(body cliObject, identity cliIdentity) error {
 		if err := common.Unmarshal(raw, &tools); err != nil {
 			return fmt.Errorf("Codex CLI tools must be an array")
 		}
+		if err := normalizeCodexNamespaceDescriptions(tools); err != nil {
+			return err
+		}
 		if err := shapeCodexTools(tools); err != nil {
 			return err
 		}
-		if len(tools) > 0 {
+		if len(tools) > 0 && toolsInInput {
 			input = append([]cliObject{{"type": cliField("additional_tools"), "role": cliField("developer"),
 				"id": cliField("at_" + uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity.turn+":tools")).String()), "tools": cliField(tools)}}, input...)
 		}
-		delete(body, "tools")
+		if toolsInInput {
+			delete(body, "tools")
+		} else {
+			body["tools"] = cliField(tools)
+		}
 	}
 	if input == nil {
 		input = []cliObject{}
@@ -422,8 +529,16 @@ func shapeCodexBody(body cliObject, identity cliIdentity) error {
 		"store": json.RawMessage(`false`), "include": json.RawMessage(`["reasoning.encrypted_content"]`),
 		"text": json.RawMessage(`{"verbosity":"low"}`),
 	}
-	if strings.HasPrefix(gjson.ParseBytes(body["model"]).String(), "gpt-6-astra") {
+	if version == nil && strings.HasPrefix(gjson.ParseBytes(body["model"]).String(), "gpt-6-astra") {
 		defaults["reasoning"] = json.RawMessage(`{"effort":"max","context":"all_turns"}`)
+	}
+	if version != nil {
+		defaults["parallel_tool_calls"] = cliField(version.ParallelToolCalls)
+		if len(version.TextDefault) > 0 && string(version.TextDefault) != "null" {
+			defaults["text"] = version.TextDefault
+		} else {
+			delete(defaults, "text")
+		}
 	}
 	for key, value := range defaults {
 		if _, ok := body[key]; !ok {
@@ -447,11 +562,51 @@ func shapeCodexBody(body cliObject, identity cliIdentity) error {
 		"node_repl_disabled": false, "analytics_enabled": true,
 		"model": gjson.ParseBytes(body["model"]).String(), "reasoning_effort": gjson.GetBytes(body["reasoning"], "effort").String(),
 	}
+	if version != nil {
+		selected := make(map[string]any)
+		for _, key := range version.BodyOrder["turn_metadata"] {
+			if value, ok := version.TurnDefaults[key]; ok {
+				selected[key] = value
+			} else if value, ok := turnMetadata[key]; ok {
+				selected[key] = value
+			}
+		}
+		turnMetadata = selected
+	}
 	body["client_metadata"] = cliField(map[string]string{
 		"x-codex-installation-id": identity.installation, "session_id": identity.session,
 		"thread_id": identity.session, "turn_id": identity.turn, "root_turn_id": identity.turn,
 		"x-codex-window-id": identity.window, "x-codex-turn-metadata": string(cliField(turnMetadata)),
 	})
+	return nil
+}
+
+// Normalize only namespace labels, including historical additional_tools.
+// Do not apply function defaults or flatten wrappers in historical snapshots.
+func normalizeCodexNamespaceDescriptions(tools []cliObject) error {
+	for _, tool := range tools {
+		if tool == nil {
+			return fmt.Errorf("Codex CLI tools must be objects")
+		}
+		if gjson.ParseBytes(tool["type"]).String() != "namespace" {
+			continue
+		}
+		// Native Codex can send an empty namespace description, which some
+		// Responses upstreams reject as missing. Keep nonempty caller text.
+		description, exists := tool["description"]
+		parsed := gjson.ParseBytes(description)
+		if !exists || (parsed.Type == gjson.String && strings.TrimSpace(parsed.String()) == "") {
+			tool["description"] = cliField("Tools in the " + gjson.ParseBytes(tool["name"]).String() + " namespace.")
+		}
+		var nested []cliObject
+		if err := common.Unmarshal(tool["tools"], &nested); err != nil {
+			return fmt.Errorf("Codex CLI namespace tools must be an array")
+		}
+		if err := normalizeCodexNamespaceDescriptions(nested); err != nil {
+			return err
+		}
+		tool["tools"] = cliField(nested)
+	}
 	return nil
 }
 

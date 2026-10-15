@@ -34,3 +34,27 @@ func TestValidateChannelStillRejectsEmptyKeyOnAdd(t *testing.T) {
 	err := validateChannel(&model.Channel{Type: 1, Key: ""}, true)
 	require.Error(t, err, "adding a channel with an empty key must still fail")
 }
+
+func TestValidateChannelCLIVersionConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name, setting string
+		valid         bool
+	}{
+		{"matching version", `{"synthetic_client_headers_profile":"codex","cli_version_profile":"codex-0.160.0-windows-x64"}`, true},
+		{"unknown version", `{"synthetic_client_headers_profile":"codex","cli_version_profile":"codex-made-up"}`, false},
+		{"version used as TLS-only", `{"synthetic_client_headers_profile":"claude","tls_fingerprint":"codex-0.160.0-windows-x64"}`, false},
+		{"wrong family", `{"synthetic_client_headers_profile":"claude","cli_version_profile":"codex-0.160.0-windows-x64"}`, false},
+		{"mixed TLS", `{"synthetic_client_headers_profile":"codex","cli_version_profile":"codex-0.160.0-windows-x64","tls_fingerprint":"claude-code"}`, false},
+		{"WebSocket", `{"synthetic_client_headers_profile":"codex","cli_version_profile":"codex-0.160.0-windows-x64","websocket_transport":true}`, false},
+		{"unchanged legacy TLS", `{"synthetic_client_headers_profile":"codex","tls_fingerprint":"codex-cli"}`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateChannel(&model.Channel{Type: 1, Setting: &tc.setting}, false)
+			if tc.valid {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
+	}
+}

@@ -10,10 +10,89 @@ import (
 	appcommon "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
+
+func TestResponsesTransportPreservesEffortAndHistoryWithoutCompatibility(t *testing.T) {
+	service.InitHttpClient()
+	for _, tc := range []struct{ name, profile, transport, effort string }{
+		{"HTTP passthrough", "", "http", "xhigh"},
+		{"HTTP Codex profile", "codex", "http", "xhigh"},
+		{"WebSocket Codex profile", "codex", "ws", "max"},
+		{"WebSocket HTTP fallback", "codex", "fallback", "low"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			type capture struct {
+				body   []byte
+				header http.Header
+				err    error
+			}
+			captures := make(chan capture, 1)
+			const reply = `{"type":"response.completed","response":{"id":"test-response","reasoning":{"effort":"low"},"output":[]}}`
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if websocket.IsWebSocketUpgrade(r) {
+					if tc.transport == "fallback" {
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+					if err != nil {
+						captures <- capture{err: err}
+						return
+					}
+					defer conn.Close()
+					_, body, err := conn.ReadMessage()
+					captures <- capture{body, r.Header.Clone(), err}
+					_ = conn.WriteMessage(websocket.TextMessage, []byte(reply))
+					return
+				}
+				body, err := io.ReadAll(r.Body)
+				captures <- capture{body, r.Header.Clone(), err}
+				_, _ = io.WriteString(w, reply)
+			}))
+			defer server.Close()
+			c, info := cliTestRequest(tc.profile)
+			info.IsStream = false
+			info.ChannelSetting.PassThroughBodyEnabled = true
+			require.False(t, info.ChannelSetting.ResponsesReasoningFallback)
+			info.HeadersOverride = map[string]any{"x-codex-turn-metadata": `{"reasoning_effort":"max","turn_id":"override-turn"}`}
+			body := `{"model":"gpt-6-astra","reasoning":{"effort":"` + tc.effort + `","context":"all_turns"},"client_metadata":{"x-codex-turn-metadata":"{\"reasoning_effort\":\"ultra\"}"},"input":[{"type":"additional_tools","id":"at_keep","role":"developer","tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"n":{"const":9007199254740993}}}}]},{"type":"message","id":"msg_keep","role":"user","content":[{"type":"input_text","text":"Continue the original plan."}]},{"type":"reasoning","id":"rs_keep","encrypted_content":"old-ciphertext","summary":[]},{"type":"custom_tool_call","call_id":"call_keep","name":"lookup","input":"keep arguments"},{"type":"custom_tool_call_output","call_id":"call_keep","output":"keep result"}]}`
+			a := cliTransportAdaptor{url: server.URL + "/v1/responses"}
+			var resp *http.Response
+			if tc.transport == "http" {
+				var err error
+				resp, err = DoApiRequest(a, c, info, strings.NewReader(body))
+				require.NoError(t, err)
+			} else {
+				attempt, err := TryResponsesWebsocket(a, c, info, strings.NewReader(body))
+				require.NoError(t, err)
+				resp = attempt.Response
+				if resp == nil {
+					resp, err = DoApiRequest(a, c, info, attempt.FallbackBody)
+					require.NoError(t, err)
+				}
+			}
+			data, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			assert.Contains(t, string(data), `"effort":"low"`, "upstream reply must not be rewritten")
+			got := <-captures
+			require.NoError(t, got.err)
+			assert.JSONEq(t, gjson.Get(body, "reasoning").Raw, gjson.GetBytes(got.body, "reasoning").Raw)
+			assert.JSONEq(t, gjson.Get(body, "input").Raw, gjson.GetBytes(got.body, "input").Raw)
+			assert.Contains(t, string(got.body), "9007199254740993")
+			assert.JSONEq(t, `{"reasoning_effort":"max","turn_id":"override-turn"}`, got.header.Get("x-codex-turn-metadata"))
+			metadataEffort := "ultra"
+			if tc.profile == "codex" {
+				metadataEffort = tc.effort // The client profile synthesizes metadata from the request.
+			}
+			assert.Equal(t, metadataEffort, gjson.Get(gjson.GetBytes(got.body, "client_metadata.x-codex-turn-metadata").String(), "reasoning_effort").String())
+		})
+	}
+}
 
 func TestCLIRequestSampleContractAndTLSOnlyOverride(t *testing.T) {
 	previous := appcommon.TLSInsecureSkipVerify

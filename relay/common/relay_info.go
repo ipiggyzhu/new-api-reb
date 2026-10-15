@@ -115,13 +115,18 @@ type RelayInfo struct {
 	IsFirstRequest         bool
 	AudioUsage             bool
 	ReasoningEffort        string
-	UserSetting            dto.UserSetting
-	UserEmail              string
-	UserQuota              int
-	RelayFormat            types.RelayFormat
-	SendResponseCount      int
-	ReceivedResponseCount  int
-	FinalPreConsumedQuota  int // 最终预消耗的配额
+
+	// Reported by the upstream response, never inferred from the request.
+	UpstreamReasoningEffort string
+	RequestReasoning        *RequestReasoning
+
+	UserSetting           dto.UserSetting
+	UserEmail             string
+	UserQuota             int
+	RelayFormat           types.RelayFormat
+	SendResponseCount     int
+	ReceivedResponseCount int
+	FinalPreConsumedQuota int // 最终预消耗的配额
 	// ForcePreConsume 为 true 时禁用 BillingSession 的信任额度旁路，
 	// 强制预扣全额。用于异步任务（视频/音乐生成等），因为请求返回后任务仍在运行，
 	// 必须在提交前锁定全额。
@@ -470,7 +475,8 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 		reqId = common.NewRequestId()
 	}
 	info := &RelayInfo{
-		Request: request,
+		Request:          request,
+		RequestReasoning: requestReasoning(request),
 
 		RequestId:  reqId,
 		UserId:     common.GetContextKeyInt(c, constant.ContextKeyUserId),
@@ -662,6 +668,15 @@ func (info *RelayInfo) SetEstimatePromptTokens(promptTokens int) {
 
 func (info *RelayInfo) GetEstimatePromptTokens() int {
 	return info.estimatePromptTokens
+}
+
+// ResetResponseState keeps timing and stream diagnostics scoped to one channel attempt.
+func (info *RelayInfo) ResetResponseState() {
+	info.UpstreamReasoningEffort = ""
+	info.isFirstResponse = true
+	info.FirstResponseTime = info.StartTime.Add(-time.Second)
+	info.ReceivedResponseCount = 0
+	info.StreamStatus = nil
 }
 
 func (info *RelayInfo) SetFirstResponseTime() {

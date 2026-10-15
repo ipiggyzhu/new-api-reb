@@ -1,7 +1,12 @@
 package service
 
 import (
+	"context"
+	"fmt"
+
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 )
@@ -111,6 +116,9 @@ func TryTieredSettle(relayInfo *relaycommon.RelayInfo, params billingexpr.TokenP
 		if quota <= 0 {
 			quota = snap.EstimatedQuotaAfterGroup
 		}
+		ctx := context.WithValue(context.Background(), common.RequestIdKey, relayInfo.RequestId)
+		logger.LogError(ctx, fmt.Sprintf("tiered billing settlement failed; using pre-consumed quota: model=%s expr_hash=%s quota=%d error=%v",
+			relayInfo.OriginModelName, snap.ExprHash, quota, err))
 		return true, quota, nil
 	}
 

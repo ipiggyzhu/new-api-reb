@@ -16,86 +16,11 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
-	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/tidwall/gjson"
 )
-
-type highEffortFallbackHTTPAdaptor struct {
-	reasoningFallbackTestAdaptor
-	url string
-}
-
-func (a *highEffortFallbackHTTPAdaptor) GetRequestURL(*relaycommon.RelayInfo) (string, error) {
-	return a.url, nil
-}
-
-func (a *highEffortFallbackHTTPAdaptor) SetupRequestHeader(_ *gin.Context, header *http.Header, _ *relaycommon.RelayInfo) error {
-	header.Set("x-codex-turn-metadata", `{"reasoning_effort":"ultra","session_id":"existing-thread"}`)
-	return nil
-}
-
-func (a *highEffortFallbackHTTPAdaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, reader io.Reader) (any, error) {
-	return channel.DoApiRequest(a, c, info, reader)
-}
-
-func TestResponsesReasoningFallbackWithFixedHigh(t *testing.T) {
-	service.InitHttpClient()
-	type capture struct {
-		body   []byte
-		header http.Header
-		err    error
-	}
-	captures := make(chan capture, 3)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		captures <- capture{body, r.Header.Clone(), err}
-		w.Header().Set("Content-Type", "application/json")
-		if bytes.Contains(body, []byte(`"encrypted_content":"old"`)) {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":{"code":"invalid_encrypted_content"}}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"id":"reply","reasoning":{"effort":"high"},"output":[]}`))
-	}))
-	defer server.Close()
-	const original = `{"model":"gpt-6-astra","reasoning":{"effort":"xhigh","context":"all_turns"},"client_metadata":{"x-codex-turn-metadata":"{\"reasoning_effort\":\"ultra\",\"session_id\":\"existing-thread\"}"},"input":[{"role":"user","content":"Keep the whole conversation."},{"type":"reasoning","id":"old-id","encrypted_content":"old","summary":[{"type":"summary_text","text":"Keep this plan."}]},{"type":"function_call","name":"read","call_id":"c1","arguments":"{}"},{"type":"function_call_output","call_id":"c1","output":"Keep this result."}]}`
-	c, info := reasoningFallbackFixture(t, original)
-	info.ChannelSetting.ResponsesForceHighEffort = true
-	a := &highEffortFallbackHTTPAdaptor{url: server.URL + "/v1/responses"}
-	_, apiErr := doUpstreamRoundTrip(c, info, a, strings.NewReader(original), false)
-	require.Nil(t, apiErr)
-	first, retry := <-captures, <-captures
-	require.NoError(t, first.err)
-	require.NoError(t, retry.err)
-	assert.Contains(t, string(first.body), `"encrypted_content":"old"`)
-	assert.NotContains(t, string(retry.body), `"encrypted_content":"old"`)
-	for _, got := range []capture{first, retry} {
-		assert.Equal(t, "high", gjson.GetBytes(got.body, "reasoning.effort").String())
-		assert.Equal(t, "high", gjson.Get(gjson.GetBytes(got.body, "client_metadata.x-codex-turn-metadata").String(), "reasoning_effort").String())
-		assert.JSONEq(t, `{"reasoning_effort":"high","session_id":"existing-thread"}`, got.header.Get("x-codex-turn-metadata"))
-	}
-	for _, path := range []string{"input.0", "input.1.summary", "input.2", "input.3", "reasoning.context"} {
-		if gjson.Get(original, path).IsObject() || gjson.Get(original, path).IsArray() {
-			assert.JSONEq(t, gjson.Get(original, path).Raw, gjson.GetBytes(retry.body, path).Raw, path)
-		} else {
-			assert.Equal(t, gjson.Get(original, path).Raw, gjson.GetBytes(retry.body, path).Raw, path)
-		}
-	}
-	next := strings.Replace(original, `"input":[`, `"input":[{"type":"reasoning","id":"new-id","encrypted_content":"fresh","summary":[]},`, 1)
-	c, info = reasoningFallbackFixture(t, next)
-	info.ChannelSetting.ResponsesForceHighEffort = true
-	_, apiErr = doUpstreamRoundTrip(c, info, a, strings.NewReader(next), false)
-	require.Nil(t, apiErr)
-	continued := <-captures
-	require.NoError(t, continued.err)
-	assert.Equal(t, "high", gjson.GetBytes(continued.body, "reasoning.effort").String())
-	assert.Contains(t, string(continued.body), `"encrypted_content":"fresh"`)
-	assert.NotContains(t, string(continued.body), `"encrypted_content":"old"`)
-}
 
 type reasoningFallbackTestAdaptor struct {
 	channel.Adaptor

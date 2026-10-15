@@ -1,5 +1,25 @@
 {
   "translation": {
+    "Effort not specified": "未指定强度",
+    "Adaptive thinking": "自适应思考",
+    "Thinking budget": "思考预算",
+    "Client type": "客户端类型",
+    "CLI version (includes TLS)": "CLI 版本（绑定 TLS）",
+    "Custom Device and Session Identity": "自定义设备与会话标识",
+    "Default Go TLS handshake": "默认 Go TLS 握手",
+    "Effective TLS": "当前 TLS（只读）",
+    "Restore TLS matching the client type": "恢复与客户端类型匹配的 TLS",
+    "Not recorded": "未记录",
+    "Choose the client type first, then its version below. Changing the client type resets the version and any legacy TLS override; device/session identities and requested reasoning effort stay unchanged.": "先选择客户端类型，再选择下方版本。切换类型会重置版本及旧 TLS 覆盖；设备、会话标识与请求的推理强度保持不变。",
+    "The selected version binds TLS, headers and JSON layout together. TLS cannot be selected separately. HTTPS HTTP/1.1 only; disable WebSocket. Requested reasoning effort is preserved. Different versions may share the same JA3.": "所选版本统一绑定 TLS、请求头和 JSON 排布，不再单独选择 TLS。仅支持 HTTPS HTTP/1.1，需关闭 WebSocket。保留请求的推理强度。不同版本可能具有相同 JA3。",
+    "Controls only device/session identities. Turning it off restores their isolated defaults without changing the selected CLI version or TLS.": "仅控制设备与会话标识。关闭后恢复默认隔离标识，不改变所选 CLI 版本或 TLS。",
+    "Device/session overrides apply to matching Claude Code or Codex requests only. Users and conversations remain isolated. Rotating sessions changes cache keys; it does not change TLS.": "设备与会话覆盖仅作用于匹配的 Claude Code 或 Codex 请求，用户和对话仍然隔离。重新生成会话标识会改变缓存键，不会改变 TLS。",
+    "A saved legacy TLS override is still active and may not match the client type. Opening or saving this form will not migrate it. Select a CLI version or explicitly restore matching TLS below.": "旧 TLS 覆盖仍生效，可能与客户端类型不匹配。打开或保存表单不会自动迁移；请选择具体 CLI 版本，或点击下方按钮明确恢复匹配的 TLS。",
+    "TLS follows the client type. Select a CLI version above to pin TLS, headers and JSON layout together.": "TLS 跟随客户端类型。选择上方 CLI 版本可统一固定 TLS、请求头与 JSON 排布。",
+    "CLI version profile": "CLI 版本档案",
+    "Keep existing client defaults": "保留现有客户端默认配置",
+    "Pins CLI version, runtime headers, JSON layout and TLS to this channel. HTTPS HTTP/1.1 only; disable WebSocket. Does not change requested reasoning effort. Versions may share a TLS fingerprint.": "按渠道固定 CLI 版本、运行时请求头、JSON 排布与 TLS。仅支持 HTTPS HTTP/1.1，需关闭 WebSocket。不改变请求的推理强度。不同版本可能共用同一 TLS 指纹。",
+    "Failed to load CLI version profiles": "加载 CLI 版本档案失败",
     "Client synthesis is off. TLS, headers and body use the standard new-api relay behavior.": "客户端合成已关闭。TLS、请求头和请求体使用 new-api 原有转发机制。",
     "Saved legacy TLS preset: {{id}}": "已保存的旧 TLS 模板：{{id}}",
     "Custom TLS, Device and Session Identity": "自定义 TLS、设备与会话标识",
@@ -5384,7 +5404,14 @@
     "tokens routed this week": "本周路由 tokens",
     "Responses Reasoning Compatibility": "Responses 旧会话推理兼容",
     "Retry HTTP 400 invalid_encrypted_content once without old reasoning ciphertext and IDs. Preserve visible history, summaries and requested effort; reset hidden reasoning. Skip compacted or server-side history. Off by default.": "仅遇到 HTTP 400 invalid_encrypted_content 时，不携带旧推理密文及其 ID 重试一次。保留可见历史、推理摘要和请求的推理强度，但重置旧隐藏推理。跳过含压缩记录或服务端历史引用的请求。默认关闭。",
-    "Fix Responses Effort to High": "Responses 请求固定 high",
-    "Force outgoing Responses effort and existing Codex turn metadata to high, including body passthrough. Overrides effort settings only; preserves history and identity. Does not rewrite upstream replies or guarantee provider behavior. Off by default.": "将发往上游的 Responses 推理强度及现有 Codex 回合元数据固定为 high，透传请求体时也生效。仅覆盖强度，保留历史和会话标识；不篡改上游回包，也不保证上游实际执行档位。默认关闭。"
+    "Upstream Reasoning Effort": "上游返回强度",
+    "Not reported": "上游未返回",
+    "Original settings not recorded": "原始设置未记录",
+    "First upstream event": "首个流事件",
+    "Timing covers this API request, not client retries or the whole conversation turn. The first event may not contain answer text.": "仅统计本次 API 请求，不包含客户端重试或整轮对话；首个流事件不一定含回答正文。",
+    "Thinking only": "仅有思考",
+    "Upstream returned thinking only, without answer text or a tool call.": "上游仅返回思考内容，未返回回答正文或工具调用。",
+    "CLI version profiles require HTTPS HTTP/1.1; disable WebSocket transport": "CLI 版本配置仅支持 HTTPS HTTP/1.1；请关闭 WebSocket 传输",
+    "Failed to load TLS fingerprints": "加载 TLS 指纹失败"
   }
 }

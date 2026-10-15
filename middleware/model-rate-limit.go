@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/common/limiter"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 
 	"github.com/gin-gonic/gin"
@@ -75,7 +76,7 @@ func redisRateLimitHandler(duration int64, totalMaxCount, successMaxCount int) g
 		c.Next()
 
 		// 5. 如果请求成功，记录成功请求
-		if successMaxCount != 0 && c.Writer.Status() < 400 {
+		if successMaxCount != 0 && service.RelayRequestSucceeded(c) {
 			// 过期时间读实时设置而不是请求开始时的window：请求进行中管理员调长了窗口，已有记录要按新窗口保留
 			ttl := time.Duration(setting.ModelRequestRateLimitDurationMinutes) * time.Minute
 			if err := limiter.RecordSlidingWindow(ctx, rdb, successKey, successMaxCount, ttl); err != nil {
@@ -112,7 +113,7 @@ func memoryRateLimitHandler(duration int64, totalMaxCount, successMaxCount int) 
 		c.Next()
 
 		// 4. 如果请求成功，记录成功请求
-		if successMaxCount != 0 && c.Writer.Status() < 400 {
+		if successMaxCount != 0 && service.RelayRequestSucceeded(c) {
 			inMemoryRateLimiter.Request(successKey, successMaxCount, duration)
 		}
 	}

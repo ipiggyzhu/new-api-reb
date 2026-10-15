@@ -36,6 +36,8 @@ type snapshot struct {
 type entry struct {
 	mu    sync.Mutex
 	state scoreState
+	// sharedCheckedAt bounds mirror staleness independently of the last outcome.
+	sharedCheckedAt int64
 	// published is read by the selection path without taking mu.
 	published atomic.Pointer[snapshot]
 	// generation increments on every Reset. A report that reached Redis before the
@@ -284,11 +286,82 @@ func publishLocal(key string, snap snapshot, generation uint64) {
 		return
 	}
 	e.state.updatedAt = nowFunc().Unix()
+	e.sharedCheckedAt = e.state.updatedAt
 	e.state.tierOffset = snap.tierOffset
 	// Stored under the lock so it cannot land after a concurrent reset has cleared
 	// it.
 	e.published.Store(&snap)
 	e.mu.Unlock()
+}
+
+// refreshShared reads expired mirrors in one pipeline, including cold candidates.
+// A mirror is trusted for at most five seconds, matching the shared-store health
+// cadence. This bounds cross-instance reset/update staleness without a round trip
+// per candidate on every request. An absent Redis row invalidates the local
+// generation, so a pre-reset report cannot restore it after the refresh.
+func refreshShared(keys []string) bool {
+	if !redisActive() || len(keys) == 0 {
+		return true
+	}
+	now := nowFunc().Unix()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	pipe := common.RDB.Pipeline()
+	defer pipe.Close()
+	type pendingRead struct {
+		entry      *entry
+		generation uint64
+		published  *snapshot
+		command    *redis.SliceCmd
+	}
+	pending := make([]pendingRead, 0, len(keys))
+	for _, key := range keys {
+		loaded, _ := localStore.LoadOrStore(key, &entry{})
+		e := loaded.(*entry)
+		e.mu.Lock()
+		if e.sharedCheckedAt > 0 && now-e.sharedCheckedAt < sharedStoreHealthTTLSeconds {
+			e.mu.Unlock()
+			continue
+		}
+		pending = append(pending, pendingRead{
+			entry: e, generation: e.generation, published: e.published.Load(),
+			command: pipe.HMGet(ctx, key, "off", "ct", "csu", "pt", "psu", "ua"),
+		})
+		e.mu.Unlock()
+	}
+	if len(pending) == 0 {
+		return true
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		common.SysError(fmt.Sprintf("channel score mirror refresh failed: err=%v", err))
+		return false
+	}
+	for _, read := range pending {
+		raw := read.command.Val()
+		state := scoreState{
+			tierOffset: int(redisFieldInt(raw, 0)),
+			curTotal:   redisFieldInt(raw, 1), curSuccess: redisFieldInt(raw, 2),
+			prevTotal: redisFieldInt(raw, 3), prevSuccess: redisFieldInt(raw, 4),
+			updatedAt: redisFieldInt(raw, 5),
+		}
+		e := read.entry
+		e.mu.Lock()
+		// Neither a reset nor a newer report may be overwritten by this older read.
+		if e.generation != read.generation || e.published.Load() != read.published {
+			e.mu.Unlock()
+			continue
+		}
+		if state.updatedAt <= 0 {
+			e.resetLocked()
+		} else {
+			total, success := state.sampleTotals()
+			e.state = state
+			e.published.Store(&snapshot{tierOffset: state.tierOffset, total: total, success: success})
+		}
+		e.sharedCheckedAt = now
+		e.mu.Unlock()
+	}
+	return true
 }
 
 // entryGeneration returns the current generation for key, creating the entry if
@@ -441,6 +514,7 @@ func WarmFromShared() int {
 		e := loaded.(*entry)
 		e.mu.Lock()
 		e.state = state
+		e.sharedCheckedAt = nowFunc().Unix()
 		e.published.Store(&snapshot{
 			tierOffset: state.tierOffset,
 			total:      total,
@@ -480,29 +554,12 @@ func redisFieldInt(raw []any, index int) int64 {
 // its generation is stale by the time it tries to publish, so it is dropped
 // instead of writing the old tier offset back over the reset.
 func Reset(channelId int) {
-	if channelId <= 0 {
-		return
-	}
-	prefix := scoreKeyPrefix + strconv.Itoa(channelId) + ":"
-	resetSharedByPrefix(prefix, fmt.Sprintf("channel=%d", channelId))
-
-	localStore.Range(func(k, v any) bool {
-		key, _ := k.(string)
-		if len(key) < len(prefix) || key[:len(prefix)] != prefix {
-			return true
-		}
-		if e, ok := v.(*entry); ok {
-			e.mu.Lock()
-			e.resetLocked()
-			e.mu.Unlock()
-		}
-		return true
-	})
+	ResetMany([]int{channelId})
 }
 
-// resetSharedByPrefix deletes every shared key under prefix. label only
-// identifies the caller in error messages.
-func resetSharedByPrefix(prefix string, label string) {
+// resetSharedByPrefix deletes shared keys under prefix, restricted to channelIds
+// when provided. label only identifies the caller in error messages.
+func resetSharedByPrefix(prefix string, label string, channelIds map[int]struct{}) {
 	if !redisActive() {
 		return
 	}
@@ -511,7 +568,14 @@ func resetSharedByPrefix(prefix string, label string) {
 	iter := common.RDB.Scan(ctx, 0, prefix+"*", 200).Iterator()
 	keys := make([]string, 0, 32)
 	for iter.Next(ctx) {
-		keys = append(keys, iter.Val())
+		key := iter.Val()
+		if channelIds != nil {
+			channelId, _, _, ok := parseScoreKey(key)
+			if _, selected := channelIds[channelId]; !ok || !selected {
+				continue
+			}
+		}
+		keys = append(keys, key)
 	}
 	if err := iter.Err(); err != nil {
 		common.SysError(fmt.Sprintf("channel score reset scan failed: %s, err=%v", label, err))
@@ -528,9 +592,36 @@ func resetSharedByPrefix(prefix string, label string) {
 // ResetMany resets a set of channels. Tag operations rewrite many channels in
 // one statement, so the caller has a list rather than a single id.
 func ResetMany(channelIds []int) {
+	selected := make(map[int]struct{}, len(channelIds))
 	for _, channelId := range channelIds {
-		Reset(channelId)
+		if channelId > 0 {
+			selected[channelId] = struct{}{}
+		}
 	}
+	if len(selected) == 0 {
+		return
+	}
+	prefix := scoreKeyPrefix
+	if len(selected) == 1 {
+		for channelId := range selected {
+			prefix += strconv.Itoa(channelId) + ":"
+		}
+	}
+	// SCAN MATCH still walks the keyspace. Batch mutations need one complete
+	// pass, not one pass per channel (or per duplicate id in the input).
+	resetSharedByPrefix(prefix, fmt.Sprintf("channels=%d", len(selected)), selected)
+	localStore.Range(func(key, value any) bool {
+		channelId, _, _, ok := parseScoreKey(key.(string))
+		if _, matches := selected[channelId]; !ok || !matches {
+			return true
+		}
+		if e, ok := value.(*entry); ok {
+			e.mu.Lock()
+			e.resetLocked()
+			e.mu.Unlock()
+		}
+		return true
+	})
 }
 
 // ResetAll drops every score. Reserved for explicit admin action and process
@@ -539,7 +630,7 @@ func ResetMany(channelIds []int) {
 // erase every learned score once per sync interval and the feature would never
 // accumulate anything.
 func ResetAll() {
-	resetSharedByPrefix(scoreKeyPrefix, "reset-all")
+	resetSharedByPrefix(scoreKeyPrefix, "reset-all", nil)
 
 	localStore.Range(func(_, v any) bool {
 		if e, ok := v.(*entry); ok {

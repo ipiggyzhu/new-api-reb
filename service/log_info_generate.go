@@ -78,10 +78,10 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	other["cache_ratio"] = cacheRatio
 	other["model_price"] = modelPrice
 	other["user_group_ratio"] = userGroupRatio
-	other["frt"] = float64(relayInfo.FirstResponseTime.UnixMilli() - relayInfo.StartTime.UnixMilli())
-	if relayInfo.ReasoningEffort != "" {
-		other["reasoning_effort"] = relayInfo.ReasoningEffort
+	if relayInfo.HasSendResponse() {
+		other["frt"] = float64(relayInfo.FirstResponseTime.UnixMilli() - relayInfo.StartTime.UnixMilli())
 	}
+	appendReasoningInfo(relayInfo, other)
 	if relayInfo.IsModelMapped {
 		other["is_model_mapped"] = true
 		other["upstream_model_name"] = relayInfo.UpstreamModelName
@@ -117,11 +117,45 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	return other
 }
 
+func appendReasoningInfo(info *relaycommon.RelayInfo, other map[string]interface{}) {
+	effort := info.ReasoningEffort
+	if info.RequestReasoning != nil {
+		other["request_reasoning"] = info.RequestReasoning
+		if info.RequestReasoning.Effort != "" {
+			effort = info.RequestReasoning.Effort
+		}
+	}
+	if effort != "" {
+		other["reasoning_effort"] = effort
+	}
+	if info.UpstreamReasoningEffort != "" {
+		other["upstream_reasoning_effort"] = info.UpstreamReasoningEffort
+	}
+}
+
 func appendParamOverrideInfo(relayInfo *relaycommon.RelayInfo, other map[string]interface{}) {
 	if relayInfo == nil || other == nil || len(relayInfo.ParamOverrideAudit) == 0 {
 		return
 	}
 	other["po"] = relayInfo.ParamOverrideAudit
+}
+
+// AppendRelayErrorStreamInfo preserves observed stream timing even when no usable output was returned.
+func AppendRelayErrorStreamInfo(info *relaycommon.RelayInfo, other map[string]interface{}) {
+	if info == nil || other == nil {
+		return
+	}
+	appendReasoningInfo(info, other)
+	if !info.IsStream {
+		return
+	}
+	if info.HasSendResponse() {
+		other["frt"] = float64(info.FirstResponseTime.UnixMilli() - info.StartTime.UnixMilli())
+	}
+	appendStreamStatus(info, other)
+	if stream, ok := other["stream_status"].(map[string]interface{}); ok {
+		stream["received_count"] = info.ReceivedResponseCount
+	}
 }
 
 func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other map[string]interface{}) {
@@ -132,10 +166,15 @@ func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other map[string]inter
 	status := "ok"
 	if !ss.IsNormalEnd() || ss.HasErrors() {
 		status = "error"
+	} else if ss.ThinkingOnly() {
+		status = "warning"
 	}
 	streamInfo := map[string]interface{}{
 		"status":     status,
 		"end_reason": string(ss.EndReason),
+	}
+	if ss.ThinkingOnly() {
+		streamInfo["thinking_only"] = true
 	}
 	// Recorded separately from end_reason, which stays "eof" for a truncated
 	// message because the connection really did close cleanly. Without this the
@@ -331,5 +370,12 @@ func InjectTieredBillingInfo(other map[string]interface{}, relayInfo *relaycommo
 	other["expr_b64"] = base64.StdEncoding.EncodeToString([]byte(snap.ExprString))
 	if result != nil {
 		other["matched_tier"] = result.MatchedTier
+	} else {
+		adminInfo, ok := other["admin_info"].(map[string]interface{})
+		if !ok || adminInfo == nil {
+			adminInfo = map[string]interface{}{}
+			other["admin_info"] = adminInfo
+		}
+		adminInfo["tiered_billing_fallback"] = true
 	}
 }

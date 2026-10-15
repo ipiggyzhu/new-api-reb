@@ -31,6 +31,7 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
+	info.CaptureUpstreamReasoning(string(responseBody))
 	if oaiError := responsesResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
 		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
 	}
@@ -132,7 +133,7 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 
 	var usage = &dto.Usage{}
 	var responseTextBuilder strings.Builder
-	var hasOutput, streamComplete bool
+	var hasOutput, streamComplete, preambleFlushed bool
 	var preamble outputPreamble
 	var outputErr *types.NewAPIError
 	var upstreamErr *types.NewAPIError
@@ -145,6 +146,7 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			sr.Error(err)
 			return
 		}
+		info.CaptureUpstreamReasoning(data)
 		// Error events are failures, not lifecycle frames waiting for output.
 		// After delivery, keep the original event and usage so the caller can
 		// settle the partial response before reporting its failed stream status.
@@ -168,12 +170,15 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			// Record completion before the client can close on the terminal event.
 			sr.Done()
 		}
-		if !hasOutput {
-			if !preamble.add(data) {
-				outputErr = emptyOutputError()
-				sr.Stop(outputErr)
+		if !hasOutput && !preambleFlushed {
+			if preamble.add(data) {
+				return
 			}
-			return
+			// Large tool schemas can fill the lifecycle buffer before output
+			// starts. Commit the buffered frames instead of treating its memory
+			// limit as evidence of an empty response. Output validation still
+			// runs at the terminal event; retries stop once frames are written.
+			preambleFlushed = true
 		}
 		for _, pending := range preamble.chunks {
 			pendingResponse := dto.ResponsesStreamResponse{Type: gjson.Get(pending, "type").String()}

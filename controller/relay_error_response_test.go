@@ -60,7 +60,7 @@ func TestRelayErrorShedsEventStreamHeadersWhenNothingWasWritten(t *testing.T) {
 	assert.Empty(t, recorder.Header().Get("Transfer-Encoding"),
 		"chunked framing belongs to the abandoned stream, not to a single JSON error")
 	assert.Empty(t, recorder.Header().Get("X-Accel-Buffering"))
-	assert.Equal(t, http.StatusInternalServerError, recorder.Code,
+	assert.Equal(t, http.StatusBadRequest, recorder.Code,
 		"the status must stay the error's own status")
 
 	var body struct {
@@ -118,7 +118,7 @@ func TestRelayErrorKeepsPlainJSONWhenNotStreaming(t *testing.T) {
 	Relay(c, types.RelayFormatOpenAI)
 
 	assert.Equal(t, "application/json; charset=utf-8", recorder.Header().Get("Content-Type"))
-	assert.Equal(t, http.StatusInternalServerError, recorder.Code)
+	assert.Equal(t, http.StatusBadRequest, recorder.Code)
 	assert.NotContains(t, recorder.Body.String(), "data: ",
 		"a request that never streamed must not be answered with SSE framing")
 

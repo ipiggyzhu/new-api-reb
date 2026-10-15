@@ -109,7 +109,8 @@ func (channelTestHandler) Run(ctx context.Context, task *model.SystemTask, runne
 	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 
-// modelUpdateHandler runs the scheduled upstream model update detection job.
+// modelUpdateHandler runs availability sync when automatic updates are enabled,
+// or detection-only checks for installations using the legacy review workflow.
 type modelUpdateHandler struct{}
 
 func (modelUpdateHandler) Type() string { return model.SystemTaskTypeModelUpdate }
@@ -141,13 +142,9 @@ func (modelUpdateHandler) Interval() time.Duration {
 
 func (modelUpdateHandler) NewPayload() any { return nil }
 
-// modelUpdateTaskPayload controls one model_update run. A scheduled run
-// (Manual=false) respects the per-channel minimum check interval and may
-// auto-apply detected models. A manual "detect all" trigger sets Manual=true to
-// reproduce the legacy detect-all semantics: force a re-check regardless of the
-// interval and never auto-apply, so the admin reviews and applies changes
-// explicitly. AutoApply=true is the "run now" variant of the scheduled job: it
-// forces a re-check and does apply, which is what the settings page button sends.
+// modelUpdateTaskPayload controls one model_update run. Auto-update schedules,
+// AutoApply and FullSweep all perform full availability sync. Manual detection
+// without either flag only stages differences for review.
 type modelUpdateTaskPayload struct {
 	Manual    bool `json:"manual,omitempty"`
 	AutoApply bool `json:"auto_apply,omitempty"`
@@ -164,7 +161,9 @@ func (modelUpdateHandler) Run(ctx context.Context, task *model.SystemTask, runne
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, err)
 		return
 	}
-	if payload.FullSweep {
+	// Detection-only remains read/review oriented. Every applying global update,
+	// including the scheduled run, uses full availability sync rather than sampling.
+	if payload.FullSweep || payload.AutoApply || (!payload.Manual && operation_setting.GetMonitorSetting().UpstreamModelUpdateEnabled) {
 		sweep := runChannelModelSweepTaskOnce(ctx, service.NewSystemTaskProgressReporter(task, runnerID))
 		if sweep.ScanError != "" {
 			finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, sweep, errors.New(sweep.ScanError))

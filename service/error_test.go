@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -122,6 +123,19 @@ func TestRelayErrorHandlerKeepsOpenAIErrorMessage(t *testing.T) {
 	require.Equal(t, message, newAPIError.Error())
 }
 
+func TestRelayErrorHandlerExplains524WithoutChangingRetrySemantics(t *testing.T) {
+	for _, body := range []string{"", "<html>upstream timeout</html>", `{}`} {
+		resp := &http.Response{StatusCode: 524, Body: io.NopCloser(strings.NewReader(body))}
+		apiErr := RelayErrorHandler(context.Background(), resp, false)
+		require.NotNil(t, apiErr)
+		require.Equal(t, 524, apiErr.StatusCode)
+		require.Equal(t, types.ErrorCodeBadResponseStatusCode, apiErr.GetErrorCode())
+		require.Equal(t, "upstream response timed out (HTTP 524)", apiErr.Error())
+		require.NotContains(t, apiErr.Error(), "<html>")
+		assert.Equal(t, body, apiErr.GetUpstreamBody())
+	}
+}
+
 func TestRelayErrorHandlerKeepsInvalidJSONBodyInDebugLog(t *testing.T) {
 	withDebugEnabled(t, true)
 
@@ -158,4 +172,30 @@ func withDebugEnabled(t *testing.T, enabled bool) {
 	t.Cleanup(func() {
 		common.DebugEnabled = oldDebug
 	})
+}
+
+func TestTaskErrorFromAPIErrorKeepsBillingFailuresLocal(t *testing.T) {
+	cases := []struct {
+		name   string
+		code   types.ErrorCode
+		status int
+	}{
+		{name: "insufficient wallet quota", code: types.ErrorCodeInsufficientUserQuota, status: http.StatusForbidden},
+		{name: "token pre-consume failed", code: types.ErrorCodePreConsumeTokenQuotaFailed, status: http.StatusForbidden},
+		{name: "billing database unavailable", code: types.ErrorCodeQueryDataError, status: http.StatusInternalServerError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			apiErr := types.NewErrorWithStatusCode(fmt.Errorf("billing failed"), tc.code, tc.status, types.ErrOptionWithSkipRetry())
+
+			taskErr := TaskErrorFromAPIError(apiErr)
+
+			require.NotNil(t, taskErr)
+			assert.True(t, taskErr.LocalError, "a pre-consume failure happened before the upstream attempt")
+			assert.Equal(t, string(tc.code), taskErr.Code)
+			assert.Equal(t, tc.status, taskErr.StatusCode)
+			assert.Equal(t, "billing failed", taskErr.Message)
+			assert.ErrorIs(t, taskErr.Error, apiErr.Err)
+		})
+	}
 }

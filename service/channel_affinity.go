@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
@@ -639,7 +640,22 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 			// only while dynamic scoring has not demoted it to or below the pin's
 			// tier. Scores never break the pin on their own: they move with ordinary
 			// traffic, and letting them would defeat what the pin is for.
-			switch model.ValidateChannelAffinityPin(channelID, usingGroup, modelName, path) {
+			var verdict model.ChannelAffinityPinVerdict
+			if usingGroup == "auto" {
+				// Use the same first eligible concrete group the distributor will
+				// choose; "auto" itself has no routing candidates.
+				verdict = model.ChannelAffinityPinUnusable
+				userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
+				for _, group := range GetUserAutoGroup(userGroup) {
+					if model.IsChannelEnabledForGroupModel(group, modelName, channelID) {
+						verdict = model.ValidateChannelAffinityPin(channelID, group, modelName, path)
+						break
+					}
+				}
+			} else {
+				verdict = model.ValidateChannelAffinityPin(channelID, usingGroup, modelName, path)
+			}
+			switch verdict {
 			case model.ChannelAffinityPinUnusable:
 				info["cache"] = "stale_unusable"
 				logger.LogDebug(c, "channel affinity dropped, channel no longer eligible: rule=%s, key=%s, channel=%d", meta.RuleName, cacheKeyFull, channelID)
@@ -711,8 +727,10 @@ func ShouldSkipRetryAfterChannelAffinityFailure(c *gin.Context) bool {
 	return b
 }
 
-func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
-	if c == nil {
+// ClearCurrentChannelAffinityCache only retracts the channel observed by this
+// request, leaving a concurrent request's replacement binding intact.
+func ClearCurrentChannelAffinityCache(c *gin.Context, expectedChannelID int) bool {
+	if c == nil || expectedChannelID <= 0 {
 		return false
 	}
 	cacheKey, _, ok := getChannelAffinityContext(c)
@@ -721,18 +739,13 @@ func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
 	}
 
 	cache := getChannelAffinityCache()
-	deleted, err := cache.DeleteMany([]string{cacheKey})
+	deleted, err := cache.DeleteIfEquals(cacheKey, expectedChannelID)
 	if err != nil {
 		common.SysError(fmt.Sprintf("channel affinity cache delete current failed: err=%v", err))
 		return false
 	}
 	c.Set(ginKeyChannelAffinitySkipRetry, false)
-	for _, ok := range deleted {
-		if ok {
-			return true
-		}
-	}
-	return false
+	return deleted
 }
 
 func ShouldKeepChannelAffinityOnChannelDisabled() bool {
@@ -877,6 +890,20 @@ func SetChannelAffinityRelayOutcome(c *gin.Context, succeeded bool) {
 		return
 	}
 	c.Set(ginKeyChannelAffinityRelayOK, succeeded)
+}
+
+// RelayRequestSucceeded uses the relay verdict rather than a committed HTTP 200,
+// which may belong to a stream that subsequently failed. Non-relay handlers
+// that do not publish a verdict retain the status-code behavior.
+func RelayRequestSucceeded(c *gin.Context) bool {
+	if c == nil || c.Writer == nil || c.Writer.Status() >= http.StatusBadRequest {
+		return false
+	}
+	if verdict, reported := c.Get(ginKeyChannelAffinityRelayOK); reported {
+		succeeded, _ := verdict.(bool)
+		return succeeded
+	}
+	return true
 }
 
 // SetChannelAffinityBypassed marks that the pinned channel was skipped only

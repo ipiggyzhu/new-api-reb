@@ -48,10 +48,10 @@ func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) types.
 	}
 
 	// check auto group
-	autoGroup, exists := ctx.Get("auto_group")
-	if exists {
+	autoGroup := ctx.GetString("auto_group")
+	if autoGroup != "" {
 		logger.LogDebug(ctx, "final group: %s", autoGroup)
-		relayInfo.UsingGroup = autoGroup.(string)
+		relayInfo.UsingGroup = autoGroup
 	}
 
 	// check user group special ratio
@@ -333,4 +333,60 @@ func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, promptT
 
 	info.PriceData = priceData
 	return priceData, nil
+}
+
+// UpdatePreConsumeForGroup reprices a retry using the selected group's ratio.
+// Model prices and the tiered expression remain frozen for the request.
+func UpdatePreConsumeForGroup(info *relaycommon.RelayInfo, promptTokens int, meta *types.TokenCountMeta) error {
+	price := &info.PriceData
+	groupRatio := price.GroupRatioInfo.GroupRatio
+	freePreConsumeDisabled := !operation_setting.GetQuotaSetting().EnableFreeModelPreConsume
+	if info.TieredBillingSnapshot != nil {
+		snapshot := *info.TieredBillingSnapshot
+		if snapshot.EstimatedCompletionTokens == 0 && groupRatio != 0 {
+			requestInput := billingexpr.RequestInput{}
+			if info.BillingRequestInput != nil {
+				requestInput = *info.BillingRequestInput
+			}
+			rawCost, trace, err := billingexpr.RunExprWithRequest(snapshot.ExprString, billingexpr.TokenParams{
+				P: float64(snapshot.EstimatedPromptTokens), C: defaultTieredPreConsumeMaxTokens,
+				Len: float64(snapshot.EstimatedPromptTokens),
+			}, requestInput)
+			if err != nil {
+				return fmt.Errorf("model %s tiered expr run failed: %w", info.OriginModelName, err)
+			}
+			snapshot.EstimatedCompletionTokens = defaultTieredPreConsumeMaxTokens
+			snapshot.EstimatedQuotaBeforeGroup = rawCost / 1_000_000 * snapshot.QuotaPerUnit
+			snapshot.EstimatedTier = trace.MatchedTier
+		}
+		quota, err := billingexpr.QuotaRoundStrict(snapshot.EstimatedQuotaBeforeGroup * groupRatio)
+		if err != nil {
+			return err
+		}
+		snapshot.GroupRatio = groupRatio
+		snapshot.EstimatedQuotaAfterGroup = quota
+		info.TieredBillingSnapshot = &snapshot
+		price.QuotaToPreConsume = quota
+		price.FreeModel = freePreConsumeDisabled && groupRatio == 0
+		return nil
+	}
+
+	var estimatedQuota float64
+	if price.UsePrice {
+		estimatedQuota = price.ApplyOtherRatiosToFloat(price.ModelPrice * common.QuotaPerUnit * groupRatio)
+		price.FreeModel = freePreConsumeDisabled && (groupRatio == 0 || price.ModelPrice == 0)
+	} else {
+		preConsumedTokens := common.Max(promptTokens, common.PreConsumedQuota)
+		if meta != nil {
+			preConsumedTokens += meta.MaxTokens
+		}
+		estimatedQuota = float64(preConsumedTokens) * price.ModelRatio * groupRatio
+		price.FreeModel = freePreConsumeDisabled && (groupRatio == 0 || price.ModelRatio == 0)
+	}
+	quota, err := common.QuotaFromFloatStrict(estimatedQuota)
+	if err != nil {
+		return err
+	}
+	price.QuotaToPreConsume = quota
+	return nil
 }

@@ -136,6 +136,13 @@ func ClientHeaderProfileForAPIType(apiType int) ClientHeaderProfile {
 // empty one", which is the only way to remove something the profile adds.
 func EffectiveClientHeaders(family string, fingerprint ...string) ClientHeaderProfile {
 	profile := ClientHeaderProfileForFamily(family)
+	var version *service.CLIVersionProfile
+	if len(fingerprint) > 1 {
+		version = service.LookupCLIVersionProfile(fingerprint[1])
+		if version != nil && version.Family == family {
+			profile = version.Headers
+		}
+	}
 	overrides := operation_setting.GetMonitorSetting().ChannelTestClientHeaders
 
 	effective := make(ClientHeaderProfile, len(profile)+len(overrides))
@@ -144,7 +151,7 @@ func EffectiveClientHeaders(family string, fingerprint ...string) ClientHeaderPr
 	}
 	// Only declarations present in the Claude capture follow a Node preset.
 	// Codex never gains x-stainless headers from a TLS selection.
-	if family == ClientHeaderFamilyClaude && len(fingerprint) > 0 {
+	if version == nil && family == ClientHeaderFamilyClaude && len(fingerprint) > 0 {
 		for name, value := range service.TLSFingerprintRuntimeHeaders(fingerprint[0]) {
 			if _, exists := effective[name]; exists {
 				effective[name] = value

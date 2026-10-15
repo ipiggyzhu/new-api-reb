@@ -73,7 +73,7 @@ func worstRouteRule(candidate ScoreView, best ChannelProjection, haveBest bool) 
 // decaying verdict.
 func ProjectByChannel() (map[int]ChannelProjection, ScoreSnapshot) {
 	snapshot := Snapshot(ScoreFilter{})
-	if len(snapshot.Rows) == 0 {
+	if !snapshot.Usable || len(snapshot.Rows) == 0 {
 		return nil, snapshot
 	}
 

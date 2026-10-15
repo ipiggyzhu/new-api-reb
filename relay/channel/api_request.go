@@ -1,7 +1,6 @@
 package channel
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -283,13 +282,19 @@ func processHeaderOverride(info *common.RelayInfo, c *gin.Context) (map[string]s
 		// EffectiveClientHeaders rather than the raw profile: the built-in client
 		// versions go stale and the admin's override map is where they get
 		// corrected, so live traffic and channel tests wear the same headers.
-		for name, value := range EffectiveClientHeaders(syntheticFamily, info.ChannelSetting.TLSFingerprint) {
+		for name, value := range EffectiveClientHeaders(syntheticFamily, info.ChannelSetting.TLSFingerprint, info.ChannelSetting.CLIVersionProfile) {
 			headerOverride[strings.ToLower(strings.TrimSpace(name))] = value
 		}
 		if info.IsStream && syntheticFamily != ClientHeaderFamilyClaude {
 			headerOverride["accept"] = AcceptSSE
 		} else {
 			headerOverride["accept"] = AcceptJSON
+		}
+	}
+
+	if info.IsChannelTest && info.ChannelSetting.CLIVersionProfile != "" {
+		for name, value := range EffectiveClientHeaders(info.ChannelSetting.SyntheticClientHeadersProfile, info.ChannelSetting.TLSFingerprint, info.ChannelSetting.CLIVersionProfile) {
+			headerOverride[name] = value
 		}
 	}
 
@@ -449,17 +454,6 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 		return nil, err
 	}
 	applyHeaderOverrideToRequest(req, headerOverride)
-	if body, err := forceResponsesHighEffort(info, fullRequestURL, req.Body, req.Header); err != nil {
-		_ = req.Body.Close()
-		return nil, err
-	} else if body != nil {
-		_ = req.Body.Close()
-		req.Body = io.NopCloser(bytes.NewReader(body))
-		req.ContentLength = int64(len(body))
-		req.GetBody = func() (io.ReadCloser, error) {
-			return io.NopCloser(bytes.NewReader(body)), nil
-		}
-	}
 	resp, err := doRequest(c, req, info)
 	if err != nil {
 		return nil, fmt.Errorf("do request failed: %w", err)
@@ -612,9 +606,19 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	var err error
 	settings := info.ChannelSetting
 	settings.Normalize(info.ApiType)
+	version, err := service.ResolveCLIVersionProfile(settings.CLIVersionProfile, settings.SyntheticClientHeadersProfile, settings.TLSFingerprint, settings.WebsocketTransport)
+	if err != nil {
+		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+	}
 	fingerprint := service.ResolveTLSFingerprint(settings.TLSFingerprint, settings.SyntheticClientHeadersProfile)
+	if version != nil {
+		if req.URL.Scheme != "https" {
+			return nil, types.NewError(fmt.Errorf("CLI version profiles require HTTPS"), types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+		fingerprint = version.ID
+	}
 	if fingerprint != "" {
-		client, err = service.GetFingerprintHTTPClient(info.ChannelSetting.Proxy, fingerprint)
+		client, err = service.GetFingerprintHTTPClient(info.ChannelSetting.Proxy, fingerprint, settings.SyntheticClientHeadersProfile)
 		if err != nil {
 			return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
 		}
@@ -681,11 +685,11 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 func DoTaskApiRequest(a TaskAdaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
 	fullRequestURL, err := a.BuildRequestURL(info)
 	if err != nil {
-		return nil, err
+		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
 	}
 	req, err := newUpstreamRequest(c, fullRequestURL, requestBody)
 	if err != nil {
-		return nil, fmt.Errorf("new request failed: %w", err)
+		return nil, types.NewError(fmt.Errorf("new request failed: %w", err), types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
 	}
 	applyUpstreamContentLength(req, info)
 	req.GetBody = func() (io.ReadCloser, error) {
@@ -694,7 +698,7 @@ func DoTaskApiRequest(a TaskAdaptor, c *gin.Context, info *common.RelayInfo, req
 
 	err = a.BuildRequestHeader(c, req, info)
 	if err != nil {
-		return nil, fmt.Errorf("setup request header failed: %w", err)
+		return nil, types.NewError(fmt.Errorf("setup request header failed: %w", err), types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
 	}
 	resp, err := doRequest(c, req, info)
 	if err != nil {

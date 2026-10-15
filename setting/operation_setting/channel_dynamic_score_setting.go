@@ -34,8 +34,10 @@ type ChannelDynamicScoreSetting struct {
 	SuccessesToPromote int `json:"successes_to_promote"`
 
 	// FaultsToDemote is how many faults cost one tier of demotion. Only errors
-	// that service.IsChannelFaultError accepts count: rate limits and our own
-	// misconfiguration are not the channel's fault.
+	// that service.IsChannelRoutingFaultError accepts count: anything the gateway
+	// would retry on another channel (AutomaticRetryStatusCodeRanges, which
+	// includes 429 by default), plus empty responses and timeouts. Our own
+	// misconfiguration and concurrency saturation are not the channel's fault.
 	FaultsToDemote int `json:"faults_to_demote"`
 
 	// MaxPromoteTiers and MaxDemoteTiers bound the movement in tiers, not in raw

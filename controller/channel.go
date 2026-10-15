@@ -573,6 +573,10 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 	if fingerprint := channel.GetSetting().TLSFingerprint; !service.IsSupportedTLSFingerprint(fingerprint) {
 		return fmt.Errorf("不支持的 TLS 指纹：%s", fingerprint)
 	}
+	setting := channel.GetSetting()
+	if _, err := service.ResolveCLIVersionProfile(setting.CLIVersionProfile, setting.SyntheticClientHeadersProfile, setting.TLSFingerprint, setting.WebsocketTransport); err != nil {
+		return err
+	}
 
 	// 如果是添加操作，检查 key 是否为空
 	if isAdd {
@@ -790,6 +794,7 @@ func AddChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	model.InitChannelCache()
 	service.ResetProxyClientCache()
 	recordManageAudit(c, "channel.create", map[string]interface{}{
 		"name":  addChannelRequest.Channel.Name,

@@ -125,11 +125,11 @@ export interface ChannelSettings {
   proxy?: string
   pass_through_body_enabled?: boolean
   responses_reasoning_fallback?: boolean
-  responses_force_high_effort?: boolean
   /** @deprecated superseded by synthetic_client_headers_profile; kept in sync by the backend */
   synthetic_client_headers?: boolean
   /** '' off, or an explicit client family; legacy 'auto' is normalized on read/save */
   synthetic_client_headers_profile?: string
+  cli_version_profile?: string
   /**
    * Explicit TLS ClientHello id. '' means the fingerprint follows
    * synthetic_client_headers_profile (Claude Code / Codex headers bring that
@@ -303,6 +303,13 @@ export interface ChannelTLSFingerprintsResponse {
   success: boolean
   message?: string
   data?: ChannelTLSFingerprint[]
+  cli_profiles?: {
+    id: string
+    family: string
+    version: string
+    label: string
+    ja3_md5: string
+  }[]
 }
 
 export interface ChannelDynamicScoreSummaryResponse {

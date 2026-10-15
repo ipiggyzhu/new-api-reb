@@ -7,10 +7,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
 
@@ -83,7 +85,7 @@ func TestRecordRelayErrorLogAttributesFailureToTheAttemptedChannel(t *testing.T)
 	attempted := types.NewChannelError(42, 8, "grok-cpa", false, "sk-x", true)
 	apiErr := types.NewErrorWithStatusCode(fmt.Errorf("upstream refused"), types.ErrorCodeBadResponseStatusCode, http.StatusTooManyRequests)
 
-	recordRelayErrorLog(c, attempted, apiErr)
+	recordRelayErrorLog(c, attempted, apiErr, nil)
 
 	row := readOnlyErrorLog(t, db)
 	assert.Equal(t, 42, row.ChannelId, "log row must point at the attempted channel, not the context")
@@ -106,7 +108,7 @@ func TestRecordRelayErrorLogRecordsFailuresWithNoChannel(t *testing.T) {
 
 	apiErr := types.NewError(fmt.Errorf("分组 default 下模型 gpt-4o 的可用渠道不存在"), types.ErrorCodeGetChannelFailed)
 
-	recordRelayErrorLog(c, nil, apiErr)
+	recordRelayErrorLog(c, nil, apiErr, nil)
 
 	row := readOnlyErrorLog(t, db)
 	assert.Equal(t, 0, row.ChannelId)
@@ -126,7 +128,7 @@ func TestRecordRelayErrorLogCarriesUpstreamBodyAsAdminInfo(t *testing.T) {
 	apiErr := types.NewErrorWithStatusCode(fmt.Errorf("bad response status code 403"), types.ErrorCodeBadResponseStatusCode, http.StatusForbidden)
 	apiErr.SetUpstreamBody("<html><title>Attention Required! | Cloudflare</title>Ray ID: 8f2b1c3d</html>")
 
-	recordRelayErrorLog(c, types.NewChannelError(42, 8, "grok-cpa", false, "sk-x", true), apiErr)
+	recordRelayErrorLog(c, types.NewChannelError(42, 8, "grok-cpa", false, "sk-x", true), apiErr, nil)
 
 	other, err := common.StrToMap(readOnlyErrorLog(t, db).Other)
 	require.NoError(t, err)
@@ -143,7 +145,7 @@ func TestRecordRelayErrorLogHonoursSuppressionSwitches(t *testing.T) {
 		apiErr := types.NewErrorWithStatusCode(fmt.Errorf("用户额度不足"), types.ErrorCodeInsufficientUserQuota,
 			http.StatusForbidden, types.ErrOptionWithNoRecordErrorLog())
 
-		recordRelayErrorLog(errorLogTestContext(t), nil, apiErr)
+		recordRelayErrorLog(errorLogTestContext(t), nil, apiErr, nil)
 
 		var count int64
 		require.NoError(t, db.Model(&model.Log{}).Count(&count).Error)
@@ -155,7 +157,7 @@ func TestRecordRelayErrorLogHonoursSuppressionSwitches(t *testing.T) {
 		constant.ErrorLogEnabled = false
 
 		recordRelayErrorLog(errorLogTestContext(t), nil,
-			types.NewError(fmt.Errorf("boom"), types.ErrorCodeBadResponseStatusCode))
+			types.NewError(fmt.Errorf("boom"), types.ErrorCodeBadResponseStatusCode), nil)
 
 		var count int64
 		require.NoError(t, db.Model(&model.Log{}).Count(&count).Error)
@@ -182,7 +184,7 @@ func TestCloudflareBlockedUpstreamIsFullyDiagnosableFromTheLogRow(t *testing.T) 
 	require.Equal(t, "bad response status code 403", apiErr.Error(),
 		"precondition: the message alone says nothing about Cloudflare")
 
-	recordRelayErrorLog(c, types.NewChannelError(42, 8, "grok-cpa", false, "sk-x", true), apiErr)
+	recordRelayErrorLog(c, types.NewChannelError(42, 8, "grok-cpa", false, "sk-x", true), apiErr, nil)
 
 	row := readOnlyErrorLog(t, db)
 	assert.Equal(t, 42, row.ChannelId)
@@ -194,4 +196,46 @@ func TestCloudflareBlockedUpstreamIsFullyDiagnosableFromTheLogRow(t *testing.T) 
 	require.True(t, ok)
 	assert.Contains(t, adminInfo["upstream_body"], "Cloudflare")
 	assert.Contains(t, adminInfo["upstream_body"], "Ray ID")
+}
+
+func TestRecordRelayErrorLogPreservesUpstreamParameter(t *testing.T) {
+	db := setupErrorLogTestDB(t)
+	c := errorLogTestContext(t)
+	apiErr := types.WithOpenAIError(types.OpenAIError{Message: "bad response status code 400", Type: "invalid_request_error", Code: "missing_required_parameter", Param: "tools[0].description"}, http.StatusBadRequest)
+	recordRelayErrorLog(c, nil, apiErr, nil)
+	other, err := common.StrToMap(readOnlyErrorLog(t, db).Other)
+	require.NoError(t, err)
+	admin, ok := other["admin_info"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "tools[0].description", admin["error_param"])
+}
+
+func TestRecordRelayErrorLogPreservesAttemptStreamTiming(t *testing.T) {
+	db := setupErrorLogTestDB(t)
+	c := errorLogTestContext(t)
+	c.Set(string(constant.ContextKeyIsStream), true)
+	start := time.Unix(1700000000, 0)
+	info := &relaycommon.RelayInfo{IsStream: true, StartTime: start, FirstResponseTime: start.Add(2 * time.Second), ReceivedResponseCount: 3, StreamStatus: relaycommon.NewStreamStatus()}
+	apiErr := types.NewErrorWithStatusCode(fmt.Errorf("upstream returned no output"), types.ErrorCodeEmptyResponse, http.StatusBadGateway)
+	info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonHandlerStop, apiErr)
+	info.StreamStatus.RecordError(apiErr.Error())
+	recordRelayErrorLog(c, nil, apiErr, info)
+	other, err := common.StrToMap(readOnlyErrorLog(t, db).Other)
+	require.NoError(t, err)
+	assert.EqualValues(t, 2000, other["frt"])
+	stream, ok := other["stream_status"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "handler_stop", stream["end_reason"])
+	assert.Equal(t, "error", stream["status"])
+	assert.EqualValues(t, 3, stream["received_count"])
+
+	require.NoError(t, db.Where("1 = 1").Delete(&model.Log{}).Error)
+	info.ResetResponseState()
+	recordRelayErrorLog(c, nil, apiErr, info)
+	other, err = common.StrToMap(readOnlyErrorLog(t, db).Other)
+	require.NoError(t, err)
+	assert.NotContains(t, other, "frt", "a retry with no response must not inherit the previous channel's timing")
+	assert.NotContains(t, other, "stream_status")
+	info.SetFirstResponseTime()
+	assert.True(t, info.HasSendResponse(), "the next attempt must be able to record its first response")
 }

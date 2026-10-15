@@ -3,45 +3,28 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
-	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/types"
 )
 
-// This file implements the operator-triggered "test every model on every channel
-// and prune the ones that fail" sweep, reached from the global model settings
-// page.
-//
-// It is deliberately separate from the scheduled upstream-model巡检
-// (runChannelUpstreamModelUpdateTaskOnce): that task is conservative by design —
-// it validates only newly detected candidates, removes a model only after
-// repeated confirmed failures across runs, and refuses to remove more than half a
-// channel at once so a transient upstream outage cannot empty a channel. This
-// sweep is the opposite tool the operator asked for: a single-pass, full test of
-// the union of a channel's current models and everything its upstream advertises,
-// removing every model that returns a confirmed channel fault or an explicit
-// "model unavailable" right away, with the half-channel / cumulative-failure
-// guards turned off.
-//
-// The one guard it keeps is that it never leaves a channel with zero models: a
-// channel that fails on every single model is an outage (a dead key, a drained
-// account), not a catalogue that legitimately shrank to nothing, and emptying it
-// would wipe its abilities and take it out of service for every user.
-//
-// Rate limiting is handled the way the operator described: models are tested in
-// fixed-size groups run concurrently, and the sweep waits between groups. A
-// throttled model surfaces as an inconclusive result (not a channel fault), so it
-// is left exactly as it was rather than removed.
+// Scheduled auto-update and manual full sweep share the same availability sync:
+// test every existing and advertised model on enabled channels, adopt successes
+// and delete confirmed failures from the channel's model list, which is the only
+// source of abilities, routing and the model plaza. Rate limits and indeterminate
+// failures are retried serially and the model is kept, never hidden.
 
 const (
-	channelModelSweepDefaultGroupSize      = 5
+	channelModelSweepDefaultGroupSize      = 1
 	channelModelSweepDefaultGroupDelayMs   = 500
-	channelModelSweepDefaultMaxTestsPerRun = 5000
+	channelModelSweepDefaultMaxTestsPerRun = 0 // unlimited; an explicit cap reports an incomplete run
 )
 
 // getChannelModelSweepGroupSize is how many models of one channel are tested
@@ -71,7 +54,7 @@ func getChannelModelSweepGroupDelay() time.Duration {
 func getChannelModelSweepMaxTestsPerRun() int {
 	limit := common.GetEnvOrDefault("CHANNEL_MODEL_SWEEP_MAX_TESTS_PER_RUN", channelModelSweepDefaultMaxTestsPerRun)
 	if limit < 1 {
-		return channelModelSweepDefaultMaxTestsPerRun
+		return int(^uint(0) >> 1)
 	}
 	return limit
 }
@@ -82,24 +65,52 @@ const (
 	sweepVerdictPass channelModelSweepVerdict = iota
 	sweepVerdictFail
 	sweepVerdictInconclusive
+	sweepVerdictTemporary
+	sweepVerdictAccount
 )
 
-// classifyChannelModelSweepResult turns one model test into a keep / remove /
-// leave-alone decision, reusing the exact predicates the scheduled巡检 uses so the
-// two paths agree on what a real failure is:
-//
-//   - a clean test passes;
-//   - a confirmed channel fault (service.IsChannelFaultError) or an explicit
-//     "this model does not exist" (isModelUnavailableError) fails, so the model is
-//     removed;
-//   - everything else — a rate limit, a transient upstream hiccup, or a local
-//     error while building the synthetic request — is inconclusive and changes
-//     nothing, so a throttled channel is never stripped of models it really has.
+// Only upstream evidence may remove models. Local request/pricing failures,
+// rate limits, and temporary transport/server errors remain pending verification.
 func classifyChannelModelSweepResult(result testResult) channelModelSweepVerdict {
 	if result.newAPIError == nil && result.localErr == nil {
 		return sweepVerdictPass
 	}
-	if service.IsChannelFaultError(result.newAPIError) || isModelUnavailableError(result.newAPIError, result.localErr) {
+	upstreamErr := result.newAPIError
+	if result.localErr != nil || upstreamErr == nil || types.IsChannelError(upstreamErr) {
+		return sweepVerdictInconclusive
+	}
+	if upstreamErr.StatusCode == http.StatusTooManyRequests || upstreamErr.StatusCode >= 500 {
+		return sweepVerdictTemporary
+	}
+	if upstreamErr.StatusCode == http.StatusUnauthorized || upstreamErr.StatusCode == http.StatusPaymentRequired {
+		return sweepVerdictAccount
+	}
+	message := strings.ToLower(upstreamErr.Error())
+	if strings.Contains(message, "endpoint") {
+		return sweepVerdictInconclusive
+	}
+	// Some Google-compatible upstreams report invalid credentials as 400, not
+	// 401. Treat this like the other explicit authentication failures, without
+	// mistaking an arbitrary bad probe parameter for channel unavailability.
+	if upstreamErr.StatusCode == http.StatusBadRequest &&
+		strings.Contains(message, "api key not valid. please pass a valid api key.") {
+		return sweepVerdictAccount
+	}
+	// Free-tier retirement is definitive for this exact slug. A paid replacement
+	// mentioned in the response is not permission to change the model mapping.
+	if upstreamErr.StatusCode == http.StatusNotFound &&
+		strings.Contains(message, "this model is unavailable for free.") {
+		return sweepVerdictFail
+	}
+	// A generic 410 may describe a removed endpoint, not a removed model.
+	// Only the explicit model retirement response observed upstream qualifies.
+	if upstreamErr.StatusCode == http.StatusGone {
+		if strings.Contains(message, "model") && strings.Contains(message, "end of life") && strings.Contains(message, "no longer available") {
+			return sweepVerdictFail
+		}
+	}
+	if isModelUnavailableError(upstreamErr, nil) ||
+		(upstreamErr.StatusCode == http.StatusBadRequest && upstreamErr.GetErrorCode() == types.ErrorCodeModelNotFound) {
 		return sweepVerdictFail
 	}
 	return sweepVerdictInconclusive
@@ -108,15 +119,31 @@ func classifyChannelModelSweepResult(result testResult) channelModelSweepVerdict
 // channelModelSweepSummary is the machine-readable result of one full sweep,
 // stored on the system task so the settings page can report what happened.
 type channelModelSweepSummary struct {
-	CheckedChannels    int    `json:"checked_channels"`
-	ChangedChannels    int    `json:"changed_channels"`
-	TestedModels       int    `json:"tested_models"`
-	AddedModels        int    `json:"added_models"`
-	RemovedModels      int    `json:"removed_models"`
-	InconclusiveModels int    `json:"inconclusive_models"`
-	FailedChannels     int    `json:"failed_channels"`
-	OutageSkips        int    `json:"outage_skips"`
-	ScanError          string `json:"scan_error,omitempty"`
+	CheckedChannels    int                       `json:"checked_channels"`
+	ChangedChannels    int                       `json:"changed_channels"`
+	TestedModels       int                       `json:"tested_models"`
+	AddedModels        int                       `json:"added_models"`
+	RemovedModels      int                       `json:"removed_models"`
+	InconclusiveModels int                       `json:"inconclusive_models"`
+	FailedChannels     int                       `json:"failed_channels"`
+	EmptiedChannels    int                       `json:"emptied_channels"`
+	DisabledChannels   int                       `json:"disabled_channels"`
+	Complete           bool                      `json:"complete"`
+	Channels           []channelModelSweepDetail `json:"channels"`
+	ScanError          string                    `json:"scan_error,omitempty"`
+}
+
+type channelModelSweepDetail struct {
+	ChannelID    int      `json:"channel_id"`
+	Tested       int      `json:"tested_models"`
+	Added        []string `json:"added_models"`
+	Removed      []string `json:"removed_models"`
+	Inconclusive int      `json:"inconclusive_models"`
+	FetchFailed  bool     `json:"fetch_failed"`
+	Failed       bool     `json:"failed"`
+	Skipped      bool     `json:"skipped"`
+	Disabled     bool     `json:"disabled"`
+	Unverified   []string `json:"unverified_models,omitempty"`
 }
 
 // channelSweepResult is one channel's contribution to the summary.
@@ -125,8 +152,13 @@ type channelSweepResult struct {
 	added        []string
 	removed      []string
 	inconclusive int
-	outage       bool
+	emptied      bool
+	disabled     bool
 	changed      bool
+	fetchFailed  bool
+	skipped      bool
+	incomplete   bool
+	unverified   []string
 }
 
 // computeSweptModels decides a channel's next model list from the per-model
@@ -135,10 +167,7 @@ type channelSweepResult struct {
 // left exactly as it was — an existing model stays, a candidate is not adopted —
 // so a partial run never deletes or adds on missing evidence.
 //
-// The single guard retained from the conservative巡检 path is that a sweep never
-// empties a channel: when every existing model failed, the cause is the channel
-// itself (a dead key, a drained account), not a catalogue that shrank to nothing,
-// so the original list is kept unchanged and outage is reported true.
+// Confirmed failures can empty a channel; unknown results never invent evidence.
 func computeSweptModels(
 	existingModels []string,
 	candidateModels []string,
@@ -168,9 +197,6 @@ func computeSweptModels(
 		}
 	}
 
-	if len(next) == 0 && len(existing) > 0 {
-		return existing, nil, nil, true
-	}
 	return next, addedModels, removedModels, false
 }
 
@@ -196,10 +222,13 @@ func testChannelModelGroup(ctx context.Context, channelID int, testUserID int, i
 		go func(item sweepTestItem) {
 			defer wg.Done()
 			verdict := sweepVerdictInconclusive
-			if channel, err := model.GetChannelById(channelID, true); err == nil {
-				verdict = classifyChannelModelSweepResult(
-					testChannel(ctx, channel, testUserID, item.testName, "", isStream),
-				)
+			if channel, err := model.GetChannelById(channelID, true); err == nil && channel.Status == common.ChannelStatusEnabled {
+				if item.testName != item.adoptName {
+					if mapping, changed := mergeChannelModelMapping(channel, map[string]string{item.adoptName: item.testName}); changed {
+						channel.ModelMapping = mapping
+					}
+				}
+				verdict = classifyChannelModelSweepResult(testChannel(ctx, channel, testUserID, item.adoptName, "", isStream))
 			}
 			mu.Lock()
 			verdicts[item.adoptName] = verdict
@@ -221,16 +250,33 @@ func sweepChannelModels(ctx context.Context, channelID int, testUserID int, budg
 	if err != nil {
 		return result, err
 	}
+	if channel.Status != common.ChannelStatusEnabled {
+		result.skipped = true
+		return result, nil
+	}
 	existing := normalizeModelNames(channel.GetModels())
 
-	settings := channel.GetOtherSettings()
-	candidates, _, pendingMapping, fetchErr := collectPendingUpstreamModelChanges(channel, settings)
+	// Only active aliases cover upstream ids. A stale mapping left after removal
+	// must not prevent a recovered model from ever being discovered again.
+	activeMapping := normalizeChannelModelMapping(channel)
+	for alias := range activeMapping {
+		if !slices.Contains(existing, alias) {
+			delete(activeMapping, alias)
+		}
+	}
+	upstreamModels, fetchErr := fetchChannelUpstreamModelIDs(channel)
+	candidates, _, pendingMapping := collectPendingUpstreamModelChangesFromModels(existing, upstreamModels, nil, activeMapping,
+		operation_setting.GetMonitorSetting().UpstreamModelUpdateStripVendorPrefix)
 	if fetchErr != nil {
 		// A fetch failure is not a reason to skip the channel: its existing models
 		// still deserve a health check. Test them alone and adopt nothing new.
 		common.SysLog(fmt.Sprintf("channel model sweep: upstream model fetch failed for channel %d, testing existing models only: %v", channelID, fetchErr))
 		candidates = nil
 		pendingMapping = nil
+		result.fetchFailed = true
+	}
+	for name := range channel.GetOtherSettings().UpstreamModelUpdateModelHealth {
+		candidates = append(candidates, name)
 	}
 	candidates = normalizeModelNames(candidates)
 
@@ -252,10 +298,6 @@ func sweepChannelModels(ctx context.Context, channelID int, testUserID int, budg
 		}
 		items = append(items, sweepTestItem{testName: testName, adoptName: m})
 	}
-	if len(items) == 0 {
-		return result, nil
-	}
-
 	isStream := shouldUseStreamForAutomaticChannelTest(channel)
 	groupSize := getChannelModelSweepGroupSize()
 	groupDelay := getChannelModelSweepGroupDelay()
@@ -302,14 +344,54 @@ func sweepChannelModels(ctx context.Context, channelID int, testUserID int, budg
 			}
 		}
 	}
-
-	nextModels, added, removed, outage := computeSweptModels(existing, candidates, verdicts)
-	result.added = added
-	result.removed = removed
-	result.outage = outage
-	if outage {
-		common.SysLog(fmt.Sprintf("channel model sweep: every model failed on channel %d; keeping its %d model(s) unchanged (treated as a channel-wide outage, not a catalogue that shrank to nothing)", channelID, len(existing)))
+	// A burst limit is not model unavailability. Retry unresolved probes one at
+	// a time after a pause; bounded retries leave explicit unverified results.
+	for attempt := 0; attempt < 2; attempt++ {
+		for _, item := range items {
+			if verdict, ok := verdicts[item.adoptName]; !ok || (verdict != sweepVerdictInconclusive && verdict != sweepVerdictTemporary) {
+				continue
+			}
+			if *budget <= 0 || (ctx != nil && ctx.Err() != nil) {
+				break
+			}
+			wait := max(groupDelay, time.Second) * time.Duration(attempt+1)
+			timer := time.NewTimer(wait)
+			if ctx == nil {
+				<-timer.C
+			} else {
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return result, ctx.Err()
+				}
+			}
+			for name, verdict := range testChannelModelGroup(ctx, channelID, testUserID, isStream, []sweepTestItem{item}) {
+				verdicts[name] = verdict
+				*budget--
+			}
+		}
 	}
+	result.inconclusive = 0
+	for _, item := range items {
+		verdict, tested := verdicts[item.adoptName]
+		if !tested || verdict == sweepVerdictInconclusive || verdict == sweepVerdictTemporary || verdict == sweepVerdictAccount {
+			result.unverified = append(result.unverified, item.adoptName)
+		}
+		if !tested {
+			result.incomplete = true
+		} else if verdict == sweepVerdictInconclusive || verdict == sweepVerdictTemporary || verdict == sweepVerdictAccount {
+			result.inconclusive++
+		}
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return result, ctx.Err()
+	}
+
+	nextModels, added, removed, _ := computeSweptModels(existing, candidates, verdicts)
+	// Removed models stay retry candidates in UpstreamModelUpdateModelHealth, so
+	// an emptied channel is kept enabled: the next sync re-tests and restores them.
+	disable := false
 	if len(added) == 0 && len(removed) == 0 {
 		return result, nil
 	}
@@ -320,16 +402,17 @@ func sweepChannelModels(ctx context.Context, channelID int, testUserID int, budg
 	}
 
 	joined := strings.Join(nextModels, ",")
-	if err := model.MutateChannelSettingsWithModels(channelID, joined, modelMapping, func(*dto.ChannelOtherSettings) bool { return true }); err != nil {
+	applied, err := model.ApplyChannelModelSweep(channel, joined, modelMapping, disable)
+	if err != nil {
 		return result, err
 	}
-
-	// Abilities are rebuilt from channel.Models (not the mapping), on the same
-	// in-memory channel, exactly as the scheduled巡检 does after persisting.
-	channel.Models = joined
-	if err = rebuildChannelAbilitiesLocked(channel); err != nil {
-		return result, fmt.Errorf("rebuild abilities for channel %d: %w", channelID, err)
+	if !applied {
+		result.skipped = true
+		return result, nil
 	}
+	result.added, result.removed = added, removed
+	result.emptied = len(existing) > 0 && len(nextModels) == 0
+	result.disabled = disable
 	result.changed = true
 	return result, nil
 }
@@ -341,10 +424,11 @@ func sweepChannelModels(ctx context.Context, channelID int, testUserID int, budg
 // budget is exhausted or the task is cancelled. The returned summary is stored on
 // the system task for the settings page to display.
 func runChannelModelSweepTaskOnce(ctx context.Context, report func(processed, total int)) channelModelSweepSummary {
-	summary := channelModelSweepSummary{}
+	summary := channelModelSweepSummary{Complete: true, Channels: make([]channelModelSweepDetail, 0)}
 
 	testUserID, err := resolveChannelTestUserID(nil)
 	if err != nil {
+		summary.Complete = false
 		summary.ScanError = err.Error()
 		common.SysLog(fmt.Sprintf("channel model sweep: cannot resolve test user: %v", err))
 		return summary
@@ -352,7 +436,9 @@ func runChannelModelSweepTaskOnce(ctx context.Context, report func(processed, to
 
 	var totalChannels int64
 	if err := model.DB.Model(&model.Channel{}).Where("status = ?", common.ChannelStatusEnabled).Count(&totalChannels).Error; err != nil {
-		totalChannels = 0
+		summary.Complete = false
+		summary.ScanError = err.Error()
+		return summary
 	}
 
 	budget := getChannelModelSweepMaxTestsPerRun()
@@ -374,7 +460,6 @@ func runChannelModelSweepTaskOnce(ctx context.Context, report func(processed, to
 		}
 		lastID = channels[len(channels)-1].Id
 
-		// PLACEHOLDER_RUNNER_INNER
 		for _, channel := range channels {
 			if channel == nil {
 				continue
@@ -392,17 +477,29 @@ func runChannelModelSweepTaskOnce(ctx context.Context, report func(processed, to
 			}
 			summary.CheckedChannels++
 			channelResult, err := sweepChannelModels(ctx, channel.Id, testUserID, &budget)
-			if err != nil {
+			summary.Channels = append(summary.Channels, channelModelSweepDetail{
+				ChannelID: channel.Id, Tested: channelResult.tested, Added: channelResult.added, Removed: channelResult.removed,
+				Inconclusive: channelResult.inconclusive, FetchFailed: channelResult.fetchFailed, Skipped: channelResult.skipped,
+				Unverified: channelResult.unverified, Failed: err != nil, Disabled: channelResult.disabled,
+			})
+			if err != nil || channelResult.fetchFailed {
 				summary.FailedChannels++
+			}
+			if err != nil {
 				common.SysLog(fmt.Sprintf("channel model sweep failed for channel %d: %v", channel.Id, err))
-				continue
+			}
+			if err != nil || channelResult.fetchFailed || channelResult.incomplete || channelResult.inconclusive > 0 {
+				summary.Complete = false
 			}
 			summary.TestedModels += channelResult.tested
 			summary.InconclusiveModels += channelResult.inconclusive
 			summary.AddedModels += len(channelResult.added)
 			summary.RemovedModels += len(channelResult.removed)
-			if channelResult.outage {
-				summary.OutageSkips++
+			if channelResult.emptied {
+				summary.EmptiedChannels++
+			}
+			if channelResult.disabled {
+				summary.DisabledChannels++
 			}
 			if channelResult.changed {
 				summary.ChangedChannels++
@@ -414,6 +511,16 @@ func runChannelModelSweepTaskOnce(ctx context.Context, report func(processed, to
 			break
 		}
 	}
+	if ctx != nil && ctx.Err() != nil {
+		summary.Complete = false
+		summary.ScanError = ctx.Err().Error()
+	}
+	if processed < int(totalChannels) || summary.ScanError != "" {
+		summary.Complete = false
+	}
+	if !summary.Complete && summary.ScanError == "" {
+		summary.ScanError = "model sync incomplete: inspect per-channel fetch failures, unverified models, or test budget"
+	}
 
 	if report != nil {
 		report(processed, int(totalChannels))
@@ -422,9 +529,9 @@ func runChannelModelSweepTaskOnce(ctx context.Context, report func(processed, to
 		refreshChannelRuntimeCache()
 	}
 	common.SysLog(fmt.Sprintf(
-		"channel model sweep finished: checked=%d changed=%d tested=%d added=%d removed=%d inconclusive=%d failed=%d outageSkips=%d",
+		"channel model sweep finished: checked=%d changed=%d tested=%d added=%d removed=%d inconclusive=%d failed=%d emptied=%d disabled=%d complete=%t",
 		summary.CheckedChannels, summary.ChangedChannels, summary.TestedModels, summary.AddedModels,
-		summary.RemovedModels, summary.InconclusiveModels, summary.FailedChannels, summary.OutageSkips,
+		summary.RemovedModels, summary.InconclusiveModels, summary.FailedChannels, summary.EmptiedChannels, summary.DisabledChannels, summary.Complete,
 	))
 	return summary
 }

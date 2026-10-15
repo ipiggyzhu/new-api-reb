@@ -46,6 +46,11 @@ func normalizeChannelTestEndpoint(channel *model.Channel, modelName, endpointTyp
 		return normalized
 	}
 	if strings.HasSuffix(modelName, ratio_setting.CompactModelSuffix) {
+		// On an Anthropic channel this is an upstream model name, not an
+		// instruction to switch its Messages protocol to OpenAI compaction.
+		if channel != nil && channel.Type == constant.ChannelTypeAnthropic {
+			return string(constant.EndpointTypeAnthropic)
+		}
 		return string(constant.EndpointTypeOpenAIResponseCompact)
 	}
 	if channel != nil && channel.Type == constant.ChannelTypeCodex {
@@ -109,6 +114,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		}
 	}
 
+	automaticEndpoint := strings.TrimSpace(endpointType) == ""
 	endpointType = normalizeChannelTestEndpoint(channel, testModel, endpointType)
 
 	requestPath := "/v1/chat/completions"
@@ -147,6 +153,15 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		// responses compaction models (must use /v1/responses/compact)
 		if strings.HasSuffix(testModel, ratio_setting.CompactModelSuffix) {
 			requestPath = "/v1/responses/compact"
+		}
+		// OpenAI-compatible channels can be configured as Codex CLI upstreams.
+		// Their text models may exist only on Responses: probing Chat Completions
+		// can return a misleading "model not supported" and delete working models.
+		// Preserve explicit endpoint choices and non-text endpoint inference.
+		if requestPath == "/v1/chat/completions" && channel.Type == constant.ChannelTypeOpenAI &&
+			channel.GetSetting().SyntheticClientHeadersProfile == constant.ClientHeaderFamilyCodex {
+			endpointType = string(constant.EndpointTypeOpenAIResponse)
+			requestPath = "/v1/responses"
 		}
 	}
 	if strings.HasPrefix(requestPath, "/v1/responses/compact") {
@@ -460,10 +475,22 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 				httpResp.StatusCode,
 				err,
 			))
+			// A Codex identity preset does not make every model on a generic
+			// OpenAI-compatible channel Responses-only. Probe Chat once when
+			// the automatically chosen Responses endpoint is unsupported.
+			// Never rewrite an explicit endpoint or retry auth/rate-limit errors.
+			if automaticEndpoint && requestPath == "/v1/responses" &&
+				channel.Type == constant.ChannelTypeOpenAI &&
+				channel.GetSetting().SyntheticClientHeadersProfile == constant.ClientHeaderFamilyCodex &&
+				(httpResp.StatusCode == http.StatusNotFound || httpResp.StatusCode == http.StatusMethodNotAllowed ||
+					httpResp.StatusCode == http.StatusNotImplemented ||
+					(httpResp.StatusCode == http.StatusInternalServerError && err != nil && strings.Contains(strings.ToLower(err.Error()), "not implemented"))) {
+				common.SysLog(fmt.Sprintf("channel test protocol fallback: channel_id=%d responses unsupported, testing chat completions", channel.Id))
+				return testChannel(ctx, channel, testUserID, info.OriginModelName, string(constant.EndpointTypeOpenAI), isStream)
+			}
 			return testResult{
 				context:     c,
-				localErr:    err,
-				newAPIError: types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError),
+				newAPIError: err,
 			}
 		}
 	}
@@ -877,7 +904,8 @@ func responsesItemHasTestOutput(item gjson.Result) bool {
 }
 
 func shouldUseStreamForAutomaticChannelTest(channel *model.Channel) bool {
-	return channel != nil && channel.Type == constant.ChannelTypeCodex
+	return channel != nil && (channel.Type == constant.ChannelTypeCodex ||
+		(channel.Type == constant.ChannelTypeOpenAI && channel.GetSetting().SyntheticClientHeadersProfile == constant.ClientHeaderFamilyCodex))
 }
 
 func detectErrorMessageFromJSONBytes(jsonBytes []byte) string {
@@ -1191,7 +1219,7 @@ func performChannelTests(ctx context.Context, channels []*model.Channel, testUse
 			if responseTimeError != nil {
 				disableError = responseTimeError
 			}
-			processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), disableError)
+			processChannelError(result.context, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(result.context, constant.ContextKeyChannelKey), channel.GetAutoBan()), disableError, nil)
 			summary.Disabled++
 		}
 

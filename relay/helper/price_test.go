@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -271,4 +272,17 @@ func TestModelPriceHelperRequestBillingRatiosOnlyApplyToFixedPrice(t *testing.T)
 	require.Equal(t, "QuotaFromFloat", clamp.Op)
 	require.Equal(t, common.QuotaClampOverflow, clamp.Kind)
 	require.Nil(t, info.Billing)
+}
+
+func TestHandleGroupRatioIgnoresInvalidAutoGroup(t *testing.T) {
+	for _, value := range []any{nil, 123, ""} {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Set("auto_group", value)
+		info := &relaycommon.RelayInfo{UserGroup: "default", UsingGroup: "default"}
+		require.NotPanics(t, func() {
+			group := HandleGroupRatio(c, info)
+			assert.Equal(t, 1.0, group.GroupRatio)
+		})
+		assert.Equal(t, "default", info.UsingGroup)
+	}
 }

@@ -290,11 +290,22 @@ func UpdateOptionsBulk(values map[string]string) error {
 func updateOptionMap(key string, value string) (err error) {
 	common.OptionMapRWMutex.Lock()
 	defer common.OptionMapRWMutex.Unlock()
+	previous, existed := common.OptionMap[key]
 	common.OptionMap[key] = value
+	defer func() {
+		if err == nil {
+			return
+		}
+		if existed {
+			common.OptionMap[key] = previous
+		} else {
+			delete(common.OptionMap, key)
+		}
+	}()
 
 	// 检查是否是模型配置 - 使用更规范的方式处理
-	if handleConfigUpdate(key, value) {
-		return nil // 已由配置系统处理
+	if handled, configErr := handleConfigUpdate(key, value); handled {
+		return configErr // 已由配置系统处理
 	}
 
 	// 处理传统配置项...
@@ -613,10 +624,10 @@ func updateOptionMap(key string, value string) (err error) {
 }
 
 // handleConfigUpdate 处理分层配置更新，返回是否已处理
-func handleConfigUpdate(key, value string) bool {
+func handleConfigUpdate(key, value string) (bool, error) {
 	parts := strings.SplitN(key, ".", 2)
 	if len(parts) != 2 {
-		return false // 不是分层配置
+		return false, nil // 不是分层配置
 	}
 
 	configName := parts[0]
@@ -625,14 +636,16 @@ func handleConfigUpdate(key, value string) bool {
 	// 获取配置对象
 	cfg := config.GlobalConfig.Get(configName)
 	if cfg == nil {
-		return false // 未注册的配置
+		return false, nil // 未注册的配置
 	}
 
 	// 更新配置
 	configMap := map[string]string{
 		configKey: value,
 	}
-	config.UpdateConfigFromMap(cfg, configMap)
+	if err := config.UpdateConfigFromMap(cfg, configMap); err != nil {
+		return true, err
+	}
 
 	// 特定配置的后处理
 	if configName == "performance_setting" {
@@ -660,5 +673,5 @@ func handleConfigUpdate(key, value string) bool {
 		system_setting.UpdateAndSyncTheme()
 	}
 
-	return true // 已处理
+	return true, nil // 已处理
 }

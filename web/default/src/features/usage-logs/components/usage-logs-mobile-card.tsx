@@ -349,6 +349,8 @@ function CommonLogsCard<TData>({
           cell={cells.get('token_name')}
           valueClassName='[&_.flex-col]:max-w-none [&_.flex-col>*:not(:first-child)]:text-[11px] [&_.flex-col>*:not(:first-child)]:leading-none'
         />
+        <SummaryField cell={cells.get('reasoning_effort')} />
+        <SummaryField cell={cells.get('upstream_reasoning_effort')} />
         {rowData ? (
           <MobileStreamTimingField log={rowData} />
         ) : (

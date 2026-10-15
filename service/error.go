@@ -92,6 +92,11 @@ func ClaudeErrorWrapperLocal(err error, code string, statusCode int) *dto.Claude
 
 func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFail bool) (newApiErr *types.NewAPIError) {
 	newApiErr = types.InitOpenAIError(types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
+	statusMessage := fmt.Sprintf("bad response status code %d", resp.StatusCode)
+	if resp.StatusCode == 524 {
+		statusMessage = "upstream response timed out (HTTP 524)"
+		newApiErr.Err = errors.New(statusMessage)
+	}
 
 	defer CloseResponseBodyGracefully(resp)
 	// Bounded: this is an *error* body from an upstream we do not control, and
@@ -110,9 +115,9 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 	responseBodyPreview := common.LocalLogPreview(responseBodyText)
 	buildErrWithBody := func(message string) error {
 		if message == "" {
-			return fmt.Errorf("bad response status code %d, body: %s", resp.StatusCode, responseBodyText)
+			return fmt.Errorf("%s, body: %s", statusMessage, responseBodyText)
 		}
-		return fmt.Errorf("bad response status code %d, message: %s, body: %s", resp.StatusCode, message, responseBodyText)
+		return fmt.Errorf("%s, message: %s, body: %s", statusMessage, message, responseBodyText)
 	}
 
 	err = common.Unmarshal(responseBody, &errResponse)
@@ -126,7 +131,7 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 			newApiErr.Err = buildErrWithBody("")
 		} else {
 			logger.LogError(ctx, fmt.Sprintf("bad response status code %d, body: %s", resp.StatusCode, responseBodyPreview))
-			newApiErr.Err = fmt.Errorf("bad response status code %d", resp.StatusCode)
+			newApiErr.Err = errors.New(statusMessage)
 		}
 		return
 	}
@@ -148,6 +153,9 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 	newApiErr = types.NewOpenAIError(errors.New(message), types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
 	if message == "" {
 		newApiErr.SetUpstreamBody(responseBodyText)
+		if resp.StatusCode == 524 {
+			newApiErr.Err = errors.New(statusMessage)
+		}
 	}
 	if showBodyWhenFail {
 		newApiErr.Err = buildErrWithBody(newApiErr.Error())
@@ -243,6 +251,7 @@ func TaskErrorFromAPIError(apiErr *types.NewAPIError) *dto.TaskError {
 		Code:       string(apiErr.GetErrorCode()),
 		Message:    apiErr.Err.Error(),
 		StatusCode: apiErr.StatusCode,
+		LocalError: true,
 		Error:      apiErr.Err,
 	}
 }

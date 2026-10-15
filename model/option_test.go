@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,4 +58,25 @@ func TestUpdateOptionPropagatesDatabaseWriteFailure(t *testing.T) {
 
 	err := UpdateOption("TopUpLink", "https://example.com/topup")
 	require.Error(t, err)
+}
+
+func TestUpdateOptionRejectsInvalidDottedSettingBeforePersist(t *testing.T) {
+	setupOptionTest(t)
+	originalManager := config.GlobalConfig
+	config.GlobalConfig = config.NewConfigManager()
+	t.Cleanup(func() { config.GlobalConfig = originalManager })
+	cfg := &struct {
+		Enabled bool `json:"enabled"`
+	}{}
+	config.GlobalConfig.Register("test_setting", cfg)
+	const key = "test_setting.enabled"
+	require.NoError(t, UpdateOption(key, "true"))
+	require.True(t, cfg.Enabled)
+
+	require.Error(t, UpdateOption(key, "not-a-bool"))
+	var stored Option
+	require.NoError(t, DB.First(&stored, "key = ?", key).Error)
+	assert.Equal(t, "true", stored.Value)
+	assert.Equal(t, "true", common.OptionMap[key])
+	assert.True(t, cfg.Enabled)
 }

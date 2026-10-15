@@ -1,5 +1,25 @@
 {
   "translation": {
+    "Effort not specified": "Effort not specified",
+    "Adaptive thinking": "Adaptive thinking",
+    "Thinking budget": "Thinking budget",
+    "Client type": "Client type",
+    "CLI version (includes TLS)": "CLI version (includes TLS)",
+    "Custom Device and Session Identity": "Custom Device and Session Identity",
+    "Default Go TLS handshake": "Default Go TLS handshake",
+    "Effective TLS": "Effective TLS",
+    "Restore TLS matching the client type": "Restore TLS matching the client type",
+    "Not recorded": "Not recorded",
+    "Choose the client type first, then its version below. Changing the client type resets the version and any legacy TLS override; device/session identities and requested reasoning effort stay unchanged.": "Choose the client type first, then its version below. Changing the client type resets the version and any legacy TLS override; device/session identities and requested reasoning effort stay unchanged.",
+    "The selected version binds TLS, headers and JSON layout together. TLS cannot be selected separately. HTTPS HTTP/1.1 only; disable WebSocket. Requested reasoning effort is preserved. Different versions may share the same JA3.": "The selected version binds TLS, headers and JSON layout together. TLS cannot be selected separately. HTTPS HTTP/1.1 only; disable WebSocket. Requested reasoning effort is preserved. Different versions may share the same JA3.",
+    "Controls only device/session identities. Turning it off restores their isolated defaults without changing the selected CLI version or TLS.": "Controls only device/session identities. Turning it off restores their isolated defaults without changing the selected CLI version or TLS.",
+    "Device/session overrides apply to matching Claude Code or Codex requests only. Users and conversations remain isolated. Rotating sessions changes cache keys; it does not change TLS.": "Device/session overrides apply to matching Claude Code or Codex requests only. Users and conversations remain isolated. Rotating sessions changes cache keys; it does not change TLS.",
+    "A saved legacy TLS override is still active and may not match the client type. Opening or saving this form will not migrate it. Select a CLI version or explicitly restore matching TLS below.": "A saved legacy TLS override is still active and may not match the client type. Opening or saving this form will not migrate it. Select a CLI version or explicitly restore matching TLS below.",
+    "TLS follows the client type. Select a CLI version above to pin TLS, headers and JSON layout together.": "TLS follows the client type. Select a CLI version above to pin TLS, headers and JSON layout together.",
+    "CLI version profile": "CLI version profile",
+    "Keep existing client defaults": "Keep existing client defaults",
+    "Pins CLI version, runtime headers, JSON layout and TLS to this channel. HTTPS HTTP/1.1 only; disable WebSocket. Does not change requested reasoning effort. Versions may share a TLS fingerprint.": "Pins CLI version, runtime headers, JSON layout and TLS to this channel. HTTPS HTTP/1.1 only; disable WebSocket. Does not change requested reasoning effort. Versions may share a TLS fingerprint.",
+    "Failed to load CLI version profiles": "Failed to load CLI version profiles",
     "Client synthesis is off. TLS, headers and body use the standard new-api relay behavior.": "Client synthesis is off. TLS, headers and body use the standard new-api relay behavior.",
     "Saved legacy TLS preset: {{id}}": "Saved legacy TLS preset: {{id}}",
     "Custom TLS, Device and Session Identity": "Custom TLS, Device and Session Identity",
@@ -5384,7 +5404,14 @@
     "tokens routed this week": "tokens routed this week",
     "Responses Reasoning Compatibility": "Responses Reasoning Compatibility",
     "Retry HTTP 400 invalid_encrypted_content once without old reasoning ciphertext and IDs. Preserve visible history, summaries and requested effort; reset hidden reasoning. Skip compacted or server-side history. Off by default.": "Retry HTTP 400 invalid_encrypted_content once without old reasoning ciphertext and IDs. Preserve visible history, summaries and requested effort; reset hidden reasoning. Skip compacted or server-side history. Off by default.",
-    "Fix Responses Effort to High": "Fix Responses Effort to High",
-    "Force outgoing Responses effort and existing Codex turn metadata to high, including body passthrough. Overrides effort settings only; preserves history and identity. Does not rewrite upstream replies or guarantee provider behavior. Off by default.": "Force outgoing Responses effort and existing Codex turn metadata to high, including body passthrough. Overrides effort settings only; preserves history and identity. Does not rewrite upstream replies or guarantee provider behavior. Off by default."
+    "Upstream Reasoning Effort": "Upstream Reasoning Effort",
+    "Not reported": "Not reported",
+    "Original settings not recorded": "Original settings not recorded",
+    "First upstream event": "First upstream event",
+    "Timing covers this API request, not client retries or the whole conversation turn. The first event may not contain answer text.": "Timing covers this API request, not client retries or the whole conversation turn. The first event may not contain answer text.",
+    "Thinking only": "Thinking only",
+    "Upstream returned thinking only, without answer text or a tool call.": "Upstream returned thinking only, without answer text or a tool call.",
+    "CLI version profiles require HTTPS HTTP/1.1; disable WebSocket transport": "CLI version profiles require HTTPS HTTP/1.1; disable WebSocket transport",
+    "Failed to load TLS fingerprints": "Failed to load TLS fingerprints"
   }
 }

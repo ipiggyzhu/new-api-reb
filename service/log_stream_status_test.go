@@ -1,9 +1,12 @@
 package service
 
 import (
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -88,4 +91,75 @@ func TestAppendStreamStatus_OmitsAbsentStopReason(t *testing.T) {
 	streamInfo, ok := other["stream_status"].(map[string]interface{})
 	require.True(t, ok)
 	assert.NotContains(t, streamInfo, "stop_reason")
+}
+
+func TestAppendStreamStatus_ThinkingOnlyDoesNotHideTransportFailure(t *testing.T) {
+	t.Parallel()
+
+	for _, reason := range []relaycommon.StreamEndReason{
+		relaycommon.StreamEndReasonScannerErr,
+		relaycommon.StreamEndReasonTimeout,
+		relaycommon.StreamEndReasonEOF,
+	} {
+		t.Run(string(reason), func(t *testing.T) {
+			info := &relaycommon.RelayInfo{IsStream: true, StreamStatus: relaycommon.NewStreamStatus()}
+			info.StreamStatus.SetEndReason(reason, nil)
+			if reason == relaycommon.StreamEndReasonEOF {
+				info.StreamStatus.MarkMissingTerminator()
+			}
+			info.StreamStatus.MarkThinkingOnly()
+			other := map[string]interface{}{}
+			appendStreamStatus(info, other)
+
+			streamInfo, ok := other["stream_status"].(map[string]interface{})
+			require.True(t, ok)
+			assert.Equal(t, "error", streamInfo["status"])
+			assert.Equal(t, true, streamInfo["thinking_only"])
+			assert.Equal(t, string(reason), streamInfo["end_reason"])
+			assert.NotNil(t, info.StreamStatus.FailureError())
+		})
+	}
+}
+
+func TestReasoningEffortsRemainIndependentInConsumeAndErrorLogs(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}, ReasoningEffort: "xhigh", UpstreamReasoningEffort: "low"}
+	consume := GenerateTextOtherInfo(c, info, 1, 1, 1, 0, 1, 0, 1)
+	errorInfo := map[string]interface{}{}
+	AppendRelayErrorStreamInfo(info, errorInfo)
+	for _, other := range []map[string]interface{}{consume, errorInfo} {
+		assert.Equal(t, "xhigh", other["reasoning_effort"])
+		assert.Equal(t, "low", other["upstream_reasoning_effort"])
+	}
+	info.UpstreamReasoningEffort = ""
+	consume = GenerateTextOtherInfo(c, info, 1, 1, 1, 0, 1, 0, 1)
+	assert.NotContains(t, consume, "upstream_reasoning_effort")
+}
+
+func TestGenerateTextOtherInfoOmitsUnobservedFirstResponseTime(t *testing.T) {
+	start := time.Unix(1700000000, 0)
+	for _, tc := range []struct {
+		name     string
+		first    time.Time
+		observed bool
+	}{
+		{"retry sentinel", start.Add(-time.Second), false},
+		{"unset timestamp", time.Time{}, false},
+		{"observed response", start.Add(50 * time.Millisecond), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}, IsStream: true, StartTime: start, FirstResponseTime: tc.first}
+			consume := GenerateTextOtherInfo(c, info, 1, 1, 1, 0, 1, 0, 1)
+			errorInfo := map[string]interface{}{}
+			AppendRelayErrorStreamInfo(info, errorInfo)
+			for _, other := range []map[string]interface{}{consume, errorInfo} {
+				if tc.observed {
+					assert.Equal(t, float64(50), other["frt"])
+				} else {
+					assert.NotContains(t, other, "frt")
+				}
+			}
+		})
+	}
 }

@@ -43,6 +43,7 @@ func TestRelayClientDisconnectIsNotAChannelFault(t *testing.T) {
 	originalMainType, originalLogType := common.MainDatabaseType(), common.LogDatabaseType()
 	originalScores := operation_setting.GetChannelDynamicScoreSetting()
 	originalRatios := ratio_setting.ModelRatio2JSONString()
+	originalDisableCodes := operation_setting.AutomaticDisableStatusCodesToString()
 	t.Cleanup(func() {
 		model.DB, model.LOG_DB = originalDB, originalLogDB
 		gin.SetMode(originalMode)
@@ -53,9 +54,11 @@ func TestRelayClientDisconnectIsNotAChannelFault(t *testing.T) {
 		channel_score.ResetAll()
 		operation_setting.SetChannelDynamicScoreSettingForTest(originalScores)
 		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(originalRatios))
+		require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString(originalDisableCodes))
 	})
 	common.MemoryCacheEnabled = true
-	common.BatchUpdateEnabled, common.AutomaticDisableChannelEnabled = false, false
+	common.BatchUpdateEnabled, common.AutomaticDisableChannelEnabled = false, true
+	require.NoError(t, operation_setting.AutomaticDisableStatusCodesFromString("500"))
 	common.RetryTimes, constant.CountToken = 3, false
 	// Scoring on, so a wrongly attributed fault becomes observable in the store.
 	scores := originalScores
@@ -99,7 +102,7 @@ func TestRelayClientDisconnectIsNotAChannelFault(t *testing.T) {
 	for id := 1; id <= 2; id++ {
 		channel := model.Channel{
 			Id: id, Type: constant.ChannelTypeAnthropic, Name: "cancel-upstream", Key: "local-upstream-test-key",
-			Status: common.ChannelStatusEnabled, Models: modelName, Group: "default",
+			Status: common.ChannelStatusEnabled, Models: modelName, Group: "default", AutoBan: common.GetPointer(1),
 			BaseURL: &upstream.URL, Priority: common.GetPointer(int64(5)), Weight: common.GetPointer(uint(10)),
 		}
 		require.NoError(t, db.Create(&channel).Error)
@@ -150,6 +153,16 @@ func TestRelayClientDisconnectIsNotAChannelFault(t *testing.T) {
 		t.Fatal("the relay did not return after the caller disconnected")
 	}
 	close(releaseUpstream)
+	assert.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 2*time.Second, time.Millisecond)
+	var channels []model.Channel
+	require.NoError(t, db.Find(&channels).Error)
+	require.Len(t, channels, 2)
+	for _, channel := range channels {
+		assert.Equal(t, common.ChannelStatusEnabled, channel.Status, "a cancelled request must not auto-disable channel %d", channel.Id)
+		cached, err := model.CacheGetChannel(channel.Id)
+		require.NoError(t, err)
+		assert.Equal(t, common.ChannelStatusEnabled, cached.Status)
+	}
 
 	assert.Equal(t, int32(1), upstreamCalls.Load(), "a request nobody is waiting for must not be retried on another channel")
 	snapshot := channel_score.Snapshot(channel_score.ScoreFilter{Group: "default", Model: modelName})

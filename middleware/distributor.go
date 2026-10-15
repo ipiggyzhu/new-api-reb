@@ -158,7 +158,7 @@ func Distribute() func(c *gin.Context) {
 						// stealing the pin on its way out.
 						service.SetChannelAffinityBypassed(c)
 					} else if !affinityUsable && !service.ShouldKeepChannelAffinityOnChannelDisabled() {
-						service.ClearCurrentChannelAffinityCache(c)
+						service.ClearCurrentChannelAffinityCache(c, preferredChannelID)
 					}
 				}
 

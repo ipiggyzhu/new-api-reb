@@ -55,6 +55,42 @@ func newOutputValidationTest(t *testing.T, body string, responses, stream bool) 
 	return c, info, resp, recorder
 }
 
+func TestResponsesLargeLifecycleFramesPreserveOutputValidation(t *testing.T) {
+	created := `{"type":"response.created","response":{"id":"resp_large","status":"in_progress","output":[],"instructions":"` + strings.Repeat("instruction ", 7000) + `"}}`
+	inProgress := `{"type":"response.in_progress","response":{"id":"resp_large","status":"in_progress","output":[]}}`
+	completed := `{"type":"response.completed","response":{"id":"resp_large","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"actual answer"}]}],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}`
+	for _, tc := range []struct {
+		name       string
+		preamble   string
+		terminal   string
+		wantOutput bool
+	}{
+		{"large created frame", "data: " + created + "\n\n", completed, true},
+		{"many lifecycle frames", strings.Repeat("data: "+inProgress+"\n\n", 65), completed, true},
+		{"large lifecycle is not itself output", "data: " + created + "\n\n", `{"type":"response.completed","response":{"status":"completed","output":[]}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, info, resp, recorder := newOutputValidationTest(t, tc.preamble+"data: "+tc.terminal+"\n\n", true, true)
+			usage, apiErr := OaiResponsesStreamHandler(c, info, resp)
+			if !tc.wantOutput {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, types.ErrorCodeEmptyResponse, apiErr.GetErrorCode())
+				assert.Nil(t, usage)
+				return
+			}
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			assert.True(t, usage.ResponseValidated)
+			assert.Equal(t, 2, usage.CompletionTokens)
+			assert.Contains(t, recorder.Body.String(), tc.terminal)
+			assert.Equal(t, strings.Count(tc.preamble, "data: "), strings.Count(recorder.Body.String(), `"status":"in_progress"`))
+			if tc.name == "large created frame" {
+				assert.Contains(t, recorder.Body.String(), created)
+			}
+		})
+	}
+}
+
 func TestNativeResponseRejectsEmptyOutputBeforeWriting(t *testing.T) {
 	cases := []struct {
 		name      string

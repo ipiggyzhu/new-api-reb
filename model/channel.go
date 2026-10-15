@@ -904,89 +904,68 @@ func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
 }
 
 func UpdateChannelStatus(channelId int, usingKey string, status int, reason string) bool {
-	// A status change makes everything learned about this channel stale: what was
-	// measured was a channel in a different state. This is the aggregation point
-	// for the automatic paths too — service.DisableChannel and EnableChannel both
-	// come through here — so hooking it covers auto-ban and auto-enable without a
-	// hook in each caller.
-	channel_score.Reset(channelId)
-	ClearChannelProjection(channelId)
-	if common.MemoryCacheEnabled {
-		channelStatusLock.Lock()
-		defer channelStatusLock.Unlock()
+	// Serialize the persisted read-modify-write in both cache modes. The database
+	// is authoritative; a failed read or save must not publish a cache mutation.
+	channelStatusLock.Lock()
+	defer channelStatusLock.Unlock()
 
-		// CacheGetChannel returns a private copy, so the mutation below cannot be
-		// observed by concurrent readers until it is published back into the cache.
-		channelCache, _ := CacheGetChannel(channelId)
-		if channelCache == nil {
-			return false
-		}
-		if channelCache.ChannelInfo.IsMultiKey {
-			// Use per-channel lock to prevent two concurrent key-status updates for
-			// the same channel from each starting off the same copy and losing one
-			// of the two updates.
-			beforeStatus := channelCache.Status
-			pollingLock := GetChannelPollingLock(channelId)
-			pollingLock.Lock()
-			// 如果是多Key模式，更新缓存中的状态
-			handlerMultiKeyUpdate(channelCache, usingKey, status, reason)
-			pollingLock.Unlock()
-			// Publish the per-key status changes (MultiKeyStatusList and friends);
-			// without this the cached entry keeps serving keys this call just
-			// disabled until the next full sync.
-			cachePublishChannel(channelCache)
-			if beforeStatus != channelCache.Status {
-				CacheUpdateChannelStatus(channelId, channelCache.Status)
-			}
-		} else {
-			// 如果缓存渠道存在，且状态已是目标状态，直接返回
-			if channelCache.Status == status {
-				return false
-			}
-			CacheUpdateChannelStatus(channelId, status)
-		}
-	}
-
-	shouldUpdateAbilities := false
-	defer func() {
-		if shouldUpdateAbilities {
-			err := UpdateAbilityStatus(channelId, status == common.ChannelStatusEnabled)
-			if err != nil {
-				common.SysLog(fmt.Sprintf("failed to update ability status: channel_id=%d, error=%v", channelId, err))
-			}
-		}
-	}()
 	channel, err := GetChannelById(channelId, true)
 	if err != nil {
 		return false
-	} else {
-		if channel.Status == status {
+	}
+	if channel.Status == status {
+		if !channel.ChannelInfo.IsMultiKey || status != common.ChannelStatusEnabled {
 			return false
 		}
-
-		if channel.ChannelInfo.IsMultiKey {
-			beforeStatus := channel.Status
-			// Protect map writes with the same per-channel lock used by readers
-			pollingLock := GetChannelPollingLock(channelId)
-			pollingLock.Lock()
-			handlerMultiKeyUpdate(channel, usingKey, status, reason)
-			pollingLock.Unlock()
-			if beforeStatus != channel.Status {
-				shouldUpdateAbilities = true
+		// An enabled multi-key channel may still have a disabled key to restore.
+		restoreKey := false
+		for index, key := range channel.GetKeys() {
+			if key == usingKey {
+				keyStatus, exists := channel.ChannelInfo.MultiKeyStatusList[index]
+				restoreKey = exists && keyStatus != common.ChannelStatusEnabled
+				break
 			}
-		} else {
-			info := channel.GetOtherInfo()
-			info["status_reason"] = reason
-			info["status_time"] = common.GetTimestamp()
-			channel.SetOtherInfo(info)
-			channel.Status = status
-			shouldUpdateAbilities = true
 		}
-		err = channel.SaveWithoutKey()
-		if err != nil {
-			common.SysLog(fmt.Sprintf("failed to update channel status: channel_id=%d, status=%d, error=%v", channel.Id, status, err))
+		if !restoreKey {
 			return false
 		}
+	}
+
+	beforeStatus := channel.Status
+	if channel.ChannelInfo.IsMultiKey {
+		pollingLock := GetChannelPollingLock(channelId)
+		pollingLock.Lock()
+		handlerMultiKeyUpdate(channel, usingKey, status, reason)
+		pollingLock.Unlock()
+	} else {
+		info := channel.GetOtherInfo()
+		info["status_reason"] = reason
+		info["status_time"] = common.GetTimestamp()
+		channel.SetOtherInfo(info)
+		channel.Status = status
+	}
+	statusChanged := beforeStatus != channel.Status
+	if statusChanged {
+		// Clear the old state's projection in the same write as the new status.
+		channel.EffectivePriority = nil
+		channel.EffectiveWeight = nil
+	}
+	if err := channel.SaveWithoutKey(); err != nil {
+		common.SysLog(fmt.Sprintf("failed to update channel status: channel_id=%d, status=%d, error=%v", channel.Id, status, err))
+		return false
+	}
+
+	if statusChanged {
+		// Repeated updates and per-key changes that leave the channel enabled must
+		// retain the channel's scores and routing abilities.
+		channel_score.Reset(channelId)
+		if err := UpdateAbilityStatus(channelId, channel.Status == common.ChannelStatusEnabled); err != nil {
+			common.SysLog(fmt.Sprintf("failed to update ability status: channel_id=%d, error=%v", channelId, err))
+		}
+	}
+	cachePublishChannel(channel)
+	if statusChanged {
+		CacheUpdateChannelStatus(channelId, channel.Status)
 	}
 	return true
 }

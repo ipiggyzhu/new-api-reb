@@ -280,7 +280,6 @@ export const channelFormSchema = z
     proxy: z.string().optional(),
     pass_through_body_enabled: z.boolean().optional(),
     responses_reasoning_fallback: z.boolean().optional(),
-    responses_force_high_effort: z.boolean().optional(),
     websocket_transport: z.boolean().optional(),
     synthetic_client_headers: z.boolean().optional(),
     // 'off' rather than '' because Radix Select reserves the empty string as a
@@ -288,11 +287,13 @@ export const channelFormSchema = z
     synthetic_client_headers_profile: z
       .enum(SYNTHETIC_CLIENT_HEADER_PROFILES)
       .optional(),
+    cli_version_profile: z.string().optional(),
     // Off: the TLS fingerprint follows the header profile. On: tls_fingerprint
     // replaces only the TLS layer. buildSettingJSON writes '' when off.
     tls_fingerprint_enabled: z.boolean().optional(),
     tls_fingerprint: z.string().optional(),
-    // UI-only master switch. Off clears all three overrides on save.
+    // UI-only identity switch. TLS is selected through the CLI version, while
+    // saved legacy TLS overrides survive until explicitly reset.
     custom_client_identity_enabled: z.boolean().optional(),
     client_device_seed: z.string().optional(),
     client_session_seed: z.string().optional(),
@@ -318,6 +319,21 @@ export const channelFormSchema = z
     upstream_model_update_ignored_models: z.string().optional(),
   })
   .superRefine((data, ctx) => {
+    if (
+      data.websocket_transport &&
+      (data.synthetic_client_headers_profile === 'claude' ||
+        data.synthetic_client_headers_profile === 'codex') &&
+      data.cli_version_profile
+        ?.trim()
+        .startsWith(`${data.synthetic_client_headers_profile}-`)
+    ) {
+      addRequiredIssue(
+        ctx,
+        'cli_version_profile',
+        'CLI version profiles require HTTPS HTTP/1.1; disable WebSocket transport'
+      )
+    }
+
     if ([3, 8, 36, 45].includes(data.type) && !data.base_url?.trim()) {
       addRequiredIssue(
         ctx,
@@ -437,11 +453,11 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   thinking_to_content: false,
   proxy: '',
   pass_through_body_enabled: false,
-  responses_force_high_effort: false,
   responses_reasoning_fallback: false,
   websocket_transport: false,
   synthetic_client_headers: false,
   synthetic_client_headers_profile: 'off',
+  cli_version_profile: '',
   tls_fingerprint_enabled: false,
   tls_fingerprint: '',
   custom_client_identity_enabled: false,
@@ -485,11 +501,11 @@ export function transformChannelToFormDefaults(
     thinking_to_content: false,
     proxy: '',
     pass_through_body_enabled: false,
-    responses_force_high_effort: false,
     responses_reasoning_fallback: false,
     websocket_transport: false,
     synthetic_client_headers: false,
     synthetic_client_headers_profile: 'off' as SyntheticClientHeaderProfile,
+    cli_version_profile: '',
     tls_fingerprint_enabled: false,
     tls_fingerprint: '',
     custom_client_identity_enabled: false,
@@ -519,8 +535,6 @@ export function transformChannelToFormDefaults(
         thinking_to_content: parsed.thinking_to_content || false,
         proxy: parsed.proxy || '',
         pass_through_body_enabled: parsed.pass_through_body_enabled || false,
-        responses_force_high_effort:
-          parsed.responses_force_high_effort || false,
         responses_reasoning_fallback:
           parsed.responses_reasoning_fallback || false,
         websocket_transport: parsed.websocket_transport || false,
@@ -529,10 +543,13 @@ export function transformChannelToFormDefaults(
           parsed,
           channel.type
         ),
+        cli_version_profile:
+          typeof parsed.cli_version_profile === 'string'
+            ? parsed.cli_version_profile.trim()
+            : '',
         tls_fingerprint_enabled: tlsFingerprint !== '',
         tls_fingerprint: tlsFingerprint,
-        custom_client_identity_enabled:
-          tlsFingerprint !== '' || deviceSeed !== '' || sessionSeed !== '',
+        custom_client_identity_enabled: deviceSeed !== '' || sessionSeed !== '',
         client_device_seed: deviceSeed,
         client_session_seed: sessionSeed,
         system_prompt: parsed.system_prompt || '',
@@ -649,15 +666,21 @@ export function transformChannelToFormDefaults(
  */
 function buildSettingJSON(formData: ChannelFormValues): string {
   const syntheticProfile = formData.synthetic_client_headers_profile ?? 'off'
+  const selectedVersion = (formData.cli_version_profile ?? '').trim()
+  const cliVersion =
+    (syntheticProfile === 'claude' || syntheticProfile === 'codex') &&
+    selectedVersion.startsWith(`${syntheticProfile}-`)
+      ? selectedVersion
+      : ''
   const customIdentity =
     syntheticProfile !== 'off' &&
     formData.custom_client_identity_enabled !== false
   const settingObj = {
+    ...JSON.parse(formData.setting?.trim() || '{}'),
     force_format: formData.force_format || false,
     thinking_to_content: formData.thinking_to_content || false,
     proxy: formData.proxy || '',
     pass_through_body_enabled: formData.pass_through_body_enabled || false,
-    responses_force_high_effort: formData.responses_force_high_effort || false,
     responses_reasoning_fallback:
       formData.responses_reasoning_fallback || false,
     websocket_transport: formData.websocket_transport || false,
@@ -669,10 +692,12 @@ function buildSettingJSON(formData: ChannelFormValues): string {
     synthetic_client_headers: syntheticProfile !== 'off',
     synthetic_client_headers_profile:
       syntheticProfile === 'off' ? '' : syntheticProfile,
-    // This object replaces the whole setting JSON, so the fingerprint must be
-    // written here or saving the drawer would silently drop it.
+    cli_version_profile: cliVersion,
+    // Explicitly overwrite the stored fingerprint when its override is off.
     tls_fingerprint:
-      customIdentity && formData.tls_fingerprint_enabled
+      !cliVersion &&
+      syntheticProfile !== 'off' &&
+      formData.tls_fingerprint_enabled
         ? (formData.tls_fingerprint ?? '').trim()
         : '',
     client_device_seed: customIdentity

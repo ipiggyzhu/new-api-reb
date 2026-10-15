@@ -151,7 +151,7 @@ func TestShouldSkipRetryAfterChannelAffinityFailure(t *testing.T) {
 				MarkChannelAffinityUsed(ctx, "default", preferredID)
 			}
 			if tc.clearAfterUse {
-				ClearCurrentChannelAffinityCache(ctx)
+				ClearCurrentChannelAffinityCache(ctx, preferredID)
 			}
 
 			assert.Equal(t, tc.wantSkipRetryNow, ShouldSkipRetryAfterChannelAffinityFailure(ctx))

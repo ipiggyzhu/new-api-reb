@@ -30,6 +30,7 @@ type BillingSession struct {
 	tokenConsumed    int  // 令牌额度实际扣减量
 	extraReserved    int  // 发送前补充预扣的额度（订阅退款时需要单独回滚）
 	trusted          bool // 是否命中信任额度旁路
+	trustedQuota     int  // 信任检查时批准的原始估算；更贵的重试必须重新预扣
 	fundingSettled   bool // funding.Settle 已成功，资金来源已提交
 	settled          bool // Settle 全部完成（资金 + 令牌）
 	refunded         bool // Refund 已调用
@@ -154,7 +155,7 @@ func (s *BillingSession) Reserve(targetQuota int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.settled || s.refunded || s.trusted || targetQuota <= s.preConsumedQuota {
+	if s.settled || s.refunded || targetQuota <= s.preConsumedQuota || (s.trusted && targetQuota <= s.trustedQuota) {
 		return nil
 	}
 
@@ -190,6 +191,7 @@ func (s *BillingSession) preConsume(c *gin.Context, quota int) *types.NewAPIErro
 	// ---- 信任额度旁路 ----
 	if s.shouldTrust(c) {
 		s.trusted = true
+		s.trustedQuota = quota
 		effectiveQuota = 0
 		logger.LogInfo(c, fmt.Sprintf("用户 %d 额度充足, 信任且不需要预扣费 (funding=%s)", s.relayInfo.UserId, s.funding.Source()))
 	} else if effectiveQuota > 0 {
