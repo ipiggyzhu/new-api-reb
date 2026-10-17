@@ -302,16 +302,8 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
             <DropdownMenuItem
               onClick={() => {
                 const meta = parseUpstreamUpdateMeta(channel.settings)
-                if (
-                  meta.pendingAddModels.length > 0 ||
-                  meta.pendingRemoveModels.length > 0
-                ) {
-                  upstream.openModal(
-                    channel,
-                    meta.pendingAddModels,
-                    meta.pendingRemoveModels,
-                    meta.pendingAddModels.length > 0 ? 'add' : 'remove'
-                  )
+                if (meta.pendingAddModels.length > 0) {
+                  upstream.openModal(channel, meta.pendingAddModels)
                 } else {
                   upstream.detectChannelUpdates(channel)
                 }

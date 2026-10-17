@@ -31,9 +31,9 @@ const upstreamUpdateRequestConfig = {
 
 function getManualIgnoredModelCount(settings: unknown): number {
   let parsed: Record<string, unknown> | null = null
-  if (settings && typeof settings === 'object')
+  if (settings && typeof settings === 'object') {
     parsed = settings as Record<string, unknown>
-  else if (typeof settings === 'string') {
+  } else if (typeof settings === 'string') {
     try {
       parsed = JSON.parse(settings)
     } catch {
@@ -55,8 +55,6 @@ export function useChannelUpstreamUpdates(refresh: () => Promise<void>) {
     [key: string]: unknown
   } | null>(null)
   const [addModels, setAddModels] = useState<string[]>([])
-  const [removeModels, setRemoveModels] = useState<string[]>([])
-  const [preferredTab, setPreferredTab] = useState<'add' | 'remove'>('add')
   const [applyLoading, setApplyLoading] = useState(false)
   const [detectAllLoading, setDetectAllLoading] = useState(false)
   const [applyAllLoading, setApplyAllLoading] = useState(false)
@@ -69,20 +67,15 @@ export function useChannelUpstreamUpdates(refresh: () => Promise<void>) {
   const openModal = useCallback(
     (
       record: { id: number; [key: string]: unknown } | null,
-      pendingAdd: string[] = [],
-      pendingRemove: string[] = [],
-      tab: 'add' | 'remove' = 'add'
+      pendingAdd: string[] = []
     ) => {
       const normAdd = normalizeModelList(pendingAdd)
-      const normRemove = normalizeModelList(pendingRemove)
-      if (!record?.id || (normAdd.length === 0 && normRemove.length === 0)) {
+      if (!record?.id || normAdd.length === 0) {
         toast.info(t('No processable upstream model updates for this channel'))
         return
       }
       setChannel(record)
       setAddModels(normAdd)
-      setRemoveModels(normRemove)
-      setPreferredTab(tab)
       setShowModal(true)
     },
     [t]
@@ -92,17 +85,13 @@ export function useChannelUpstreamUpdates(refresh: () => Promise<void>) {
     setShowModal(false)
     setChannel(null)
     setAddModels([])
-    setRemoveModels([])
-    setPreferredTab('add')
   }, [])
 
   const applyUpdates = useCallback(
     async ({
       addModels: selectedAdd = [],
-      removeModels: selectedRemove = [],
     }: {
       addModels?: string[]
-      removeModels?: string[]
     } = {}) => {
       if (applyRef.current) return
       if (!channel?.id) {
@@ -122,7 +111,6 @@ export function useChannelUpstreamUpdates(refresh: () => Promise<void>) {
             id: channel.id,
             add_models: normSelectedAdd,
             ignore_models: ignoreModels,
-            remove_models: normalizeModelList(selectedRemove),
           },
           upstreamUpdateRequestConfig
         )
@@ -134,10 +122,9 @@ export function useChannelUpstreamUpdates(refresh: () => Promise<void>) {
 
         toast.success(
           t(
-            'Upstream model updates applied: {{added}} added, {{removed}} removed, {{ignored}} ignored this time, {{totalIgnored}} total ignored models',
+            'Upstream model updates applied: {{added}} added, {{ignored}} ignored this time, {{totalIgnored}} total ignored models',
             {
               added: data?.added_models?.length || 0,
-              removed: data?.removed_models?.length || 0,
               ignored: normalizeModelList(ignoreModels).length,
               totalIgnored: getManualIgnoredModelCount(data?.settings),
             }
@@ -186,11 +173,10 @@ export function useChannelUpstreamUpdates(refresh: () => Promise<void>) {
 
       toast.success(
         t(
-          'Batch upstream model updates applied: {{channels}} channels, {{added}} added, {{removed}} removed, {{fails}} failed',
+          'Batch upstream model updates applied: {{channels}} channels, {{added}} added, {{fails}} failed',
           {
             channels: data?.processed_channels || 0,
             added: data?.added_models || 0,
-            removed: data?.removed_models || 0,
             fails: (data?.failed_channel_ids || []).length,
           }
         )
@@ -235,12 +221,22 @@ export function useChannelUpstreamUpdates(refresh: () => Promise<void>) {
           return
         }
 
-        toast.success(
-          t('Detection complete: {{add}} to add, {{remove}} to remove', {
-            add: data?.add_models?.length || 0,
-            remove: data?.remove_models?.length || 0,
+        toast.info(
+          t('Model sync result: {{added}} added, {{removed}} removed.', {
+            added: data?.auto_added_models || 0,
+            removed: data?.removed_models?.length || 0,
           })
         )
+        if (data?.complete === false) {
+          toast.warning(
+            t(
+              'Model sync incomplete: {{count}} models unverified. Check channel configuration and retry.',
+              {
+                count: data?.unverified_models?.length || 0,
+              }
+            )
+          )
+        }
         await refresh()
       } catch (e: unknown) {
         const err = e as {
@@ -264,7 +260,7 @@ export function useChannelUpstreamUpdates(refresh: () => Promise<void>) {
     try {
       const res = await api.post(
         '/api/channel/upstream_updates/detect_all',
-        {},
+        { full_sweep: true },
         upstreamUpdateRequestConfig
       )
       const { success, message } = res.data || {}
@@ -275,7 +271,7 @@ export function useChannelUpstreamUpdates(refresh: () => Promise<void>) {
 
       toast.success(
         t(
-          'Upstream model detection task started. Track progress in System Info, then refresh to review staged updates.'
+          'Model sync task started. Track progress in System Info, then refresh the channel list.'
         )
       )
       await refresh()
@@ -303,8 +299,6 @@ export function useChannelUpstreamUpdates(refresh: () => Promise<void>) {
       showModal,
       channel,
       addModels,
-      removeModels,
-      preferredTab,
       applyLoading,
       detectAllLoading,
       applyAllLoading,
@@ -319,8 +313,6 @@ export function useChannelUpstreamUpdates(refresh: () => Promise<void>) {
       showModal,
       channel,
       addModels,
-      removeModels,
-      preferredTab,
       applyLoading,
       detectAllLoading,
       applyAllLoading,

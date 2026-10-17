@@ -99,12 +99,15 @@ type applyAllChannelUpstreamModelUpdatesResult struct {
 }
 
 type detectChannelUpstreamModelUpdatesResult struct {
-	ChannelID       int      `json:"channel_id"`
-	ChannelName     string   `json:"channel_name"`
-	AddModels       []string `json:"add_models"`
-	RemoveModels    []string `json:"remove_models"`
-	LastCheckTime   int64    `json:"last_check_time"`
-	AutoAddedModels int      `json:"auto_added_models"`
+	ChannelID        int      `json:"channel_id"`
+	ChannelName      string   `json:"channel_name"`
+	AddModels        []string `json:"add_models"`
+	RemoveModels     []string `json:"remove_models"`
+	LastCheckTime    int64    `json:"last_check_time"`
+	AutoAddedModels  int      `json:"auto_added_models"`
+	RemovedModels    []string `json:"removed_models"`
+	UnverifiedModels []string `json:"unverified_models"`
+	Complete         bool     `json:"complete"`
 }
 
 type upstreamModelUpdateChannelSummary struct {
@@ -549,26 +552,6 @@ func fetchChannelUpstreamModelIDs(channel *model.Channel) ([]string, error) {
 	return normalizeModelNames(ids), nil
 }
 
-// channelUpstreamModelPersistMu serializes this task's ability rebuilds. The scan
-// runs channels concurrently, but SQLite allows only one writer at a time, and a
-// rebuild is a delete-then-insert of every row for a channel, so letting workers
-// rebuild simultaneously would trade progress for busy-wait errors.
-//
-// It does NOT guard the settings column any more: that is serialized per channel
-// inside model.MutateChannelSettings, which also covers the WebSocket probe this
-// mutex could never reach.
-var channelUpstreamModelPersistMu sync.Mutex
-
-// rebuildChannelAbilitiesLocked rebuilds a channel's ability rows while holding
-// channelUpstreamModelPersistMu. A rebuild is a delete-then-insert of every
-// ability row for the channel, so two interleaved rebuilds for the same channel
-// leave the union of both model sets behind; the lock serializes them.
-func rebuildChannelAbilitiesLocked(channel *model.Channel) error {
-	channelUpstreamModelPersistMu.Lock()
-	defer channelUpstreamModelPersistMu.Unlock()
-	return channel.UpdateAbilities(nil)
-}
-
 // updateChannelUpstreamModelSettings persists this task's own fields onto the
 // channel's settings.
 //
@@ -585,7 +568,7 @@ func rebuildChannelAbilitiesLocked(channel *model.Channel) error {
 // modelMapping, when non-nil, is written to the model_mapping column in the same
 // statement as the model list: a model adopted under a bare name is only
 // reachable through the mapping that turns it back into the upstream id.
-func updateChannelUpstreamModelSettings(channel *model.Channel, settings dto.ChannelOtherSettings, updateModels bool, modelMapping *string) error {
+func updateChannelUpstreamModelSettings(channel *model.Channel, settings dto.ChannelOtherSettings, updateModels bool, modelMapping *string, expected *model.Channel) error {
 	apply := func(stored *dto.ChannelOtherSettings) bool {
 		// Exactly the UpstreamModelUpdate* group. Everything else on the struct
 		// belongs to the admin form or to the handshake probe, and must survive.
@@ -609,7 +592,7 @@ func updateChannelUpstreamModelSettings(channel *model.Channel, settings dto.Cha
 	}
 
 	if updateModels || modelMapping != nil {
-		return model.MutateChannelSettingsWithModels(channel.Id, channel.Models, modelMapping, apply)
+		return model.MutateChannelSettingsWithModels(expected, channel.Models, modelMapping, apply)
 	}
 	return model.MutateChannelSettings(channel.Id, apply)
 }
@@ -1097,6 +1080,7 @@ func checkAndPersistChannelUpstreamModelUpdates(
 	allowAutoApply bool,
 	run *upstreamModelUpdateRunContext,
 ) (modelsChanged bool, autoAdded int, autoRemoved int, err error) {
+	expected := *channel
 	now := common.GetTimestamp()
 	if !force {
 		minInterval := getUpstreamModelUpdateMinCheckIntervalSeconds()
@@ -1106,10 +1090,14 @@ func checkAndPersistChannelUpstreamModelUpdates(
 		}
 	}
 
-	pendingAddModels, pendingRemoveModels, pendingModelMapping, fetchErr := collectPendingUpstreamModelChanges(channel, *settings)
+	pendingAddModels, _, pendingModelMapping, fetchErr := collectPendingUpstreamModelChanges(channel, *settings)
 	settings.UpstreamModelUpdateLastCheckTime = now
+	// Model-list drift is evidence for the real probe, not a durable delete
+	// queue. A stale queue made a model look removable long after an upstream
+	// recovered, and allowed a later manual re-add to bypass availability checks.
+	settings.UpstreamModelUpdateLastRemovedModels = nil
 	if fetchErr != nil {
-		if err = updateChannelUpstreamModelSettings(channel, *settings, false, nil); err != nil {
+		if err = updateChannelUpstreamModelSettings(channel, *settings, false, nil, &expected); err != nil {
 			return false, 0, 0, err
 		}
 		return false, 0, 0, fetchErr
@@ -1155,15 +1143,10 @@ func checkAndPersistChannelUpstreamModelUpdates(
 		settings.UpstreamModelUpdateLastDetectedModels = pendingAddModels
 		settings.UpstreamModelUpdatePendingModelMapping = pendingModelMappingFor(pendingModelMapping, pendingAddModels)
 	}
-	settings.UpstreamModelUpdateLastRemovedModels = pendingRemoveModels
+	settings.UpstreamModelUpdateLastRemovedModels = nil
 
-	if err = updateChannelUpstreamModelSettings(channel, *settings, modelsChanged, modelMapping); err != nil {
+	if err = updateChannelUpstreamModelSettings(channel, *settings, modelsChanged, modelMapping, &expected); err != nil {
 		return modelsChanged, autoAdded, autoRemoved, err
-	}
-	if modelsChanged {
-		if err = rebuildChannelAbilitiesLocked(channel); err != nil {
-			return true, autoAdded, autoRemoved, err
-		}
 	}
 	return modelsChanged, autoAdded, autoRemoved, nil
 }
@@ -1615,26 +1598,39 @@ func DetectChannelUpstreamModelUpdates(c *gin.Context) {
 		return
 	}
 
-	settings := channel.GetOtherSettings()
-	modelsChanged, autoAdded, _, err := checkAndPersistChannelUpstreamModelUpdates(channel, &settings, true, false, nil)
+	testUserID, err := resolveChannelTestUserID(c)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	if modelsChanged {
+	budget := getChannelModelSweepMaxTestsPerRun()
+	result, err := sweepChannelModels(c.Request.Context(), channel.Id, testUserID, &budget)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if result.changed {
 		refreshChannelRuntimeCache()
 	}
+	channel, err = model.GetChannelById(channel.Id, true)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	settings := channel.GetOtherSettings()
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data": detectChannelUpstreamModelUpdatesResult{
-			ChannelID:       channel.Id,
-			ChannelName:     channel.Name,
-			AddModels:       normalizeModelNames(settings.UpstreamModelUpdateLastDetectedModels),
-			RemoveModels:    normalizeModelNames(settings.UpstreamModelUpdateLastRemovedModels),
-			LastCheckTime:   settings.UpstreamModelUpdateLastCheckTime,
-			AutoAddedModels: autoAdded,
+			ChannelID:        channel.Id,
+			ChannelName:      channel.Name,
+			AddModels:        normalizeModelNames(settings.UpstreamModelUpdateLastDetectedModels),
+			LastCheckTime:    settings.UpstreamModelUpdateLastCheckTime,
+			AutoAddedModels:  len(result.added),
+			RemovedModels:    result.removed,
+			UnverifiedModels: result.unverified,
+			Complete:         !result.incomplete && !result.fetchFailed && !result.skipped && len(result.unverified) == 0,
 		},
 	})
 }
@@ -1663,13 +1659,15 @@ func applyChannelUpstreamModelUpdates(
 	run *upstreamModelUpdateRunContext,
 ) (appliedChannelUpstreamModelUpdates, error) {
 	var applied appliedChannelUpstreamModelUpdates
+	expected := *channel
 	settings := channel.GetOtherSettings()
 	pendingAddModels := normalizeModelNames(settings.UpstreamModelUpdateLastDetectedModels)
-	pendingRemoveModels := normalizeModelNames(settings.UpstreamModelUpdateLastRemovedModels)
 	addModels := intersectModelNames(addModelsInput, pendingAddModels)
 	ignoreModels := intersectModelNames(ignoreModelsInput, pendingAddModels)
-	removeModels := intersectModelNames(removeModelsInput, pendingRemoveModels)
-	removeModels = subtractModelNames(removeModels, addModels)
+	// The remove_models request is retained for wire compatibility, but catalogue
+	// drift is no longer a user-applied queue. Only the real availability sweep
+	// may remove a model from a channel.
+	removeModels := []string(nil)
 
 	if len(addModels) > 0 && run.validationEnabled() {
 		storedMapping := channel.ModelMapping
@@ -1696,28 +1694,25 @@ func applyChannelUpstreamModelUpdates(
 		settings.UpstreamModelUpdateIgnoredModels = subtractModelNames(settings.UpstreamModelUpdateIgnoredModels, addModels)
 	}
 	applied.remainingModels = subtractModelNames(pendingAddModels, append(addModels, ignoreModels...))
-	applied.remainingRemoveModels = subtractModelNames(pendingRemoveModels, removeModels)
+	applied.remainingRemoveModels = nil
 	settings.UpstreamModelUpdateLastDetectedModels = applied.remainingModels
 	settings.UpstreamModelUpdatePendingModelMapping = pendingModelMappingFor(settings.UpstreamModelUpdatePendingModelMapping, applied.remainingModels)
-	settings.UpstreamModelUpdateLastRemovedModels = applied.remainingRemoveModels
+	settings.UpstreamModelUpdateLastRemovedModels = nil
 	settings.UpstreamModelUpdateLastCheckTime = common.GetTimestamp()
 	applied.addedModels = addModels
 	applied.removedModels = removeModels
 
-	if err := updateChannelUpstreamModelSettings(channel, settings, applied.modelsChanged, modelMapping); err != nil {
+	if err := updateChannelUpstreamModelSettings(channel, settings, applied.modelsChanged, modelMapping, &expected); err != nil {
 		return appliedChannelUpstreamModelUpdates{}, err
 	}
 
-	if applied.modelsChanged {
-		if err := rebuildChannelAbilitiesLocked(channel); err != nil {
-			return applied, err
-		}
-	}
 	return applied, nil
 }
 
 func collectPendingApplyUpstreamModelChanges(settings dto.ChannelOtherSettings) (pendingAddModels []string, pendingRemoveModels []string) {
-	return normalizeModelNames(settings.UpstreamModelUpdateLastDetectedModels), normalizeModelNames(settings.UpstreamModelUpdateLastRemovedModels)
+	// Removal is decided by a real model probe and applied immediately by the
+	// sweep. Never expose an old catalogue-diff deletion queue to a manual apply.
+	return normalizeModelNames(settings.UpstreamModelUpdateLastDetectedModels), nil
 }
 
 func findEnabledChannelsAfterID(lastID int, batchSize int) ([]*model.Channel, error) {

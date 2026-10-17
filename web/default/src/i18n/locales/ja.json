@@ -1,7 +1,14 @@
 {
   "translation": {
+    "360": "360",
+    "1000": "1000",
+    "10000": "10000",
+    "Batch upstream model updates applied: {{channels}} channels, {{added}} added, {{fails}} failed": "上流モデルの一括更新を適用：{{channels}} チャンネル、{{added}} 件追加、{{fails}} 件失敗",
     "Effort not specified": "推論強度未指定",
     "Adaptive thinking": "適応型思考",
+    "Model sync incomplete: {{count}} models unverified. Check channel configuration and retry.": "モデル同期が未完了です。{{count}} 件のモデルが未検証です。チャンネル設定を確認して再試行してください。",
+    "Model sync result: {{added}} added, {{removed}} removed.": "モデル同期結果：{{added}} 件追加、{{removed}} 件削除。",
+    "Model sync task started. Track progress in System Info, then refresh the channel list.": "モデル同期タスクを開始しました。システム情報で進捗を確認し、完了後にチャンネル一覧を更新してください。",
     "Thinking budget": "思考予算",
     "Client type": "クライアントの種類",
     "CLI version (includes TLS)": "CLI バージョン（TLS を含む）",
@@ -30,6 +37,7 @@
     "Regenerate Session Identity": "セッション ID を再生成",
     "New identity configuration pending save.": "新しい ID 設定は未保存です。",
     "Saved configuration stays stable until regenerated.": "保存した設定は再生成するまで維持されます。",
+    "Upstream model updates applied: {{added}} added, {{ignored}} ignored this time, {{totalIgnored}} total ignored models": "上流モデルの更新を適用：{{added}} 件追加、今回 {{ignored}} 件無視、合計 {{totalIgnored}} 件無視",
     "Using the default isolated identity.": "既定の分離 ID を使用しています。",
     "Device/session overrides apply to matching Claude Code or Codex requests only. Users and conversations remain isolated. Rotating sessions changes cache keys; TLS can be configured independently.": "端末／セッション設定は対応するプロトコルの Claude Code または Codex リクエストにのみ適用されます。ユーザーと会話は引き続き分離されます。セッションの変更でキャッシュキーが変わります。TLS は個別に設定できます。",
     "TLS presets apply to HTTPS requests; WebSocket keeps its existing handshake.": "TLS プリセットは HTTPS リクエストに適用されます。WebSocket は既存のハンドシェイクを維持します。",
@@ -42,9 +50,6 @@
     "Model refused the request": "モデルがリクエストを拒否しました",
     "Model paused its turn": "モデルが今回の応答を一時停止しました",
     "Context window limit reached": "コンテキストウィンドウの上限に達しました",
-    "360": "360",
-    "1000": "1000",
-    "10000": "10000",
     "_copy": "_copy",
     "Added {{count}} models from \"{{name}}\"": "「{{name}}」から {{count}} 個のモデルを追加しました",
     "Applies to this request only. The configured priority and weight are unchanged.": "当該リクエストのみに適用され、設定した優先度と重みは変更されません。",
@@ -5334,6 +5339,10 @@
     "Headers sent with channel test requests, so upstreams that only accept a real client (Claude Code, an official SDK) do not reject the test. Grouped by client family: claude / openai / codex / gemini / generic, plus \"*\" for all. An empty value removes a built-in header. Built-in versions go stale — pick a preset above, then edit.": "Headers sent with channel test requests, so upstreams that only accept a real client (Claude Code, an official SDK) do not reject the test. Grouped by client family: claude / openai / codex / gemini / generic, plus \"*\" for all. An empty value removes a built-in header. Built-in versions go stale — pick a preset above, then edit.",
     "Reset to built-in": "Reset to built-in",
     "Run model update now": "Run model update now",
+    "Test and clean all channels now": "今すぐ全チャネルをテストして整理",
+    "Channel model sweep task started": "チャネルモデルのテスト・整理タスクを開始しました",
+    "Failed to start channel model sweep": "チャネルモデルのテスト・整理を開始できませんでした",
+    "Test-and-clean sweeps every channel: it tests each channel’s current and upstream models in groups and removes the ones that fail (including models already configured). It never empties a channel. This consumes quota and writes test logs.": "全チャネルを巡回し、各チャネルの現在のモデルと上流から取得したモデルをグループごとにテストして、失敗したモデル（設定済みのものを含む）を削除します。チャネル内のモデルをすべて削除することはありません。この操作はクォータを消費し、テストログを記録します。",
     "Runs one update cycle immediately using the saved settings. Save your changes first.": "Runs one update cycle immediately using the saved settings. Save your changes first.",
     "The value in the input is the configured baseline, which editing writes and scoring never overwrites.": "The value in the input is the configured baseline, which editing writes and scoring never overwrites.",
     "Per-route detail is not available on this instance yet. It reappears once the channel serves traffic again.": "Per-route detail is not available on this instance yet. It reappears once the channel serves traffic again.",
@@ -5407,11 +5416,7 @@
     "Timing covers this API request, not client retries or the whole conversation turn. The first event may not contain answer text.": "計測対象はこの API リクエストのみで、クライアントの再試行や会話ターン全体は含みません。最初のイベントに回答本文が含まれるとは限りません。",
     "Thinking only": "思考のみ",
     "Upstream returned thinking only, without answer text or a tool call.": "上流は思考内容のみを返し、回答本文やツール呼び出しを返しませんでした。",
-    "Channel model sweep task started": "チャネルモデルのテスト・整理タスクを開始しました",
     "CLI version profiles require HTTPS HTTP/1.1; disable WebSocket transport": "CLI バージョンプロファイルは HTTPS HTTP/1.1 のみ対応しています。WebSocket 転送を無効にしてください",
-    "Failed to load TLS fingerprints": "TLS フィンガープリントの読み込みに失敗しました",
-    "Failed to start channel model sweep": "チャネルモデルのテスト・整理を開始できませんでした",
-    "Test and clean all channels now": "今すぐ全チャネルをテストして整理",
-    "Test-and-clean sweeps every channel: it tests each channel’s current and upstream models in groups and removes the ones that fail (including models already configured). It never empties a channel. This consumes quota and writes test logs.": "全チャネルを巡回し、各チャネルの現在のモデルと上流から取得したモデルをグループごとにテストして、失敗したモデル（設定済みのものを含む）を削除します。チャネル内のモデルをすべて削除することはありません。この操作はクォータを消費し、テストログを記録します。"
+    "Failed to load TLS fingerprints": "TLS フィンガープリントの読み込みに失敗しました"
   }
 }

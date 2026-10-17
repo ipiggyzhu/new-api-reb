@@ -1,7 +1,14 @@
 {
   "translation": {
+    "360": "360",
+    "1000": "1000",
+    "10000": "10000",
+    "Batch upstream model updates applied: {{channels}} channels, {{added}} added, {{fails}} failed": "Đã áp dụng cập nhật hàng loạt: {{channels}} kênh, thêm {{added}}, thất bại {{fails}}",
     "Effort not specified": "Chưa chỉ định mức suy luận",
     "Adaptive thinking": "Suy nghĩ thích ứng",
+    "Model sync incomplete: {{count}} models unverified. Check channel configuration and retry.": "Đồng bộ chưa hoàn tất: {{count}} mô hình chưa được xác minh. Kiểm tra cấu hình kênh rồi thử lại.",
+    "Model sync result: {{added}} added, {{removed}} removed.": "Kết quả đồng bộ: thêm {{added}}, xóa {{removed}} mô hình.",
+    "Model sync task started. Track progress in System Info, then refresh the channel list.": "Đã bắt đầu đồng bộ mô hình. Theo dõi tiến độ trong Thông tin hệ thống, rồi làm mới danh sách kênh.",
     "Thinking budget": "Ngân sách suy nghĩ",
     "Client type": "Loại ứng dụng khách",
     "CLI version (includes TLS)": "Phiên bản CLI (kèm TLS)",
@@ -30,6 +37,7 @@
     "Regenerate Session Identity": "Tạo lại danh tính phiên",
     "New identity configuration pending save.": "Cấu hình danh tính mới chưa được lưu.",
     "Saved configuration stays stable until regenerated.": "Cấu hình đã lưu giữ ổn định cho đến khi tạo lại.",
+    "Upstream model updates applied: {{added}} added, {{ignored}} ignored this time, {{totalIgnored}} total ignored models": "Đã áp dụng cập nhật mô hình thượng nguồn: thêm {{added}}, bỏ qua {{ignored}} lần này, tổng cộng bỏ qua {{totalIgnored}}",
     "Using the default isolated identity.": "Đang dùng danh tính cô lập mặc định.",
     "Device/session overrides apply to matching Claude Code or Codex requests only. Users and conversations remain isolated. Rotating sessions changes cache keys; TLS can be configured independently.": "Tùy chỉnh thiết bị/phiên chỉ áp dụng cho yêu cầu Claude Code hoặc Codex có giao thức tương ứng. Người dùng và hội thoại vẫn được tách biệt. Đổi phiên sẽ đổi khóa bộ nhớ đệm; TLS có thể cấu hình riêng.",
     "TLS presets apply to HTTPS requests; WebSocket keeps its existing handshake.": "Mẫu TLS áp dụng cho yêu cầu HTTPS; WebSocket giữ cách bắt tay hiện tại.",
@@ -42,9 +50,6 @@
     "Model refused the request": "Mô hình đã từ chối yêu cầu",
     "Model paused its turn": "Mô hình đã tạm dừng lượt trả lời",
     "Context window limit reached": "Đã đạt giới hạn cửa sổ ngữ cảnh",
-    "360": "360",
-    "1000": "1000",
-    "10000": "10000",
     "_copy": "_bản sao",
     "Added {{count}} models from \"{{name}}\"": "Đã thêm {{count}} mô hình từ “{{name}}”",
     "Applies to this request only. The configured priority and weight are unchanged.": "Chỉ áp dụng cho yêu cầu này. Độ ưu tiên và trọng số đã cấu hình không thay đổi.",
@@ -5334,6 +5339,10 @@
     "Headers sent with channel test requests, so upstreams that only accept a real client (Claude Code, an official SDK) do not reject the test. Grouped by client family: claude / openai / codex / gemini / generic, plus \"*\" for all. An empty value removes a built-in header. Built-in versions go stale — pick a preset above, then edit.": "Headers sent with channel test requests, so upstreams that only accept a real client (Claude Code, an official SDK) do not reject the test. Grouped by client family: claude / openai / codex / gemini / generic, plus \"*\" for all. An empty value removes a built-in header. Built-in versions go stale — pick a preset above, then edit.",
     "Reset to built-in": "Reset to built-in",
     "Run model update now": "Run model update now",
+    "Test and clean all channels now": "Kiểm tra và dọn tất cả kênh ngay",
+    "Channel model sweep task started": "Đã bắt đầu tác vụ kiểm tra và dọn mô hình của các kênh",
+    "Failed to start channel model sweep": "Không thể bắt đầu kiểm tra và dọn mô hình của các kênh",
+    "Test-and-clean sweeps every channel: it tests each channel’s current and upstream models in groups and removes the ones that fail (including models already configured). It never empties a channel. This consumes quota and writes test logs.": "Tác vụ kiểm tra và dọn duyệt từng kênh: kiểm tra theo nhóm các mô hình hiện có và mô hình từ nhà cung cấp, rồi xóa mô hình kiểm tra thất bại (kể cả mô hình đã cấu hình). Tác vụ không bao giờ xóa hết mô hình của một kênh. Thao tác này tiêu tốn hạn mức và ghi nhật ký kiểm tra.",
     "Runs one update cycle immediately using the saved settings. Save your changes first.": "Runs one update cycle immediately using the saved settings. Save your changes first.",
     "The value in the input is the configured baseline, which editing writes and scoring never overwrites.": "The value in the input is the configured baseline, which editing writes and scoring never overwrites.",
     "Per-route detail is not available on this instance yet. It reappears once the channel serves traffic again.": "Per-route detail is not available on this instance yet. It reappears once the channel serves traffic again.",
@@ -5407,11 +5416,7 @@
     "Timing covers this API request, not client retries or the whole conversation turn. The first event may not contain answer text.": "Thời gian chỉ tính cho yêu cầu API này, không gồm lần thử lại của ứng dụng khách hay toàn bộ lượt hội thoại. Sự kiện đầu tiên có thể chưa chứa nội dung trả lời.",
     "Thinking only": "Chỉ có suy luận",
     "Upstream returned thinking only, without answer text or a tool call.": "Nhà cung cấp chỉ trả về nội dung suy luận, không có phần trả lời hoặc lệnh gọi công cụ.",
-    "Channel model sweep task started": "Đã bắt đầu tác vụ kiểm tra và dọn mô hình của các kênh",
     "CLI version profiles require HTTPS HTTP/1.1; disable WebSocket transport": "Cấu hình phiên bản CLI yêu cầu HTTPS HTTP/1.1; hãy tắt truyền tải WebSocket",
-    "Failed to load TLS fingerprints": "Không tải được dấu vân tay TLS",
-    "Failed to start channel model sweep": "Không thể bắt đầu kiểm tra và dọn mô hình của các kênh",
-    "Test and clean all channels now": "Kiểm tra và dọn tất cả kênh ngay",
-    "Test-and-clean sweeps every channel: it tests each channel’s current and upstream models in groups and removes the ones that fail (including models already configured). It never empties a channel. This consumes quota and writes test logs.": "Tác vụ kiểm tra và dọn duyệt từng kênh: kiểm tra theo nhóm các mô hình hiện có và mô hình từ nhà cung cấp, rồi xóa mô hình kiểm tra thất bại (kể cả mô hình đã cấu hình). Tác vụ không bao giờ xóa hết mô hình của một kênh. Thao tác này tiêu tốn hạn mức và ghi nhật ký kiểm tra."
+    "Failed to load TLS fingerprints": "Không tải được dấu vân tay TLS"
   }
 }

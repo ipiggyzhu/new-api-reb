@@ -16,7 +16,7 @@ import (
 )
 
 func TestApplyChannelModelSweepAtomicAndConcurrentChanges(t *testing.T) {
-	for _, scenario := range []string{"empty", "disabled", "edited", "ability write fails"} {
+	for _, scenario := range []string{"empty", "disabled", "edited", "organization edited", "key disabled", "settings edited", "ability write fails"} {
 		t.Run(scenario, func(t *testing.T) {
 			channel := openChannelSettingsTestDB(t)
 			require.NoError(t, DB.AutoMigrate(&Ability{}))
@@ -28,6 +28,14 @@ func TestApplyChannelModelSweepAtomicAndConcurrentChanges(t *testing.T) {
 				require.NoError(t, DB.Model(channel).Update("status", common.ChannelStatusManuallyDisabled).Error)
 			case "edited":
 				require.NoError(t, DB.Model(&Channel{}).Where("id = ?", channel.Id).Update("models", "operator-model").Error)
+			case "organization edited":
+				require.NoError(t, DB.Model(&Channel{}).Where("id = ?", channel.Id).Update("open_ai_organization", "new-organization").Error)
+			case "key disabled":
+				info := channel.ChannelInfo
+				info.MultiKeyStatusList = map[int]int{0: common.ChannelStatusManuallyDisabled}
+				require.NoError(t, DB.Model(&Channel{}).Where("id = ?", channel.Id).Update("channel_info", info).Error)
+			case "settings edited":
+				require.NoError(t, DB.Model(&Channel{}).Where("id = ?", channel.Id).Update("settings", `{"azure_responses_version":"2026-10-01"}`).Error)
 			case "ability write fails":
 				require.NoError(t, DB.Callback().Delete().Before("gorm:delete").Register("fail-sweep-abilities", func(tx *gorm.DB) {
 					if tx.Statement.Table == "abilities" {
@@ -62,6 +70,10 @@ func TestApplyChannelModelSweepAtomicAndConcurrentChanges(t *testing.T) {
 				require.ErrorContains(t, err, "configuration changed")
 				assert.False(t, applied)
 				assert.Equal(t, "operator-model", stored.Models)
+			case "organization edited", "key disabled", "settings edited":
+				require.ErrorContains(t, err, "configuration changed")
+				assert.False(t, applied)
+				assert.Equal(t, "gpt-4o", stored.Models)
 			case "ability write fails":
 				require.ErrorContains(t, err, "injected ability delete failure")
 				assert.False(t, applied)
@@ -114,7 +126,7 @@ func TestRepairChannelModelAvailabilityRestoresListedModels(t *testing.T) {
 	require.NoError(t, DB.AutoMigrate(&Ability{}))
 	channel.Status = common.ChannelStatusEnabled
 	channel.Models = "gpt-4o,gpt-4o-mini"
-	channel.OtherSettings = `{"model_availability":{"gpt-4o":{"state":"temporary","checked_at":1}},"upstream_model_update_last_check_time":42,"future":{"kept":true}}`
+	channel.OtherSettings = `{"model_availability":{"gpt-4o":{"state":"temporary","checked_at":1}},"upstream_model_update_last_removed_models":["gpt-4o"],"upstream_model_update_last_check_time":42,"future":{"kept":true}}`
 	require.NoError(t, DB.Save(channel).Error)
 	// The quarantine built abilities for gpt-4o-mini only.
 	require.NoError(t, DB.Create(&Ability{Group: "default", Model: "gpt-4o-mini", ChannelId: channel.Id, Enabled: true}).Error)
@@ -126,6 +138,7 @@ func TestRepairChannelModelAvailabilityRestoresListedModels(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "gpt-4o,gpt-4o-mini", stored.Models)
 	assert.False(t, gjson.Get(stored.OtherSettings, "model_availability").Exists())
+	assert.False(t, gjson.Get(stored.OtherSettings, "upstream_model_update_last_removed_models").Exists())
 	assert.Equal(t, int64(42), gjson.Get(stored.OtherSettings, "upstream_model_update_last_check_time").Int())
 	assert.True(t, gjson.Get(stored.OtherSettings, "future.kept").Bool())
 	assert.ElementsMatch(t, []string{"gpt-4o", "gpt-4o-mini"}, GetEnabledModels())
@@ -139,6 +152,39 @@ func TestRepairChannelModelAvailabilityRestoresListedModels(t *testing.T) {
 	}))
 	require.NoError(t, repairChannelModelAvailability(DB))
 	assert.Zero(t, writes, "a repeated repair must not rewrite any channel")
+}
+
+func TestRepairChannelModelAvailabilityRemovesLegacyDeletionQueueAlone(t *testing.T) {
+	channel := openChannelSettingsTestDB(t)
+	require.NoError(t, DB.AutoMigrate(&Ability{}))
+	channel.OtherSettings = `{"upstream_model_update_last_removed_models":["gpt-4o"],"future":{"kept":true}}`
+	require.NoError(t, DB.Save(channel).Error)
+	require.NoError(t, repairChannelModelAvailability(DB))
+	stored, err := GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.False(t, gjson.Get(stored.OtherSettings, "upstream_model_update_last_removed_models").Exists())
+	assert.True(t, gjson.Get(stored.OtherSettings, "future.kept").Bool())
+}
+
+func TestApplyChannelModelSweepClearsLegacyStateWithoutCatalogueChange(t *testing.T) {
+	channel := openChannelSettingsTestDB(t)
+	require.NoError(t, DB.AutoMigrate(&Ability{}))
+	channel.Status = common.ChannelStatusEnabled
+	channel.SetOtherSettings(dto.ChannelOtherSettings{
+		UpstreamModelUpdateLastRemovedModels:   []string{"gpt-4o"},
+		UpstreamModelUpdateLastDetectedModels:  []string{"gpt-4o", "candidate"},
+		UpstreamModelUpdatePendingModelMapping: map[string]string{"gpt-4o": "vendor/gpt-4o", "candidate": "vendor/candidate"},
+	})
+	require.NoError(t, DB.Save(channel).Error)
+	applied, err := ApplyChannelModelSweep(channel, channel.Models, nil, false)
+	require.NoError(t, err)
+	require.True(t, applied)
+	stored, err := GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	settings := stored.GetOtherSettings()
+	assert.Empty(t, settings.UpstreamModelUpdateLastRemovedModels)
+	assert.Equal(t, []string{"candidate"}, settings.UpstreamModelUpdateLastDetectedModels)
+	assert.Equal(t, map[string]string{"candidate": "vendor/candidate"}, settings.UpstreamModelUpdatePendingModelMapping)
 }
 
 // Only a confirmed failure changes routing, and it does so by deleting the model
@@ -381,9 +427,10 @@ func TestMutateChannelSettingsWritesOnlyTheSettingsColumn(t *testing.T) {
 // models forever.
 func TestMutateChannelSettingsWithModelsWritesBothColumns(t *testing.T) {
 	channel := openChannelSettingsTestDB(t)
+	require.NoError(t, DB.AutoMigrate(&Ability{}))
 
 	require.NoError(t, MutateChannelSettingsWithModels(
-		channel.Id,
+		channel,
 		"gpt-4o,gpt-4o-mini",
 		nil,
 		func(s *dto.ChannelOtherSettings) bool {
@@ -399,15 +446,31 @@ func TestMutateChannelSettingsWithModelsWritesBothColumns(t *testing.T) {
 	assert.Nil(t, stored.ModelMapping, "nil modelMapping must leave the column untouched")
 }
 
+func TestMutateChannelSettingsWithModelsRejectsConcurrentCatalogueEdits(t *testing.T) {
+	channel := openChannelSettingsTestDB(t)
+	require.NoError(t, DB.AutoMigrate(&Ability{}))
+	require.NoError(t, DB.Model(&Channel{}).Where("id = ?", channel.Id).Update("models", "operator-model").Error)
+	err := MutateChannelSettingsWithModels(channel, "gpt-4o,gpt-4o-mini", nil, func(settings *dto.ChannelOtherSettings) bool {
+		settings.UpstreamModelUpdateLastCheckTime = 42
+		return true
+	})
+	require.ErrorContains(t, err, "configuration changed")
+	stored, err := GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "operator-model", stored.Models)
+	assert.Zero(t, stored.GetOtherSettings().UpstreamModelUpdateLastCheckTime)
+}
+
 // TestMutateChannelSettingsWithModelsWritesModelMapping pins that a model adopted
 // under a bare name lands together with the mapping that turns it back into the
 // upstream id: one without the other is a model that resolves nowhere.
 func TestMutateChannelSettingsWithModelsWritesModelMapping(t *testing.T) {
 	channel := openChannelSettingsTestDB(t)
+	require.NoError(t, DB.AutoMigrate(&Ability{}))
 
 	mapping := `{"gpt-4o-mini":"openai/gpt-4o-mini"}`
 	require.NoError(t, MutateChannelSettingsWithModels(
-		channel.Id,
+		channel,
 		"gpt-4o,gpt-4o-mini",
 		&mapping,
 		func(s *dto.ChannelOtherSettings) bool { return true },
@@ -426,9 +489,10 @@ func TestMutateChannelSettingsWithModelsWritesModelMapping(t *testing.T) {
 // either, or the list moves with no record of why.
 func TestMutateChannelSettingsWithModelsSkipsBothWritesWhenMutateReturnsFalse(t *testing.T) {
 	channel := openChannelSettingsTestDB(t)
+	require.NoError(t, DB.AutoMigrate(&Ability{}))
 
 	require.NoError(t, MutateChannelSettingsWithModels(
-		channel.Id,
+		channel,
 		"gpt-4o,should-not-be-written",
 		nil,
 		func(s *dto.ChannelOtherSettings) bool { return false },

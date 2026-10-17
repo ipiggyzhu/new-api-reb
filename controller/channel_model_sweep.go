@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
@@ -228,7 +229,35 @@ func testChannelModelGroup(ctx context.Context, channelID int, testUserID int, i
 						channel.ModelMapping = mapping
 					}
 				}
-				verdict = classifyChannelModelSweepResult(testChannel(ctx, channel, testUserID, item.adoptName, "", isStream))
+				probe := testChannel(ctx, channel, testUserID, item.adoptName, "", isStream)
+				verdict = classifyChannelModelSweepResult(probe)
+				// Model access can differ between keys on one channel. A failure
+				// from the selected key cannot remove the model for every key.
+				if verdict == sweepVerdictFail && channel.ChannelInfo.IsMultiKey {
+					selectedKey := common.GetContextKeyString(probe.context, constant.ContextKeyChannelKey)
+					for index, key := range channel.GetKeys() {
+						if status, exists := channel.ChannelInfo.MultiKeyStatusList[index]; exists && status != common.ChannelStatusEnabled {
+							continue
+						}
+						if key == selectedKey {
+							continue
+						}
+						if ctx != nil && ctx.Err() != nil {
+							verdict = sweepVerdictInconclusive
+							break
+						}
+						keyChannel := *channel
+						keyChannel.Key = key
+						keyChannel.ChannelInfo.IsMultiKey = false
+						keyVerdict := classifyChannelModelSweepResult(testChannel(ctx, &keyChannel, testUserID, item.adoptName, "", isStream))
+						if keyVerdict != sweepVerdictFail {
+							verdict = keyVerdict
+						}
+						if keyVerdict == sweepVerdictPass {
+							break
+						}
+					}
+				}
 			}
 			mu.Lock()
 			verdicts[item.adoptName] = verdict
@@ -392,7 +421,16 @@ func sweepChannelModels(ctx context.Context, channelID int, testUserID int, budg
 	// Removed models stay retry candidates in UpstreamModelUpdateModelHealth, so
 	// an emptied channel is kept enabled: the next sync re-tests and restores them.
 	disable := false
-	if len(added) == 0 && len(removed) == 0 {
+	settings := channel.GetOtherSettings()
+	staleState := len(settings.UpstreamModelUpdateLastRemovedModels) > 0
+	for _, name := range nextModels {
+		_, failed := settings.UpstreamModelUpdateModelHealth[name]
+		_, mapped := settings.UpstreamModelUpdatePendingModelMapping[name]
+		if failed || mapped || slices.Contains(settings.UpstreamModelUpdateLastDetectedModels, name) {
+			staleState = true
+		}
+	}
+	if len(added) == 0 && len(removed) == 0 && !staleState {
 		return result, nil
 	}
 
@@ -413,7 +451,7 @@ func sweepChannelModels(ctx context.Context, channelID int, testUserID int, budg
 	result.added, result.removed = added, removed
 	result.emptied = len(existing) > 0 && len(nextModels) == 0
 	result.disabled = disable
-	result.changed = true
+	result.changed = len(added) > 0 || len(removed) > 0
 	return result, nil
 }
 

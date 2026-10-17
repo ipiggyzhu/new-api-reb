@@ -1,7 +1,14 @@
 {
   "translation": {
+    "360": "360",
+    "1000": "1000",
+    "10000": "10000",
+    "Batch upstream model updates applied: {{channels}} channels, {{added}} added, {{fails}} failed": "批次上游模型更新已套用：{{channels}} 個渠道，新增 {{added}} 個，失敗 {{fails}} 個",
     "Effort not specified": "未指定強度",
     "Adaptive thinking": "自適應思考",
+    "Model sync incomplete: {{count}} models unverified. Check channel configuration and retry.": "模型同步未完成：{{count}} 個模型尚未驗證。請檢查渠道設定後重試。",
+    "Model sync result: {{added}} added, {{removed}} removed.": "模型同步結果：新增 {{added}} 個，刪除 {{removed}} 個。",
+    "Model sync task started. Track progress in System Info, then refresh the channel list.": "模型同步任務已啟動。可在系統資訊中查看進度，完成後重新整理渠道清單。",
     "Thinking budget": "思考預算",
     "Client type": "用戶端類型",
     "CLI version (includes TLS)": "CLI 版本（綁定 TLS）",
@@ -30,6 +37,7 @@
     "Regenerate Session Identity": "重新產生工作階段識別碼",
     "New identity configuration pending save.": "新的識別碼設定尚未儲存。",
     "Saved configuration stays stable until regenerated.": "儲存後的設定保持穩定，直到手動重新產生。",
+    "Upstream model updates applied: {{added}} added, {{ignored}} ignored this time, {{totalIgnored}} total ignored models": "上游模型更新已套用：新增 {{added}} 個，本次忽略 {{ignored}} 個，累計忽略 {{totalIgnored}} 個",
     "Using the default isolated identity.": "目前使用預設的隔離識別碼。",
     "Device/session overrides apply to matching Claude Code or Codex requests only. Users and conversations remain isolated. Rotating sessions changes cache keys; TLS can be configured independently.": "裝置／工作階段設定僅對相符協定的 Claude Code 或 Codex 請求生效，使用者與不同工作階段仍保持隔離。更換工作階段設定會改變快取鍵；TLS 可獨立設定。",
     "TLS presets apply to HTTPS requests; WebSocket keeps its existing handshake.": "TLS 預設用於 HTTPS 請求；WebSocket 保持現有交握方式。",
@@ -42,9 +50,6 @@
     "Model refused the request": "模型拒絕了請求",
     "Model paused its turn": "模型暫停了本輪回覆",
     "Context window limit reached": "已達到上下文視窗上限",
-    "360": "360",
-    "1000": "1000",
-    "10000": "10000",
     "_copy": "_複製",
     "Added {{count}} models from \"{{name}}\"": "已從「{{name}}」新增 {{count}} 個模型",
     "Applies to this request only. The configured priority and weight are unchanged.": "僅作用於當次請求，設定的優先級和權重不會被修改。",
@@ -5334,6 +5339,10 @@
     "Headers sent with channel test requests, so upstreams that only accept a real client (Claude Code, an official SDK) do not reject the test. Grouped by client family: claude / openai / codex / gemini / generic, plus \"*\" for all. An empty value removes a built-in header. Built-in versions go stale — pick a preset above, then edit.": "隨渠道測試請求一起發送的請求頭，讓那些只接受真實用戶端（Claude Code、官方 SDK）的上游不會拒絕測試。按用戶端族分組：claude / openai / codex / gemini / generic，以及代表全部的 \"*\"。留空表示移除某個內置請求頭。內置的版本號會過時——請先在上方選擇預設，再進行編輯。",
     "Reset to built-in": "重置為內置值",
     "Run model update now": "立即執行模型更新",
+    "Test and clean all channels now": "立即測試並清理全部通道",
+    "Channel model sweep task started": "通道模型測試清理任務已啟動",
+    "Failed to start channel model sweep": "啟動通道模型測試清理失敗",
+    "Test-and-clean sweeps every channel: it tests each channel’s current and upstream models in groups and removes the ones that fail (including models already configured). It never empties a channel. This consumes quota and writes test logs.": "測試並清理會遍歷每個通道：分組測試通道目前的模型與從上游取得的模型，刪除測試失敗的模型（包括已設定的模型），但不會清空通道。此操作會消耗額度並寫入測試日誌。",
     "Runs one update cycle immediately using the saved settings. Save your changes first.": "使用已儲存的設定立即執行一次更新周期。請先儲存你的更改。",
     "The value in the input is the configured baseline, which editing writes and scoring never overwrites.": "輸入框中的值是設定的基線值；編輯寫入的是該值，動態評分永不覆蓋它。",
     "Per-route detail is not available on this instance yet. It reappears once the channel serves traffic again.": "本實例上暫時沒有該渠道的分路明細。渠道重新承載流量後會再次顯示。",
@@ -5407,11 +5416,7 @@
     "Timing covers this API request, not client retries or the whole conversation turn. The first event may not contain answer text.": "僅統計本次 API 請求，不包含用戶端重試或整輪對話；首個串流事件不一定含回答正文。",
     "Thinking only": "僅有思考",
     "Upstream returned thinking only, without answer text or a tool call.": "上游僅回傳思考內容，未回傳回答正文或工具呼叫。",
-    "Channel model sweep task started": "通道模型測試清理任務已啟動",
     "CLI version profiles require HTTPS HTTP/1.1; disable WebSocket transport": "CLI 版本設定僅支援 HTTPS HTTP/1.1；請關閉 WebSocket 傳輸",
-    "Failed to load TLS fingerprints": "載入 TLS 指紋失敗",
-    "Failed to start channel model sweep": "啟動通道模型測試清理失敗",
-    "Test and clean all channels now": "立即測試並清理全部通道",
-    "Test-and-clean sweeps every channel: it tests each channel’s current and upstream models in groups and removes the ones that fail (including models already configured). It never empties a channel. This consumes quota and writes test logs.": "測試並清理會遍歷每個通道：分組測試通道目前的模型與從上游取得的模型，刪除測試失敗的模型（包括已設定的模型），但不會清空通道。此操作會消耗額度並寫入測試日誌。"
+    "Failed to load TLS fingerprints": "載入 TLS 指紋失敗"
   }
 }

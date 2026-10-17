@@ -220,6 +220,52 @@ func TestSweepRetriesRateLimitAndRestoresRemovedModel(t *testing.T) {
 	assert.Empty(t, stored.GetOtherSettings().UpstreamModelUpdateModelHealth)
 }
 
+func TestSweepMultiKeyModelRemovalRequiresAllEnabledKeysToReject(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusNotFound, http.StatusUnauthorized} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			f := newUpstreamValidationFixture(t)
+			t.Setenv("CHANNEL_MODEL_SWEEP_GROUP_DELAY_MS", "0")
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.Method == http.MethodGet {
+					_, _ = io.WriteString(w, `{"data":[]}`)
+					return
+				}
+				resultStatus := http.StatusNotFound
+				if r.Header.Get("Authorization") == "Bearer first-key" {
+					resultStatus = status
+				}
+				w.WriteHeader(resultStatus)
+				if resultStatus == http.StatusOK {
+					_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+				} else if resultStatus == http.StatusUnauthorized {
+					_, _ = io.WriteString(w, `{"error":{"code":"invalid_api_key","message":"invalid api key"}}`)
+				} else {
+					_, _ = io.WriteString(w, `{"error":{"code":"model_not_found","message":"model does not exist"}}`)
+				}
+			}))
+			t.Cleanup(upstream.Close)
+			channel := f.createChannel(t, dto.ChannelOtherSettings{})
+			channel.Models, channel.BaseURL, channel.Key = "gpt-4o", &upstream.URL, "first-key\nsecond-key"
+			channel.ChannelInfo = model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModePolling}
+			require.NoError(t, f.db.Save(channel).Error)
+			require.NoError(t, channel.AddAbilities(nil))
+			budget := 10
+			result, err := sweepChannelModels(context.Background(), channel.Id, 1, &budget)
+			require.NoError(t, err)
+			stored, err := model.GetChannelById(channel.Id, true)
+			require.NoError(t, err)
+			if status == http.StatusNotFound {
+				assert.Empty(t, stored.Models)
+				assert.Equal(t, []string{"gpt-4o"}, result.removed)
+			} else {
+				assert.Equal(t, "gpt-4o", stored.Models)
+				assert.Empty(t, result.removed, "a single key's rejection must not delete a model for the whole channel")
+			}
+		})
+	}
+}
+
 func TestSweepFetchFailureStillTestsExistingAndReportsIncomplete(t *testing.T) {
 	f := newUpstreamValidationFixture(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

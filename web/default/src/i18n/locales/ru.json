@@ -1,7 +1,14 @@
 {
   "translation": {
+    "360": "360",
+    "1000": "1000",
+    "10000": "10000",
+    "Batch upstream model updates applied: {{channels}} channels, {{added}} added, {{fails}} failed": "Пакетные обновления применены: каналов {{channels}}, добавлено {{added}}, ошибок {{fails}}",
     "Effort not specified": "Уровень не указан",
     "Adaptive thinking": "Адаптивное мышление",
+    "Model sync incomplete: {{count}} models unverified. Check channel configuration and retry.": "Синхронизация не завершена: {{count}} моделей не проверено. Проверьте настройки канала и повторите попытку.",
+    "Model sync result: {{added}} added, {{removed}} removed.": "Результат синхронизации: добавлено {{added}}, удалено {{removed}}.",
+    "Model sync task started. Track progress in System Info, then refresh the channel list.": "Задача синхронизации моделей запущена. Следите за ходом в информации о системе, затем обновите список каналов.",
     "Thinking budget": "Бюджет рассуждений",
     "Client type": "Тип клиента",
     "CLI version (includes TLS)": "Версия CLI (включая TLS)",
@@ -30,6 +37,7 @@
     "Regenerate Session Identity": "Сменить идентификатор сеанса",
     "New identity configuration pending save.": "Новая конфигурация идентификаторов не сохранена.",
     "Saved configuration stays stable until regenerated.": "Сохранённая конфигурация остаётся постоянной до ручной смены.",
+    "Upstream model updates applied: {{added}} added, {{ignored}} ignored this time, {{totalIgnored}} total ignored models": "Обновления моделей применены: добавлено {{added}}, пропущено сейчас {{ignored}}, всего пропущено {{totalIgnored}}",
     "Using the default isolated identity.": "Используется изолированный идентификатор по умолчанию.",
     "Device/session overrides apply to matching Claude Code or Codex requests only. Users and conversations remain isolated. Rotating sessions changes cache keys; TLS can be configured independently.": "Идентификаторы устройства/сеанса применяются только к запросам Claude Code или Codex с соответствующим протоколом. Пользователи и разговоры остаются изолированными. Смена сеанса меняет ключи кеша; TLS настраивается отдельно.",
     "TLS presets apply to HTTPS requests; WebSocket keeps its existing handshake.": "Профили TLS применяются к запросам HTTPS; WebSocket сохраняет существующее рукопожатие.",
@@ -42,9 +50,6 @@
     "Model refused the request": "Модель отклонила запрос",
     "Model paused its turn": "Модель приостановила ответ",
     "Context window limit reached": "Достигнут предел контекстного окна",
-    "360": "360",
-    "1000": "1000",
-    "10000": "10000",
     "_copy": "_копировать",
     "Added {{count}} models from \"{{name}}\"": "Добавлено моделей из «{{name}}»: {{count}}",
     "Applies to this request only. The configured priority and weight are unchanged.": "Применяется только к текущему запросу. Настроенные приоритет и вес не меняются.",
@@ -5334,6 +5339,10 @@
     "Headers sent with channel test requests, so upstreams that only accept a real client (Claude Code, an official SDK) do not reject the test. Grouped by client family: claude / openai / codex / gemini / generic, plus \"*\" for all. An empty value removes a built-in header. Built-in versions go stale — pick a preset above, then edit.": "Headers sent with channel test requests, so upstreams that only accept a real client (Claude Code, an official SDK) do not reject the test. Grouped by client family: claude / openai / codex / gemini / generic, plus \"*\" for all. An empty value removes a built-in header. Built-in versions go stale — pick a preset above, then edit.",
     "Reset to built-in": "Reset to built-in",
     "Run model update now": "Run model update now",
+    "Test and clean all channels now": "Проверить и очистить все каналы",
+    "Channel model sweep task started": "Задача проверки и очистки моделей каналов запущена",
+    "Failed to start channel model sweep": "Не удалось запустить проверку моделей каналов",
+    "Test-and-clean sweeps every channel: it tests each channel’s current and upstream models in groups and removes the ones that fail (including models already configured). It never empties a channel. This consumes quota and writes test logs.": "Проверка и очистка обходит все каналы: тестирует группами текущие модели и модели провайдера, затем удаляет не прошедшие проверку, включая уже настроенные. В каждом канале сохраняется хотя бы одна модель. Операция расходует квоту и записывает журналы тестов.",
     "Runs one update cycle immediately using the saved settings. Save your changes first.": "Runs one update cycle immediately using the saved settings. Save your changes first.",
     "The value in the input is the configured baseline, which editing writes and scoring never overwrites.": "The value in the input is the configured baseline, which editing writes and scoring never overwrites.",
     "Per-route detail is not available on this instance yet. It reappears once the channel serves traffic again.": "Per-route detail is not available on this instance yet. It reappears once the channel serves traffic again.",
@@ -5407,11 +5416,7 @@
     "Timing covers this API request, not client retries or the whole conversation turn. The first event may not contain answer text.": "Время относится только к этому API-запросу, без повторных попыток клиента и полного шага диалога. Первое событие может не содержать текста ответа.",
     "Thinking only": "Только размышления",
     "Upstream returned thinking only, without answer text or a tool call.": "Провайдер вернул только размышления, без текста ответа или вызова инструмента.",
-    "Channel model sweep task started": "Задача проверки и очистки моделей каналов запущена",
     "CLI version profiles require HTTPS HTTP/1.1; disable WebSocket transport": "Профили версий CLI требуют HTTPS HTTP/1.1; отключите транспорт WebSocket",
-    "Failed to load TLS fingerprints": "Не удалось загрузить TLS-отпечатки",
-    "Failed to start channel model sweep": "Не удалось запустить проверку моделей каналов",
-    "Test and clean all channels now": "Проверить и очистить все каналы",
-    "Test-and-clean sweeps every channel: it tests each channel’s current and upstream models in groups and removes the ones that fail (including models already configured). It never empties a channel. This consumes quota and writes test logs.": "Проверка и очистка обходит все каналы: тестирует группами текущие модели и модели провайдера, затем удаляет не прошедшие проверку, включая уже настроенные. В каждом канале сохраняется хотя бы одна модель. Операция расходует квоту и записывает журналы тестов."
+    "Failed to load TLS fingerprints": "Не удалось загрузить TLS-отпечатки"
   }
 }

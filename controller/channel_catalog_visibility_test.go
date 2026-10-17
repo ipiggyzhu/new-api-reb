@@ -136,7 +136,7 @@ func TestUpdateChannelReaddedModelImmediatelyVisibleAfterSweep(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, "gpt-4o", stored.Models)
 			assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
-			assert.Contains(t, stored.GetOtherSettings().UpstreamModelUpdateModelHealth, "gpt-4o", "old failure history must not quarantine a manually re-added model")
+			assert.NotContains(t, stored.GetOtherSettings().UpstreamModelUpdateModelHealth, "gpt-4o", "manual re-add must clear stale failure history")
 			assert.Contains(t, model.GetEnabledModels(), "gpt-4o")
 			assert.Contains(t, pricingByModelName(model.GetPricing()), "gpt-4o")
 			picked, err = model.GetRandomSatisfiedChannel("default", "gpt-4o", 0, "", nil)
@@ -150,4 +150,46 @@ func TestUpdateChannelReaddedModelImmediatelyVisibleAfterSweep(t *testing.T) {
 			assert.Equal(t, common.ChannelStatusEnabled, cached.Status)
 		})
 	}
+}
+
+func TestUpdateChannelManualModelEditClearsStaleStateWithoutProbes(t *testing.T) {
+	f := newUpstreamValidationFixture(t)
+	channel := f.createChannel(t, dto.ChannelOtherSettings{})
+	channel.Models = "gpt-4o"
+	channel.OtherSettings = `{"model_availability":{"missing":{"state":"unavailable"}},"upstream_model_update_last_removed_models":["missing"],"upstream_model_update_model_health":{"missing":{"failures":2},"other":{"failures":1}},"websocket_unsupported":true,"future":{"kept":true}}`
+	require.NoError(t, f.db.Save(channel).Error)
+
+	body, err := common.Marshal(map[string]any{
+		"id":       channel.Id,
+		"models":   "gpt-4o,missing",
+		"settings": channel.OtherSettings,
+	})
+	require.NoError(t, err)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/channel/", bytes.NewReader(body))
+	c.Set("id", 1)
+	c.Set("role", common.RoleRootUser)
+
+	UpdateChannel(c)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response struct {
+		Success bool `json:"success"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success)
+	assert.Empty(t, f.requested(), "manual edits must not perform billable network probes")
+
+	stored, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	require.Equal(t, "gpt-4o,missing", stored.Models)
+	var settings map[string]any
+	require.NoError(t, common.UnmarshalJsonStr(stored.OtherSettings, &settings))
+	assert.NotContains(t, settings, "model_availability")
+	assert.NotContains(t, settings, "upstream_model_update_last_removed_models")
+	assert.NotContains(t, stored.GetOtherSettings().UpstreamModelUpdateModelHealth, "missing")
+	assert.Contains(t, stored.GetOtherSettings().UpstreamModelUpdateModelHealth, "other", "unlisted recovery candidates must survive an unrelated edit")
+	assert.True(t, stored.GetOtherSettings().WebsocketUnsupported)
+	assert.Contains(t, settings, "future", "unrelated and forward-compatible settings must survive")
 }

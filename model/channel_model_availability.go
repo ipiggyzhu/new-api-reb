@@ -17,7 +17,7 @@ func repairChannelModelAvailability(db *gorm.DB) error {
 	var lastID, repaired int
 	for {
 		var ids []int
-		if err := db.Model(&Channel{}).Where("id > ? AND settings LIKE ?", lastID, `%"model_availability"%`).
+		if err := db.Model(&Channel{}).Where("id > ? AND (settings LIKE ? OR settings LIKE ?)", lastID, `%"model_availability"%`, `%"upstream_model_update_last_removed_models"%`).
 			Order("id").Limit(200).Pluck("id", &ids).Error; err != nil {
 			return err
 		}
@@ -37,10 +37,13 @@ func repairChannelModelAvailability(db *gorm.DB) error {
 					common.SysLog(fmt.Sprintf("model availability repair skipped channel %d: invalid settings", id))
 					return nil
 				}
-				if _, ok := fields["model_availability"]; !ok {
+				_, quarantined := fields["model_availability"]
+				_, pendingRemoval := fields["upstream_model_update_last_removed_models"]
+				if !quarantined && !pendingRemoval {
 					return nil
 				}
 				delete(fields, "model_availability")
+				delete(fields, "upstream_model_update_last_removed_models")
 				encoded, err := common.Marshal(fields)
 				if err != nil {
 					return err

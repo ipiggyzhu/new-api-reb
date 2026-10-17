@@ -90,10 +90,9 @@ export function ChannelsDialogs() {
 
       {/* Upstream Model Update Dialog */}
       <UpstreamUpdateDialog
+        key={upstream.showModal ? upstream.channel?.id : 'closed'}
         open={upstream.showModal}
         addModels={upstream.addModels}
-        removeModels={upstream.removeModels}
-        preferredTab={upstream.preferredTab}
         confirmLoading={upstream.applyLoading}
         onConfirm={upstream.applyUpdates}
         onCancel={upstream.closeModal}

@@ -707,8 +707,57 @@ func (channel *Channel) Update() error {
 			}
 		}
 	}
-	var err error
-	err = DB.Model(channel).Updates(channel).Error
+	lock := channelSettingsLock(channel.Id)
+	lock.Lock()
+	defer lock.Unlock()
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(channel).Updates(channel).Error; err != nil {
+			return err
+		}
+		if err := tx.First(channel, channel.Id).Error; err != nil {
+			return err
+		}
+		// The explicit catalogue is authoritative. Old detection/removal state
+		// must not survive an operator restoring a model, including when an old
+		// browser submits stale settings with the form.
+		if channel.OtherSettings != "" {
+			var fields map[string]json.RawMessage
+			if err := common.UnmarshalJsonStr(channel.OtherSettings, &fields); err != nil {
+				return fmt.Errorf("invalid settings for channel %d", channel.Id)
+			}
+			delete(fields, "model_availability")
+			delete(fields, "upstream_model_update_last_removed_models")
+			if raw, ok := fields["upstream_model_update_model_health"]; ok {
+				var health map[string]dto.ModelHealthState
+				if err := common.Unmarshal(raw, &health); err != nil {
+					return fmt.Errorf("invalid model health for channel %d", channel.Id)
+				}
+				for _, name := range channel.GetModels() {
+					delete(health, name)
+				}
+				if len(health) == 0 {
+					delete(fields, "upstream_model_update_model_health")
+				} else {
+					encoded, err := common.Marshal(health)
+					if err != nil {
+						return err
+					}
+					fields["upstream_model_update_model_health"] = encoded
+				}
+			}
+			encoded, err := common.Marshal(fields)
+			if err != nil {
+				return err
+			}
+			if cleaned := string(encoded); cleaned != channel.OtherSettings {
+				channel.OtherSettings = cleaned
+				if err := tx.Model(channel).Update("settings", cleaned).Error; err != nil {
+					return err
+				}
+			}
+		}
+		return channel.UpdateAbilities(tx)
+	})
 	if err != nil {
 		return err
 	}
@@ -723,9 +772,7 @@ func (channel *Channel) Update() error {
 	// have to go with it. Waiting for the next scheduled run would leave the list
 	// showing an adjustment against a baseline that no longer exists.
 	ClearChannelProjection(channel.Id)
-	DB.Model(channel).First(channel, "id = ?", channel.Id)
-	err = channel.UpdateAbilities(nil)
-	return err
+	return nil
 }
 
 func (channel *Channel) UpdateResponseTime(responseTime int64) {

@@ -46,12 +46,12 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { toIntlLocale } from '@/i18n/languages'
 import {
   formatCurrencyFromUSD,
   formatQuotaWithCurrency,
   getCurrencyLabel,
 } from '@/lib/currency'
-import { toIntlLocale } from '@/i18n/languages'
 import { formatTimestampToDate } from '@/lib/format'
 import { truncateText, cn } from '@/lib/utils'
 
@@ -77,10 +77,6 @@ import {
 import { parseUpstreamUpdateMeta } from '../lib/upstream-update-utils'
 import type { Channel } from '../types'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
-import {
-  DynamicScorePriorityBadge,
-  DynamicScoreWeightBadge,
-} from './dynamic-score-badge'
 import { useChannels } from './channels-provider'
 import { DataTableRowActions } from './data-table-row-actions'
 import { DataTableTagRowActions } from './data-table-tag-row-actions'
@@ -88,6 +84,10 @@ import {
   CodexUsageDialog,
   type CodexUsageDialogData,
 } from './dialogs/codex-usage-dialog'
+import {
+  DynamicScorePriorityBadge,
+  DynamicScoreWeightBadge,
+} from './dynamic-score-badge'
 import { NumericSpinnerInput } from './numeric-spinner-input'
 
 function parseIonetMeta(otherInfo: string | null | undefined): null | {
@@ -109,7 +109,7 @@ function parseIonetMeta(otherInfo: string | null | undefined): null | {
 }
 
 /**
- * Upstream update tags (+N / -N) shown on channel name for model-fetchable channels
+ * Upstream addition tags (+N) shown on channel name for model-fetchable channels
  */
 function UpstreamUpdateTags({ channel }: { channel: Channel }) {
   const { upstream, setCurrentRow } = useChannels()
@@ -123,52 +123,21 @@ function UpstreamUpdateTags({ channel }: { channel: Channel }) {
   }
 
   const addCount = meta.pendingAddModels.length
-  const removeCount = meta.pendingRemoveModels.length
-  if (addCount === 0 && removeCount === 0) {
-    return null
-  }
+  if (addCount === 0) return null
 
   return (
-    <div className='flex items-center gap-0.5'>
-      {addCount > 0 && (
-        <StatusBadge
-          label={`+${addCount}`}
-          variant='success'
-          size='sm'
-          copyable={false}
-          className='cursor-pointer'
-          onClick={(e: React.MouseEvent) => {
-            e.stopPropagation()
-            setCurrentRow(channel)
-            upstream.openModal(
-              channel,
-              meta.pendingAddModels,
-              meta.pendingRemoveModels,
-              'add'
-            )
-          }}
-        />
-      )}
-      {removeCount > 0 && (
-        <StatusBadge
-          label={`-${removeCount}`}
-          variant='danger'
-          size='sm'
-          copyable={false}
-          className='cursor-pointer'
-          onClick={(e: React.MouseEvent) => {
-            e.stopPropagation()
-            setCurrentRow(channel)
-            upstream.openModal(
-              channel,
-              meta.pendingAddModels,
-              meta.pendingRemoveModels,
-              'remove'
-            )
-          }}
-        />
-      )}
-    </div>
+    <StatusBadge
+      label={`+${addCount}`}
+      variant='success'
+      size='sm'
+      copyable={false}
+      className='cursor-pointer'
+      onClick={(e: React.MouseEvent) => {
+        e.stopPropagation()
+        setCurrentRow(channel)
+        upstream.openModal(channel, meta.pendingAddModels)
+      }}
+    />
   )
 }
 
@@ -391,7 +360,12 @@ function MaxConcurrencyCell({ channel }: { channel: Channel }) {
 
   return spinner(
     (value) => {
-      handleUpdateChannelField(channel.id, 'max_concurrency', value, queryClient)
+      handleUpdateChannelField(
+        channel.id,
+        'max_concurrency',
+        value,
+        queryClient
+      )
     },
     {
       renderValue: (limit) => (

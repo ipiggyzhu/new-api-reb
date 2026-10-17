@@ -44,6 +44,19 @@ func channelSettingsLock(channelId int) *sync.Mutex {
 	return actual.(*sync.Mutex)
 }
 
+// channelModelValidationConfigMatches rejects results obtained before a channel edit.
+// Polling progress is excluded because choosing a key updates it during a probe.
+func channelModelValidationConfigMatches(current, expected *Channel) bool {
+	return current.Status == expected.Status && current.Models == expected.Models &&
+		current.GetModelMapping() == expected.GetModelMapping() && current.OtherSettings == expected.OtherSettings &&
+		current.Key == expected.Key && current.Type == expected.Type && current.GetBaseURL() == expected.GetBaseURL() &&
+		reflect.DeepEqual(current.OpenAIOrganization, expected.OpenAIOrganization) &&
+		current.ChannelInfo.IsMultiKey == expected.ChannelInfo.IsMultiKey &&
+		reflect.DeepEqual(current.ChannelInfo.MultiKeyStatusList, expected.ChannelInfo.MultiKeyStatusList) &&
+		current.Other == expected.Other && reflect.DeepEqual(current.Setting, expected.Setting) &&
+		reflect.DeepEqual(current.ParamOverride, expected.ParamOverride) && reflect.DeepEqual(current.HeaderOverride, expected.HeaderOverride)
+}
+
 // ApplyChannelModelSweep commits a validated catalogue, its routes, and a
 // confirmed-empty channel's disabled status together.
 // A channel disabled or edited during network probes must not receive stale results.
@@ -61,10 +74,7 @@ func ApplyChannelModelSweep(expected *Channel, models string, modelMapping *stri
 		if current.Status != common.ChannelStatusEnabled {
 			return nil
 		}
-		if current.Models != expected.Models || current.GetModelMapping() != expected.GetModelMapping() ||
-			current.Key != expected.Key || current.Type != expected.Type || current.GetBaseURL() != expected.GetBaseURL() ||
-			current.Other != expected.Other || !reflect.DeepEqual(current.Setting, expected.Setting) ||
-			!reflect.DeepEqual(current.ParamOverride, expected.ParamOverride) || !reflect.DeepEqual(current.HeaderOverride, expected.HeaderOverride) {
+		if !channelModelValidationConfigMatches(&current, expected) {
 			return fmt.Errorf("channel %d configuration changed during model validation; results not applied", expected.Id)
 		}
 		current.Models = models
@@ -79,6 +89,7 @@ func ApplyChannelModelSweep(expected *Channel, models string, modelMapping *stri
 			columns["other_info"] = current.OtherInfo
 		}
 		settings := current.GetOtherSettings()
+		settings.UpstreamModelUpdateLastRemovedModels = nil
 		if settings.UpstreamModelUpdateModelHealth == nil {
 			settings.UpstreamModelUpdateModelHealth = make(map[string]dto.ModelHealthState)
 		}
@@ -86,7 +97,15 @@ func ApplyChannelModelSweep(expected *Channel, models string, modelMapping *stri
 		for _, name := range current.GetModels() {
 			remaining[name] = true
 			delete(settings.UpstreamModelUpdateModelHealth, name)
+			delete(settings.UpstreamModelUpdatePendingModelMapping, name)
 		}
+		pending := make([]string, 0, len(settings.UpstreamModelUpdateLastDetectedModels))
+		for _, name := range settings.UpstreamModelUpdateLastDetectedModels {
+			if !remaining[name] {
+				pending = append(pending, name)
+			}
+		}
+		settings.UpstreamModelUpdateLastDetectedModels = pending
 		for _, name := range expected.GetModels() {
 			if !remaining[name] {
 				// Keep removed names as retry candidates, not as routable abilities.
@@ -182,48 +201,55 @@ func MutateChannelSettings(channelId int, mutate func(*dto.ChannelOtherSettings)
 // the mapping that turns it back, so the two land together. nil leaves the
 // column untouched.
 //
-// Abilities are NOT rebuilt here. The caller does that after this returns, since
-// it owns the transaction semantics that rebuild needs.
+// The expected configuration, models, settings and abilities are checked and
+// written together, so a probe cannot overwrite a later operator edit.
 func MutateChannelSettingsWithModels(
-	channelId int,
+	expected *Channel,
 	models string,
 	modelMapping *string,
 	mutate func(*dto.ChannelOtherSettings) bool,
 ) error {
-	if channelId <= 0 {
-		return fmt.Errorf("invalid channel id: %d", channelId)
+	if expected.Id <= 0 {
+		return fmt.Errorf("invalid channel id: %d", expected.Id)
 	}
-
-	lock := channelSettingsLock(channelId)
+	lock := channelSettingsLock(expected.Id)
 	lock.Lock()
 	defer lock.Unlock()
-
-	channel, err := GetChannelById(channelId, true)
-	if err != nil {
-		return fmt.Errorf("load channel %d: %w", channelId, err)
-	}
-
-	settings := channel.GetOtherSettings()
-	if !mutate(&settings) {
+	var channel Channel
+	changed := false
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := lockForUpdate(tx).First(&channel, expected.Id).Error; err != nil {
+			return err
+		}
+		if !channelModelValidationConfigMatches(&channel, expected) {
+			return fmt.Errorf("channel %d configuration changed during model validation; results not applied", expected.Id)
+		}
+		settings := channel.GetOtherSettings()
+		if !mutate(&settings) {
+			return nil
+		}
+		channel.SetOtherSettings(settings)
+		channel.Models = models
+		columns := map[string]interface{}{"settings": channel.OtherSettings, "models": models}
+		if modelMapping != nil {
+			channel.ModelMapping = modelMapping
+			columns["model_mapping"] = *modelMapping
+		}
+		if err := tx.Model(&Channel{}).Where("id = ?", expected.Id).Updates(columns).Error; err != nil {
+			return err
+		}
+		if err := channel.UpdateAbilities(tx); err != nil {
+			return err
+		}
+		changed = true
 		return nil
+	})
+	if err != nil {
+		return err
 	}
-	channel.SetOtherSettings(settings)
-	channel.Models = models
-	columns := map[string]interface{}{
-		"settings": channel.OtherSettings,
-		"models":   models,
+	if changed {
+		CacheUpdateChannel(&channel)
+		InitChannelCache()
 	}
-	if modelMapping != nil {
-		channel.ModelMapping = modelMapping
-		columns["model_mapping"] = *modelMapping
-	}
-
-	if err := DB.Model(&Channel{}).
-		Where("id = ?", channelId).
-		Updates(columns).Error; err != nil {
-		return fmt.Errorf("persist settings and models for channel %d: %w", channelId, err)
-	}
-
-	CacheUpdateChannel(channel)
 	return nil
 }

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -27,6 +29,146 @@ import (
 	"github.com/tidwall/gjson"
 	"gorm.io/gorm"
 )
+
+func TestDetectChannelUpdatesAppliesConfirmedRemovalAndRecovery(t *testing.T) {
+	f := newUpstreamValidationFixture(t)
+	t.Setenv("CHANNEL_MODEL_SWEEP_GROUP_DELAY_MS", "0")
+	var recovered atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `{"data":[]}`)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		if gjson.GetBytes(body, "model").String() == "missing" && !recovered.Load() {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"error":{"code":"model_not_found","message":"model does not exist"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	t.Cleanup(upstream.Close)
+	channel := f.createChannel(t, dto.ChannelOtherSettings{UpstreamModelUpdateLastRemovedModels: []string{"gpt-4o"}})
+	channel.Models, channel.BaseURL = "gpt-4o,missing", &upstream.URL
+	require.NoError(t, f.db.Save(channel).Error)
+	require.NoError(t, channel.AddAbilities(nil))
+	other := *channel
+	other.Id = 32
+	other.Models = "missing"
+	require.NoError(t, f.db.Create(&other).Error)
+	require.NoError(t, other.AddAbilities(nil))
+
+	for _, recovery := range []bool{false, true} {
+		recovered.Store(recovery)
+		body, err := common.Marshal(map[string]int{"id": channel.Id})
+		require.NoError(t, err)
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/channel/upstream_updates/detect", bytes.NewReader(body))
+		c.Set("id", 1)
+		DetectChannelUpstreamModelUpdates(c)
+		require.Equal(t, http.StatusOK, recorder.Code)
+		var response struct {
+			Success bool   `json:"success"`
+			Message string `json:"message"`
+			Data    struct {
+				RemovedModels   []string `json:"removed_models"`
+				AutoAddedModels int      `json:"auto_added_models"`
+				RemoveModels    []string `json:"remove_models"`
+			} `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		require.True(t, response.Success, response.Message)
+		stored, err := model.GetChannelById(channel.Id, true)
+		require.NoError(t, err)
+		assert.Empty(t, stored.GetOtherSettings().UpstreamModelUpdateLastRemovedModels)
+		assert.Empty(t, response.Data.RemoveModels, "there is no durable pending-removal queue")
+		var routes []string
+		require.NoError(t, f.db.Model(&model.Ability{}).Where("channel_id = ?", channel.Id).Pluck("model", &routes).Error)
+		if recovery {
+			assert.Equal(t, "gpt-4o,missing", stored.Models)
+			assert.ElementsMatch(t, []string{"gpt-4o", "missing"}, routes)
+			assert.Empty(t, response.Data.RemovedModels)
+			assert.Equal(t, 1, response.Data.AutoAddedModels)
+		} else {
+			assert.Equal(t, "gpt-4o", stored.Models, "a usable model omitted from /models stays configured")
+			assert.Equal(t, []string{"gpt-4o"}, routes)
+			assert.Equal(t, []string{"missing"}, response.Data.RemovedModels)
+		}
+		untouched, err := model.GetChannelById(other.Id, true)
+		require.NoError(t, err)
+		assert.Equal(t, "missing", untouched.Models, "one channel's failure must not remove another channel's model")
+	}
+}
+
+func TestApplyChannelUpdatesIgnoresLegacyRemovalQueue(t *testing.T) {
+	f := newUpstreamValidationFixture(t)
+	channel := f.createChannel(t, dto.ChannelOtherSettings{UpstreamModelUpdateLastRemovedModels: []string{"gpt-4o"}})
+	channel.Models = "gpt-4o"
+	require.NoError(t, f.db.Save(channel).Error)
+	require.NoError(t, channel.AddAbilities(nil))
+	body, err := common.Marshal(map[string]any{"id": channel.Id, "remove_models": []string{"gpt-4o"}})
+	require.NoError(t, err)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/channel/upstream_updates/apply", bytes.NewReader(body))
+	c.Set("id", 1)
+	ApplyChannelUpstreamModelUpdates(c)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.True(t, gjson.Get(recorder.Body.String(), "success").Bool())
+	stored, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-4o", stored.Models)
+	assert.Empty(t, stored.GetOtherSettings().UpstreamModelUpdateLastRemovedModels)
+	assert.Contains(t, model.GetEnabledModels(), "gpt-4o")
+}
+
+func TestApplyChannelUpdatesDoesNotOverwriteEditDuringProbe(t *testing.T) {
+	f := newUpstreamValidationFixture(t)
+	started, resume := make(chan struct{}, 1), make(chan struct{})
+	var release sync.Once
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started <- struct{}{}
+		<-resume
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	t.Cleanup(upstream.Close)
+	t.Cleanup(func() { release.Do(func() { close(resume) }) })
+	channel := f.createChannel(t, dto.ChannelOtherSettings{UpstreamModelUpdateLastDetectedModels: []string{"gpt-4o"}})
+	channel.BaseURL = &upstream.URL
+	require.NoError(t, f.db.Save(channel).Error)
+	run := newUpstreamModelUpdateRunContext(context.Background(), nil, &operation_setting.MonitorSetting{
+		UpstreamModelUpdateValidate: true, UpstreamModelUpdateMaxValidationsPerRun: 10,
+	}, true)
+	finished := make(chan error, 1)
+	go func() {
+		_, err := applyChannelUpstreamModelUpdates(channel, []string{"gpt-4o"}, nil, nil, run)
+		finished <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("model validation did not reach the upstream")
+	}
+	edited := &model.Channel{Id: channel.Id, Models: "gpt-4o-mini"}
+	require.NoError(t, edited.Update())
+	release.Do(func() { close(resume) })
+	select {
+	case err := <-finished:
+		require.ErrorContains(t, err, "configuration changed")
+	case <-time.After(5 * time.Second):
+		t.Fatal("model validation did not finish")
+	}
+	stored, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-4o-mini", stored.Models)
+	var routes []string
+	require.NoError(t, f.db.Model(&model.Ability{}).Where("channel_id = ?", channel.Id).Pluck("model", &routes).Error)
+	assert.Equal(t, []string{"gpt-4o-mini"}, routes)
+}
 
 func TestNormalizeModelNames(t *testing.T) {
 	result := normalizeModelNames([]string{
@@ -98,7 +240,7 @@ func TestCollectPendingApplyUpstreamModelChanges(t *testing.T) {
 	pendingAddModels, pendingRemoveModels := collectPendingApplyUpstreamModelChanges(settings)
 
 	require.Equal(t, []string{"gpt-4o", "gpt-4.1"}, pendingAddModels)
-	require.Equal(t, []string{"old-model"}, pendingRemoveModels)
+	require.Empty(t, pendingRemoveModels, "catalogue drift is no longer a manual deletion queue")
 }
 
 func TestNormalizeChannelModelMapping(t *testing.T) {
@@ -265,6 +407,7 @@ func newUpstreamValidationFixture(t *testing.T) *upstreamValidationFixture {
 	ratios := ratio_setting.GetModelRatioCopy()
 	ratios["gpt-4o"] = 1
 	ratios["broken"] = 1
+	ratios["missing"] = 1
 	ratioJSON, err := common.Marshal(ratios)
 	require.NoError(t, err)
 	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(string(ratioJSON)))
@@ -284,6 +427,11 @@ func newUpstreamValidationFixture(t *testing.T) *upstreamValidationFixture {
 		f.mu.Lock()
 		f.requestedModel = append(f.requestedModel, requested)
 		f.mu.Unlock()
+		if requested == "missing" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"error":{"code":"model_not_found","message":"model not found"}}`)
+			return
+		}
 		// The broken model answers 200 with a well-formed, empty reply and a
 		// padded token count: the shape that used to pass as a working model.
 		content := "ok"
