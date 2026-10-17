@@ -5417,6 +5417,9 @@
     "Thinking only": "Только размышления",
     "Upstream returned thinking only, without answer text or a tool call.": "Провайдер вернул только размышления, без текста ответа или вызова инструмента.",
     "CLI version profiles require HTTPS HTTP/1.1; disable WebSocket transport": "Профили версий CLI требуют HTTPS HTTP/1.1; отключите транспорт WebSocket",
-    "Failed to load TLS fingerprints": "Не удалось загрузить TLS-отпечатки"
+    "Failed to load TLS fingerprints": "Не удалось загрузить TLS-отпечатки",
+    "Enter channel IDs as positive integers separated by commas or newlines.": "Введите ID каналов как положительные целые числа через запятую или с новой строки.",
+    "Excluded Channel IDs": "ID исключённых каналов",
+    "Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.": "Разделяйте ID запятыми или переносами строк. Глобальное обновление моделей пропускает эти каналы даже при проверке всех включённых каналов. Каждый канал по-прежнему можно проверить вручную. Пустое поле означает отсутствие исключений."
   }
 }

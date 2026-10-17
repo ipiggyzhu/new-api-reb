@@ -5417,6 +5417,9 @@
     "Thinking only": "思考のみ",
     "Upstream returned thinking only, without answer text or a tool call.": "上流は思考内容のみを返し、回答本文やツール呼び出しを返しませんでした。",
     "CLI version profiles require HTTPS HTTP/1.1; disable WebSocket transport": "CLI バージョンプロファイルは HTTPS HTTP/1.1 のみ対応しています。WebSocket 転送を無効にしてください",
-    "Failed to load TLS fingerprints": "TLS フィンガープリントの読み込みに失敗しました"
+    "Failed to load TLS fingerprints": "TLS フィンガープリントの読み込みに失敗しました",
+    "Enter channel IDs as positive integers separated by commas or newlines.": "正の整数のチャネル ID をカンマまたは改行で区切って入力してください。",
+    "Excluded Channel IDs": "自動更新から除外するチャネル ID",
+    "Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.": "チャネル ID をカンマまたは改行で区切って入力します。すべての有効なチャネルをスキャンする場合も、全体のモデル更新ではこれらを除外します。個別の手動チェックは可能です。空欄の場合は除外しません。"
   }
 }

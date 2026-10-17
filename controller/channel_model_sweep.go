@@ -463,6 +463,7 @@ func sweepChannelModels(ctx context.Context, channelID int, testUserID int, budg
 // the system task for the settings page to display.
 func runChannelModelSweepTaskOnce(ctx context.Context, report func(processed, total int)) channelModelSweepSummary {
 	summary := channelModelSweepSummary{Complete: true, Channels: make([]channelModelSweepDetail, 0)}
+	excludedChannelIDs := append([]int(nil), operation_setting.GetMonitorSetting().UpstreamModelUpdateExcludedChannelIDs...)
 
 	testUserID, err := resolveChannelTestUserID(nil)
 	if err != nil {
@@ -473,7 +474,11 @@ func runChannelModelSweepTaskOnce(ctx context.Context, report func(processed, to
 	}
 
 	var totalChannels int64
-	if err := model.DB.Model(&model.Channel{}).Where("status = ?", common.ChannelStatusEnabled).Count(&totalChannels).Error; err != nil {
+	query := model.DB.Model(&model.Channel{}).Where("status = ?", common.ChannelStatusEnabled)
+	if len(excludedChannelIDs) > 0 {
+		query = query.Where("id NOT IN ?", excludedChannelIDs)
+	}
+	if err := query.Count(&totalChannels).Error; err != nil {
 		summary.Complete = false
 		summary.ScanError = err.Error()
 		return summary
@@ -487,7 +492,7 @@ func runChannelModelSweepTaskOnce(ctx context.Context, report func(processed, to
 		if ctx != nil && ctx.Err() != nil {
 			break
 		}
-		channels, err := findEnabledChannelsAfterID(lastID, channelUpstreamModelUpdateTaskBatchSize)
+		channels, err := findEnabledChannelsAfterID(lastID, channelUpstreamModelUpdateTaskBatchSize, excludedChannelIDs...)
 		if err != nil {
 			summary.ScanError = err.Error()
 			common.SysLog(fmt.Sprintf("channel model sweep query failed: %v", err))

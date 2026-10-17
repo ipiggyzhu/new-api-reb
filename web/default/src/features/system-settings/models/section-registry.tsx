@@ -25,6 +25,7 @@ import { ClaudeSettingsCard } from './claude-settings-card'
 import { GeminiSettingsCard } from './gemini-settings-card'
 import { GlobalSettingsCard } from './global-settings-card'
 import { GrokSettingsCard } from './grok-settings-card'
+import { formatModelUpdateExcludedChannelIDs } from './model-update-exclusions'
 import { RoutingReliabilitySection } from './routing-reliability-section'
 
 function formatJsonForEditor(value: string, fallback: string) {
@@ -71,6 +72,12 @@ const MODELS_SECTIONS = [
               settings[
                 'monitor_setting.upstream_model_update_scan_all_channels'
               ],
+            upstream_model_update_excluded_channel_ids:
+              formatModelUpdateExcludedChannelIDs(
+                settings[
+                  'monitor_setting.upstream_model_update_excluded_channel_ids'
+                ]
+              ),
             upstream_model_update_validate:
               settings['monitor_setting.upstream_model_update_validate'],
             upstream_model_update_strip_vendor_prefix:

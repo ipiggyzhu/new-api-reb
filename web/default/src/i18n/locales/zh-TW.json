@@ -5417,6 +5417,9 @@
     "Thinking only": "僅有思考",
     "Upstream returned thinking only, without answer text or a tool call.": "上游僅回傳思考內容，未回傳回答正文或工具呼叫。",
     "CLI version profiles require HTTPS HTTP/1.1; disable WebSocket transport": "CLI 版本設定僅支援 HTTPS HTTP/1.1；請關閉 WebSocket 傳輸",
-    "Failed to load TLS fingerprints": "載入 TLS 指紋失敗"
+    "Failed to load TLS fingerprints": "載入 TLS 指紋失敗",
+    "Enter channel IDs as positive integers separated by commas or newlines.": "請輸入正整數管道 ID，以逗號或換行分隔。",
+    "Excluded Channel IDs": "排除自動更新的管道 ID",
+    "Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.": "以逗號或換行分隔管道 ID。全域模型更新會略過這些管道，即使開啟「掃描所有已啟用管道」也不會更新；仍可個別手動檢測。留空表示不排除。"
   }
 }

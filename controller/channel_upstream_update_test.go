@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
@@ -29,6 +30,126 @@ import (
 	"github.com/tidwall/gjson"
 	"gorm.io/gorm"
 )
+
+func TestGlobalModelUpdatesExcludeChannelsWithoutBlockingManualDetection(t *testing.T) {
+	for _, mode := range []string{"full sweep", "legacy update", "legacy channel auto-sync"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newUpstreamValidationFixture(t)
+			t.Setenv("CHANNEL_MODEL_SWEEP_GROUP_DELAY_MS", "0")
+			t.Setenv("CHANNEL_MODEL_SWEEP_MAX_TESTS_PER_RUN", "0")
+			monitor := operation_setting.MonitorSetting{
+				UpstreamModelUpdateEnabled:         mode != "legacy channel auto-sync",
+				UpstreamModelUpdateScanAllChannels: mode != "legacy channel auto-sync",
+				UpstreamModelUpdateValidate:        true,
+			}
+			require.NoError(t, config.UpdateConfigFromMap(&monitor, map[string]string{
+				"upstream_model_update_excluded_channel_ids": "[31,31,9999]",
+			}))
+			t.Cleanup(operation_setting.SetMonitorSettingForTest(monitor))
+			var excludedRequests, includedRequests atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") == "Bearer excluded-key" {
+					excludedRequests.Add(1)
+				} else {
+					includedRequests.Add(1)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if r.Method == http.MethodGet {
+					_, _ = io.WriteString(w, `{"data":[{"id":"gpt-4o"}]}`)
+					return
+				}
+				_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+			}))
+			t.Cleanup(upstream.Close)
+			channel := f.createChannel(t, dto.ChannelOtherSettings{
+				UpstreamModelUpdateCheckEnabled: true, UpstreamModelUpdateAutoSyncEnabled: true,
+			})
+			channel.Models, channel.Key, channel.BaseURL = "gpt-4o", "excluded-key", &upstream.URL
+			require.NoError(t, f.db.Save(channel).Error)
+			require.NoError(t, channel.AddAbilities(nil))
+			included := *channel
+			included.Id, included.Key = 32, "included-key"
+			require.NoError(t, f.db.Create(&included).Error)
+			require.NoError(t, included.AddAbilities(nil))
+			var progress [2]int
+			report := func(processed, total int) { progress = [2]int{processed, total} }
+			if mode == "full sweep" {
+				summary := runChannelModelSweepTaskOnce(context.Background(), report)
+				assert.True(t, summary.Complete, summary.ScanError)
+				assert.Equal(t, 1, summary.CheckedChannels)
+			} else {
+				summary := runChannelUpstreamModelUpdateTaskOnce(context.Background(), true, true, report)
+				assert.Empty(t, summary.ScanError)
+				assert.Equal(t, 1, summary.CheckedChannels)
+			}
+			assert.Zero(t, excludedRequests.Load(), "excluded channels must receive neither listing nor validation requests")
+			assert.Positive(t, includedRequests.Load())
+			assert.Equal(t, [2]int{1, 1}, progress, "excluded and nonexistent IDs must not inflate progress totals")
+			stored, err := model.GetChannelById(channel.Id, true)
+			require.NoError(t, err)
+			assert.Equal(t, channel.Models, stored.Models)
+			assert.Equal(t, channel.OtherSettings, stored.OtherSettings)
+			var routes []string
+			require.NoError(t, f.db.Model(&model.Ability{}).Where("channel_id = ?", channel.Id).Pluck("model", &routes).Error)
+			assert.Equal(t, []string{"gpt-4o"}, routes)
+
+			body, err := common.Marshal(map[string]int{"id": channel.Id})
+			require.NoError(t, err)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/api/channel/upstream_updates/detect", bytes.NewReader(body))
+			c.Set("id", 1)
+			DetectChannelUpstreamModelUpdates(c)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			assert.True(t, gjson.Get(recorder.Body.String(), "success").Bool(), recorder.Body.String())
+			assert.Positive(t, excludedRequests.Load(), "an explicit per-channel check remains available")
+
+			require.NoError(t, config.UpdateConfigFromMap(&monitor, map[string]string{
+				"upstream_model_update_excluded_channel_ids": "[31,32]",
+			}))
+			t.Cleanup(operation_setting.SetMonitorSettingForTest(monitor))
+			before := excludedRequests.Load() + includedRequests.Load()
+			summary := runChannelModelSweepTaskOnce(context.Background(), report)
+			assert.True(t, summary.Complete, summary.ScanError)
+			assert.Zero(t, summary.CheckedChannels)
+			assert.Equal(t, [2]int{0, 0}, progress)
+			assert.Equal(t, before, excludedRequests.Load()+includedRequests.Load())
+		})
+	}
+}
+
+func TestUpdateModelUpdateExclusionsRejectsInvalidIDs(t *testing.T) {
+	f := newUpstreamValidationFixture(t)
+	require.NoError(t, f.db.AutoMigrate(&model.Option{}))
+	t.Cleanup(operation_setting.SetMonitorSettingForTest(operation_setting.MonitorSetting{}))
+	common.OptionMapRWMutex.Lock()
+	previous := common.OptionMap
+	common.OptionMap = make(map[string]string)
+	common.OptionMapRWMutex.Unlock()
+	t.Cleanup(func() {
+		common.OptionMapRWMutex.Lock()
+		common.OptionMap = previous
+		common.OptionMapRWMutex.Unlock()
+	})
+	const key = "monitor_setting.upstream_model_update_excluded_channel_ids"
+	for _, value := range []string{"[-1]", "[0]", "[1.5]", `["31"]`, "invalid"} {
+		t.Run(value, func(t *testing.T) {
+			require.NoError(t, model.UpdateOption(key, "[31]"))
+			body, err := common.Marshal(map[string]string{"key": key, "value": value})
+			require.NoError(t, err)
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPut, "/api/option/", bytes.NewReader(body))
+			c.Set("id", 1)
+			c.Set("role", common.RoleRootUser)
+			UpdateOption(c)
+			assert.False(t, gjson.Get(recorder.Body.String(), "success").Bool(), recorder.Body.String())
+			var stored model.Option
+			require.NoError(t, f.db.Where("key = ?", key).First(&stored).Error)
+			assert.Equal(t, "[31]", stored.Value, "invalid IDs must not replace the saved exclusions")
+		})
+	}
+}
 
 func TestDetectChannelUpdatesAppliesConfirmedRemovalAndRecovery(t *testing.T) {
 	f := newUpstreamValidationFixture(t)

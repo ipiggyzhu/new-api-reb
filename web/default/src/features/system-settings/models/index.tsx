@@ -76,6 +76,7 @@ const defaultModelSettings: ModelSettings = {
   'monitor_setting.upstream_model_update_enabled': false,
   'monitor_setting.upstream_model_update_interval_hours': 24,
   'monitor_setting.upstream_model_update_scan_all_channels': true,
+  'monitor_setting.upstream_model_update_excluded_channel_ids': '[]',
   'monitor_setting.upstream_model_update_validate': true,
   'monitor_setting.upstream_model_update_strip_vendor_prefix': true,
   'monitor_setting.upstream_model_update_remove_failed': true,

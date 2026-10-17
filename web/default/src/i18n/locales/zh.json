@@ -5417,6 +5417,9 @@
     "Thinking only": "仅有思考",
     "Upstream returned thinking only, without answer text or a tool call.": "上游仅返回思考内容，未返回回答正文或工具调用。",
     "CLI version profiles require HTTPS HTTP/1.1; disable WebSocket transport": "CLI 版本配置仅支持 HTTPS HTTP/1.1；请关闭 WebSocket 传输",
-    "Failed to load TLS fingerprints": "加载 TLS 指纹失败"
+    "Failed to load TLS fingerprints": "加载 TLS 指纹失败",
+    "Enter channel IDs as positive integers separated by commas or newlines.": "请输入正整数渠道 ID，用逗号或换行分隔。",
+    "Excluded Channel IDs": "排除自动更新的渠道 ID",
+    "Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.": "用逗号或换行分隔渠道 ID。全局模型更新会跳过这些渠道，即使开启“扫描所有已启用渠道”也不会更新；仍可单独手动检测。留空表示不排除。"
   }
 }

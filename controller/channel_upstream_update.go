@@ -1317,6 +1317,7 @@ func runChannelUpstreamModelUpdateTaskOnce(ctx context.Context, force bool, allo
 	// this scan applies one consistent policy even if an admin saves changes
 	// mid-run.
 	monitor := *operation_setting.GetMonitorSetting()
+	excludedChannelIDs := append([]int(nil), monitor.UpstreamModelUpdateExcludedChannelIDs...)
 	scanAllChannels := monitor.UpstreamModelUpdateEnabled && monitor.UpstreamModelUpdateScanAllChannels
 	// Built even with the global switch off: a channel whose own auto-sync flag
 	// is on still adds models on this path, and those adds must be validated
@@ -1330,7 +1331,11 @@ func runChannelUpstreamModelUpdateTaskOnce(ctx context.Context, force bool, allo
 	// Count the enabled channels up front so progress can be reported as a
 	// percentage; a count error is non-fatal (progress just won't show a %).
 	var totalChannels int64
-	if err := model.DB.Model(&model.Channel{}).Where("status = ?", common.ChannelStatusEnabled).Count(&totalChannels).Error; err != nil {
+	query := model.DB.Model(&model.Channel{}).Where("status = ?", common.ChannelStatusEnabled)
+	if len(excludedChannelIDs) > 0 {
+		query = query.Where("id NOT IN ?", excludedChannelIDs)
+	}
+	if err := query.Count(&totalChannels).Error; err != nil {
 		totalChannels = 0
 	}
 	processed := 0
@@ -1350,7 +1355,7 @@ func runChannelUpstreamModelUpdateTaskOnce(ctx context.Context, force bool, allo
 		if ctx != nil && ctx.Err() != nil {
 			break
 		}
-		channels, err := findEnabledChannelsAfterID(lastID, channelUpstreamModelUpdateTaskBatchSize)
+		channels, err := findEnabledChannelsAfterID(lastID, channelUpstreamModelUpdateTaskBatchSize, excludedChannelIDs...)
 		if err != nil {
 			scanErr = err.Error()
 			common.SysLog(fmt.Sprintf("upstream model update task query failed: %v", err))
@@ -1715,7 +1720,7 @@ func collectPendingApplyUpstreamModelChanges(settings dto.ChannelOtherSettings) 
 	return normalizeModelNames(settings.UpstreamModelUpdateLastDetectedModels), nil
 }
 
-func findEnabledChannelsAfterID(lastID int, batchSize int) ([]*model.Channel, error) {
+func findEnabledChannelsAfterID(lastID int, batchSize int, excludedChannelIDs ...int) ([]*model.Channel, error) {
 	var channels []*model.Channel
 	query := model.DB.
 		Select(channelUpstreamModelUpdateSelectFields).
@@ -1724,6 +1729,9 @@ func findEnabledChannelsAfterID(lastID int, batchSize int) ([]*model.Channel, er
 		Limit(batchSize)
 	if lastID > 0 {
 		query = query.Where("id > ?", lastID)
+	}
+	if len(excludedChannelIDs) > 0 {
+		query = query.Where("id NOT IN ?", excludedChannelIDs)
 	}
 	return channels, query.Find(&channels).Error
 }

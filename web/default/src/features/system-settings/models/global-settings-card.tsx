@@ -57,6 +57,7 @@ import {
 import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
+import { parseModelUpdateExcludedChannelIDs } from './model-update-exclusions'
 
 const thinkingBlacklistExample = JSON.stringify(
   ['moonshotai/kimi-k2-thinking', 'kimi-k2-thinking'],
@@ -110,6 +111,12 @@ const schema = z.object({
     upstream_model_update_enabled: z.boolean(),
     upstream_model_update_interval_hours: z.coerce.number().min(1),
     upstream_model_update_scan_all_channels: z.boolean(),
+    upstream_model_update_excluded_channel_ids: z
+      .string()
+      .refine(
+        (value) => parseModelUpdateExcludedChannelIDs(value) !== null,
+        'Enter channel IDs as positive integers separated by commas or newlines.'
+      ),
     upstream_model_update_validate: z.boolean(),
     upstream_model_update_strip_vendor_prefix: z.boolean(),
     upstream_model_update_remove_failed: z.boolean(),
@@ -135,6 +142,7 @@ type FlatGlobalModelSettings = {
   'monitor_setting.upstream_model_update_enabled': boolean
   'monitor_setting.upstream_model_update_interval_hours': number
   'monitor_setting.upstream_model_update_scan_all_channels': boolean
+  'monitor_setting.upstream_model_update_excluded_channel_ids': string
   'monitor_setting.upstream_model_update_validate': boolean
   'monitor_setting.upstream_model_update_strip_vendor_prefix': boolean
   'monitor_setting.upstream_model_update_remove_failed': boolean
@@ -170,6 +178,11 @@ const flattenGlobalValues = (
     values.monitor_setting.upstream_model_update_interval_hours,
   'monitor_setting.upstream_model_update_scan_all_channels':
     values.monitor_setting.upstream_model_update_scan_all_channels,
+  'monitor_setting.upstream_model_update_excluded_channel_ids': JSON.stringify(
+    parseModelUpdateExcludedChannelIDs(
+      values.monitor_setting.upstream_model_update_excluded_channel_ids
+    )
+  ),
   'monitor_setting.upstream_model_update_validate':
     values.monitor_setting.upstream_model_update_validate,
   'monitor_setting.upstream_model_update_strip_vendor_prefix':
@@ -366,7 +379,9 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
       if (!familyHeaders || typeof familyHeaders !== 'object') return false
       const presetKeys = Object.keys(preset.headers)
       if (presetKeys.length !== Object.keys(familyHeaders).length) return false
-      return presetKeys.every((key) => familyHeaders[key] === preset.headers[key])
+      return presetKeys.every(
+        (key) => familyHeaders[key] === preset.headers[key]
+      )
     })
     return match?.id ?? ''
   }, [currentClientHeaders, headerPresets])
@@ -770,6 +785,30 @@ export function GlobalSettingsCard({ defaultValues }: GlobalSettingsCardProps) {
                     />
                   </FormControl>
                 </SettingsSwitchItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name='monitor_setting.upstream_model_update_excluded_channel_ids'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Excluded Channel IDs')}</FormLabel>
+                  <FormControl>
+                    <Textarea
+                      {...field}
+                      rows={2}
+                      placeholder='1, 5, 9'
+                      className='max-w-xl'
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.'
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
               )}
             />
 

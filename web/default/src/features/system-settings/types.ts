@@ -238,6 +238,7 @@ export type ModelSettings = {
   'monitor_setting.upstream_model_update_enabled': boolean
   'monitor_setting.upstream_model_update_interval_hours': number
   'monitor_setting.upstream_model_update_scan_all_channels': boolean
+  'monitor_setting.upstream_model_update_excluded_channel_ids': string
   'monitor_setting.upstream_model_update_validate': boolean
   'monitor_setting.upstream_model_update_strip_vendor_prefix': boolean
   'monitor_setting.upstream_model_update_remove_failed': boolean

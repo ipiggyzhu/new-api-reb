@@ -22,6 +22,8 @@ type MonitorSetting struct {
 	UpstreamModelUpdateIntervalHours int `json:"upstream_model_update_interval_hours"`
 	// 是否忽略渠道级「检测上游模型更新」开关，扫描所有未禁用渠道
 	UpstreamModelUpdateScanAllChannels bool `json:"upstream_model_update_scan_all_channels"`
+	// 全局模型更新跳过的渠道 ID，优先于扫描全部渠道和渠道级自动同步开关。
+	UpstreamModelUpdateExcludedChannelIDs []int `json:"upstream_model_update_excluded_channel_ids"`
 	// 是否在加入模型前发真实请求验证
 	UpstreamModelUpdateValidate bool `json:"upstream_model_update_validate"`
 	// 是否删除连续验证失败达阈值的模型
@@ -77,11 +79,12 @@ var monitorSetting = MonitorSetting{
 	AutoTestChannelMinutes: 10,
 	ChannelTestMode:        ChannelTestModeScheduledAll,
 
-	UpstreamModelUpdateEnabled:         false,
-	UpstreamModelUpdateIntervalHours:   24,
-	UpstreamModelUpdateScanAllChannels: true,
-	UpstreamModelUpdateValidate:        true,
-	UpstreamModelUpdateRemoveFailed:    true,
+	UpstreamModelUpdateEnabled:            false,
+	UpstreamModelUpdateIntervalHours:      24,
+	UpstreamModelUpdateScanAllChannels:    true,
+	UpstreamModelUpdateExcludedChannelIDs: []int{},
+	UpstreamModelUpdateValidate:           true,
+	UpstreamModelUpdateRemoveFailed:       true,
 	// Off by default: see the field comment. Correcting the predicate would
 	// otherwise start deleting models on deployments that never opted into it.
 	UpstreamModelUpdateRemoveUnavailableModels: false,

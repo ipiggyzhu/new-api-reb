@@ -44,6 +44,7 @@ export const STATIC_I18N_KEYS = [
   'Models',
   'Routing Reliability',
   'Maintenance',
+  'Enter channel IDs as positive integers separated by commas or newlines.',
 
   // System info
   'online',

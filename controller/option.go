@@ -150,6 +150,18 @@ func UpdateOption(c *gin.Context) {
 		}
 	}
 	switch option.Key {
+	case "monitor_setting.upstream_model_update_excluded_channel_ids":
+		var ids []int
+		if err := common.UnmarshalJsonStr(option.Value.(string), &ids); err != nil {
+			common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+			return
+		}
+		for _, id := range ids {
+			if id <= 0 {
+				common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+				return
+			}
+		}
 	case "GitHubOAuthEnabled":
 		if option.Value == "true" && common.GitHubClientId == "" {
 			c.JSON(http.StatusOK, gin.H{

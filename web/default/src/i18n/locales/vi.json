@@ -5417,6 +5417,9 @@
     "Thinking only": "Chỉ có suy luận",
     "Upstream returned thinking only, without answer text or a tool call.": "Nhà cung cấp chỉ trả về nội dung suy luận, không có phần trả lời hoặc lệnh gọi công cụ.",
     "CLI version profiles require HTTPS HTTP/1.1; disable WebSocket transport": "Cấu hình phiên bản CLI yêu cầu HTTPS HTTP/1.1; hãy tắt truyền tải WebSocket",
-    "Failed to load TLS fingerprints": "Không tải được dấu vân tay TLS"
+    "Failed to load TLS fingerprints": "Không tải được dấu vân tay TLS",
+    "Enter channel IDs as positive integers separated by commas or newlines.": "Nhập ID kênh là số nguyên dương, phân cách bằng dấu phẩy hoặc xuống dòng.",
+    "Excluded Channel IDs": "ID kênh loại trừ khỏi cập nhật tự động",
+    "Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.": "Phân cách ID kênh bằng dấu phẩy hoặc xuống dòng. Cập nhật mô hình toàn cục bỏ qua các kênh này ngay cả khi quét tất cả kênh đang bật. Vẫn có thể kiểm tra thủ công từng kênh. Để trống nếu không muốn loại trừ."
   }
 }
