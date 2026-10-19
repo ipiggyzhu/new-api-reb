@@ -78,7 +78,10 @@ func ValidateChannelAffinityPin(channelId int, group string, modelName string, r
 		// as the higher-priority channel stayed full. That drops the key's warm
 		// upstream on every request while never once routing to the channel the drop
 		// was made for.
-		if candidate.isSaturated() {
+		//
+		// A cooling channel is passed over for the same reason: selection would skip
+		// it too.
+		if candidate.isSaturated() || candidate.coolingDown {
 			continue
 		}
 		if candidate.priority > candidates[pinnedIndex].priority && scored[i].priority > scored[pinnedIndex].priority {

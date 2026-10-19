@@ -25,6 +25,7 @@ import {
   useState,
 } from 'react'
 
+import { useTheme } from '@/context/theme-provider'
 import { getCookie, removeCookie, setCookie } from '@/lib/cookies'
 import {
   CONTENT_LAYOUT_VALUES,
@@ -97,6 +98,7 @@ const ThemeCustomizationContext =
 export function ThemeCustomizationProvider(props: {
   children: React.ReactNode
 }) {
+  const { resolvedTheme } = useTheme()
   const [preset, _setPreset] = useState<ThemePreset>(() =>
     readCookie<ThemePreset>(
       THEME_COOKIE_KEYS.preset,
@@ -135,12 +137,37 @@ export function ThemeCustomizationProvider(props: {
 
   // Mirror state to the <body> via data-* attributes so theme-presets.css can
   // override CSS variables at the right cascade layer.
+  // Aurum (`default`) is the base palette in theme.css and has no preset
+  // block, so it carries no attribute — independent of which preset ships as
+  // the default. Every other preset, including the shipped default, needs its
+  // attribute for its selector to match.
   useEffect(() => {
-    applyAttribute(
-      'data-theme-preset',
-      preset === DEFAULT_THEME_CUSTOMIZATION.preset ? null : preset
-    )
+    applyAttribute('data-theme-preset', preset === 'default' ? null : preset)
   }, [preset])
+
+  // The browser chrome (theme-color) follows the canvas of the active preset
+  // and mode. It is read back from the live --background instead of a second
+  // per-preset color table, and painted through a canvas because the tokens
+  // are authored in oklch, which theme-color is not guaranteed to accept —
+  // the canvas hands back plain sRGB. ThemeProvider publishes resolvedTheme
+  // from the same effect that sets the html class, so the class is already
+  // in place when it changes here; on first mount the boot script in
+  // index.html has set it. The preset attribute is applied by the effect
+  // above, which runs first.
+  useEffect(() => {
+    const meta = document.querySelector("meta[name='theme-color']")
+    const context = document.createElement('canvas').getContext('2d')
+    if (!meta || !context) return
+    context.fillStyle = getComputedStyle(document.body)
+      .getPropertyValue('--background')
+      .trim()
+    context.fillRect(0, 0, 1, 1)
+    const [r, g, b] = context.getImageData(0, 0, 1, 1).data
+    meta.setAttribute(
+      'content',
+      `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`
+    )
+  }, [preset, resolvedTheme])
 
   // Font is the one axis where we resolve before writing the attribute:
   // the persisted preference may be `default`, but CSS works in terms of

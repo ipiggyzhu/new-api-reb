@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/types"
 
@@ -153,6 +155,10 @@ func TestRelayErrorPreservesClaudeErrorEnvelope(t *testing.T) {
 		assert.Contains(t, body.Error.Message, "field messages is required")
 	})
 
+	// Anthropic SDKs dispatch on the SSE event name and silently drop unnamed
+	// frames, so the error must arrive as `event: error` — an unnamed data frame
+	// left Claude Code with a stream that just ended and a bare "API error".
+	// [DONE] is an OpenAI terminator with no meaning in this protocol.
 	t.Run("mid stream", func(t *testing.T) {
 		c, recorder := newRelayErrorContext(t, "/v1/messages")
 		helper.SetEventStreamHeaders(c)
@@ -160,15 +166,80 @@ func TestRelayErrorPreservesClaudeErrorEnvelope(t *testing.T) {
 
 		Relay(c, types.RelayFormatClaude)
 
-		frames := sseDataFrames(t, recorder.Body.String())
-		require.Len(t, frames, 3)
-		assert.Equal(t, "[DONE]", frames[2])
+		body := recorder.Body.String()
+		frames := sseDataFrames(t, body)
+		require.Len(t, frames, 2, "the delivered chunk and the error frame, with no OpenAI terminator")
+		assert.NotContains(t, body, "[DONE]")
 
-		var body claudeErrorBody
-		require.NoError(t, common.Unmarshal([]byte(frames[1]), &body))
-		assert.Equal(t, "error", body.Type)
-		assert.Contains(t, body.Error.Message, "field messages is required")
+		errorEvent := strings.Index(body, "event: error\ndata: ")
+		require.GreaterOrEqual(t, errorEvent, 0, "the error frame must be named so Anthropic SDKs raise it")
+		assert.Equal(t, "data: "+frames[1], strings.SplitN(body[errorEvent:], "\n", 3)[1],
+			"the named event must carry the error payload")
+
+		var errorBody claudeErrorBody
+		require.NoError(t, common.Unmarshal([]byte(frames[1]), &errorBody))
+		assert.Equal(t, "error", errorBody.Type)
+		assert.Contains(t, errorBody.Error.Message, "field messages is required")
 	})
+}
+
+// Responses clients decode each frame as a typed event and skip frames without
+// a `type`, so the OpenAI {"error":...} frame plus [DONE] never surfaced in
+// Codex: the stream ended without a terminal event and it reported "stream
+// closed before response.completed" and retried, even for a policy block.
+// response.failed is the protocol's terminal failure, and Codex classifies it by
+// a string error.code — a non-string code fails its decode and loses the message.
+func TestRelayErrorReportsResponsesMidStreamFailureAsResponseFailed(t *testing.T) {
+	c, recorder := newRelayErrorContext(t, "/v1/responses")
+	helper.SetEventStreamHeaders(c)
+	require.NoError(t, helper.ResponseChunkData(c, dto.ResponsesStreamResponse{Type: "response.created"}, `{"type":"response.created"}`))
+
+	Relay(c, types.RelayFormatOpenAIResponses)
+
+	body := recorder.Body.String()
+	assert.NotContains(t, body, "[DONE]", "Responses streams have no [DONE] terminator")
+	frames := sseDataFrames(t, body)
+	require.Len(t, frames, 2, "the delivered event and the failure event")
+
+	failedEvent := strings.Index(body, "event: response.failed\ndata: ")
+	require.GreaterOrEqual(t, failedEvent, 0, "the failure must be a named response.failed event")
+	assert.Equal(t, "data: "+frames[1], strings.SplitN(body[failedEvent:], "\n", 3)[1])
+
+	var event struct {
+		Type     string `json:"type"`
+		Response struct {
+			Status string `json:"status"`
+			Error  struct {
+				Code    json.RawMessage `json:"code"`
+				Message string          `json:"message"`
+			} `json:"error"`
+		} `json:"response"`
+	}
+	require.NoError(t, common.Unmarshal([]byte(frames[1]), &event))
+	assert.Equal(t, "response.failed", event.Type, "the type field is what Responses clients dispatch on")
+	assert.Equal(t, "failed", event.Response.Status)
+	assert.True(t, strings.HasPrefix(string(event.Response.Error.Code), `"`), "error.code must be a JSON string, got %s", event.Response.Error.Code)
+	assert.Contains(t, event.Response.Error.Message, "is required")
+}
+
+// Task adaptors wrap upstream bodies from many call sites, several without the
+// "post"/"dial"/"http" words TaskErrorWrapper masks on, so the response is the
+// one place that masks the address of the channel the last attempt used.
+func TestRespondTaskErrorMasksTheChannelAddress(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, "https://relay.private.example")
+
+	respondTaskError(c, &dto.TaskError{
+		Code:       "unmarshal_response_body_failed",
+		Message:    "body: upstream relay.private.example rejected the job, see https://docs.example.org/tasks",
+		StatusCode: http.StatusBadGateway,
+	})
+
+	assert.Equal(t, http.StatusBadGateway, recorder.Code)
+	var body dto.TaskError
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &body))
+	assert.Equal(t, "body: upstream ***.***.example rejected the job, see https://docs.example.org/tasks", body.Message)
 }
 
 func sseDataFrames(t *testing.T, body string) []string {

@@ -1,0 +1,62 @@
+package model
+
+import (
+	"strconv"
+	"sync"
+	"time"
+)
+
+// channelCooldowns records, per channel and model, when an upstream that just
+// answered 429 or 529 is expected to take requests again. Selection skips a
+// cooling channel while any other candidate remains, so the next requests stop
+// spending their first attempt — and its latency — on a channel that already
+// said it would refuse them. With nothing else left, a cooling channel is still
+// chosen: a probably-refused request beats a guaranteed 503.
+//
+// The key carries the model because Anthropic and OpenAI limit each model
+// separately, so one model being exhausted says nothing about another on the
+// same channel.
+//
+// Per process, like the concurrency gauge: production runs a single instance
+// without Redis. With several instances each one learns the cooldown from its
+// own first refusal.
+var channelCooldowns sync.Map // map[string]time.Time
+
+func channelCooldownKey(channelId int, modelName string) string {
+	return strconv.Itoa(channelId) + ":" + modelName
+}
+
+// MarkChannelCooldown keeps the channel out of selection for modelName until
+// until. A later deadline already recorded is kept: a short retry-after from
+// one request must not cut short a longer window another request learned.
+func MarkChannelCooldown(channelId int, modelName string, until time.Time) {
+	key := channelCooldownKey(channelId, modelName)
+	for {
+		current, loaded := channelCooldowns.LoadOrStore(key, until)
+		if !loaded {
+			return
+		}
+		if !until.After(current.(time.Time)) {
+			return
+		}
+		if channelCooldowns.CompareAndSwap(key, current, until) {
+			return
+		}
+	}
+}
+
+// ChannelCoolingDown reports whether the channel is still inside a cooldown for
+// modelName. An expired entry is removed on the way out, which keeps the map
+// bounded by the channel-model pairs that were refused recently.
+func ChannelCoolingDown(channelId int, modelName string) bool {
+	key := channelCooldownKey(channelId, modelName)
+	value, ok := channelCooldowns.Load(key)
+	if !ok {
+		return false
+	}
+	if time.Now().Before(value.(time.Time)) {
+		return true
+	}
+	channelCooldowns.CompareAndDelete(key, value)
+	return false
+}

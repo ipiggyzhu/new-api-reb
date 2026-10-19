@@ -84,7 +84,95 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 	return relayconvert.FormatClaudeResponseInfo(claudeResponse, oaiResponse, claudeInfo)
 }
 
-func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claudeInfo *ClaudeResponseInfo, data string) *types.NewAPIError {
+// claudeErrorStatusCode maps an Anthropic error type to the HTTP status the API
+// documents for it (https://platform.claude.com/docs/en/api/errors). An error
+// event inside a 200 stream, or an error body on a 200, carries only the type.
+// Reporting all of them as 500 made a rate limit or an overload look like an
+// upstream crash, so the retry, cooldown and auto-disable rules keyed on status
+// never saw what happened. Unknown types keep the old 500.
+func claudeErrorStatusCode(errorType string) int {
+	switch errorType {
+	case "invalid_request_error":
+		return http.StatusBadRequest
+	case "authentication_error":
+		return http.StatusUnauthorized
+	case "billing_error":
+		return http.StatusPaymentRequired
+	case "permission_error":
+		return http.StatusForbidden
+	case "not_found_error":
+		return http.StatusNotFound
+	case "conflict_error":
+		return http.StatusConflict
+	case "request_too_large":
+		return http.StatusRequestEntityTooLarge
+	case "rate_limit_error":
+		return http.StatusTooManyRequests
+	case "timeout_error":
+		return http.StatusGatewayTimeout
+	case "overloaded_error":
+		return 529
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// StreamPreamble holds the frames a Claude stream sends before any content —
+// message_start and pings — so an error the upstream reports before answering
+// reaches the controller with nothing on the wire, where shouldRetry can still
+// move the request to another channel. Production saw both shapes: an error
+// event right after message_start ("Concurrency limit exceeded for account"),
+// and a complete envelope with no content block in it. Either way the client
+// used to hold a message_start and the request could no longer be retried.
+//
+// Bounded like the OpenAI preamble: an upstream that sends only metadata must
+// not grow it without limit. Once full, the held frames are released and the
+// rest of the stream is written as it arrives.
+type StreamPreamble struct {
+	frames  []claudeStreamFrame
+	bytes   int
+	flushed bool
+}
+
+type claudeStreamFrame struct {
+	event string
+	data  string
+}
+
+// write sends one frame, or holds it while the stream has produced no content.
+// The first content frame releases everything held, in order, ahead of itself.
+func (p *StreamPreamble) write(c *gin.Context, info *relaycommon.RelayInfo, hasContent bool, frame claudeStreamFrame) {
+	if !p.flushed && !hasContent && len(p.frames) < 64 && len(frame.data) <= (64<<10)-p.bytes {
+		p.frames = append(p.frames, frame)
+		p.bytes += len(frame.data)
+		return
+	}
+	p.Flush(c, info)
+	writeClaudeStreamFrame(c, info, frame)
+}
+
+// Flush releases the held frames. Stream handlers call it once no failure
+// guard has rejected the stream, so a stream that is delivered without content
+// (the client left) still reaches the writer whole and in order.
+func (p *StreamPreamble) Flush(c *gin.Context, info *relaycommon.RelayInfo) {
+	for _, frame := range p.frames {
+		writeClaudeStreamFrame(c, info, frame)
+	}
+	p.frames = nil
+	p.flushed = true
+}
+
+func writeClaudeStreamFrame(c *gin.Context, info *relaycommon.RelayInfo, frame claudeStreamFrame) {
+	if info.RelayFormat == types.RelayFormatClaude {
+		helper.ClaudeChunkData(c, dto.ClaudeResponse{Type: frame.event}, frame.data)
+		return
+	}
+	if err := helper.StringData(c, frame.data); err != nil {
+		logger.LogError(c, "send_stream_response_failed: "+err.Error())
+	}
+}
+
+func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claudeInfo *ClaudeResponseInfo, preamble *StreamPreamble, data string) *types.NewAPIError {
 	info.CaptureUpstreamReasoning(data)
 	var claudeResponse dto.ClaudeResponse
 	err := common.UnmarshalJsonStr(data, &claudeResponse)
@@ -93,7 +181,7 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 		return types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
 	if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
-		return types.WithClaudeError(*claudeError, http.StatusInternalServerError)
+		return types.WithClaudeError(*claudeError, claudeErrorStatusCode(claudeError.Type))
 	}
 	if claudeResponse.StopReason != "" {
 		maybeMarkClaudeRefusal(c, claudeResponse.StopReason)
@@ -116,7 +204,7 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 				data = patchClaudeMessageDeltaUsageData(data, buildMessageDeltaPatchUsage(&claudeResponse, claudeInfo))
 			}
 		}
-		helper.ClaudeChunkData(c, claudeResponse, data)
+		preamble.write(c, info, claudeInfo.HasContent, claudeStreamFrame{event: claudeResponse.Type, data: data})
 	} else if info.RelayFormat == types.RelayFormatOpenAI {
 		response := StreamResponseClaude2OpenAI(&claudeResponse)
 
@@ -124,10 +212,12 @@ func HandleStreamResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 			return nil
 		}
 
-		err = helper.ObjectData(c, response)
+		jsonData, err := common.Marshal(response)
 		if err != nil {
 			logger.LogError(c, "send_stream_response_failed: "+err.Error())
+			return nil
 		}
+		preamble.write(c, info, claudeInfo.HasContent, claudeStreamFrame{data: string(jsonData)})
 	}
 	return nil
 }
@@ -222,8 +312,9 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 		Usage:        &dto.Usage{},
 	}
 	var err *types.NewAPIError
+	var preamble StreamPreamble
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
-		err = HandleStreamResponseData(c, info, claudeInfo, data)
+		err = HandleStreamResponseData(c, info, claudeInfo, &preamble, data)
 		if err != nil {
 			sr.Stop(err)
 			return
@@ -232,9 +323,10 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 		// been forwarded, rather than reading on until the upstream closes the body:
 		// some upstreams (e.g. anyrouter) hold the connection open for ~30s after the
 		// final frame, and StreamScannerHandler would otherwise make the caller wait
-		// out that tail. HandleStreamResponseData has already written the frame and the
-		// billing usage from the preceding message_delta is already recorded, so
-		// nothing is lost. Mirrors the terminal-event handling in relay_responses.go.
+		// out that tail. HandleStreamResponseData has already written (or, before any
+		// content, held) the frame and the billing usage from the preceding
+		// message_delta is already recorded, so nothing is lost. Mirrors the
+		// terminal-event handling in relay_responses.go.
 		if claudeInfo.SawMessageStop {
 			sr.Done()
 		}
@@ -255,6 +347,7 @@ func ClaudeStreamHandler(c *gin.Context, resp *http.Response, info *relaycommon.
 	if streamErr := StreamProducedNoContentError(info, claudeInfo); streamErr != nil {
 		return nil, streamErr
 	}
+	preamble.Flush(c, info)
 	// Recorded independently of the verdict below: the two answer different
 	// questions. missing_terminator says the upstream never closed the message
 	// off; stop_reason says how it closed one it did. A truncated stream has no
@@ -311,7 +404,7 @@ func HandleClaudeResponseData(c *gin.Context, info *relaycommon.RelayInfo, claud
 	}
 	info.CaptureUpstreamReasoning(string(data))
 	if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
-		return types.WithClaudeError(*claudeError, http.StatusInternalServerError)
+		return types.WithClaudeError(*claudeError, claudeErrorStatusCode(claudeError.Type))
 	}
 	maybeMarkClaudeRefusal(c, claudeResponse.StopReason)
 	if claudeInfo.Usage == nil {

@@ -135,7 +135,7 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 		claudeRequest.Thinking = &dto.Thinking{
 			Type: "adaptive",
 		}
-		claudeRequest.OutputConfig = json.RawMessage(fmt.Sprintf(`{"effort":"%s"}`, effortLevel))
+		claudeRequest.OutputConfig = json.RawMessage(fmt.Sprintf(`{"effort":"%s"}`, reasoning.ClaudeSuffixEffort(baseModel, effortLevel)))
 		if strings.HasPrefix(baseModel, "claude-opus-4-7") ||
 			strings.HasPrefix(baseModel, "claude-opus-4-8") {
 			claudeRequest.Thinking.Display = "summarized"

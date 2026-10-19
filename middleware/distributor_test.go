@@ -188,6 +188,75 @@ func TestDistributeModelLimitAllowsTaskFetchEndpoints(t *testing.T) {
 	}
 }
 
+// The distributor is the first reader of a relay body, so its answer is the one
+// the client sees: an oversized body is a 413 the client can act on, not a 400,
+// and every failure carries its cause once, without a doubled prefix.
+func TestDistributeReportsWhyTheBodyCouldNotBeRead(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	previous := constant.MaxRequestBodyMB
+	constant.MaxRequestBodyMB = 1
+	t.Cleanup(func() { constant.MaxRequestBodyMB = previous })
+	oversized := `{"model":"gpt-x","prompt":"` + strings.Repeat("a", 1<<20) + `"}`
+
+	tests := []struct {
+		name    string
+		path    string
+		body    string
+		status  int
+		message string
+	}{
+		{
+			name:    "oversized JSON body",
+			path:    "/v1/chat/completions",
+			body:    oversized,
+			status:  http.StatusRequestEntityTooLarge,
+			message: "Invalid request: request body exceeds 1 MB: request body too large",
+		},
+		{
+			name:    "oversized Midjourney body",
+			path:    "/mj/submit/imagine",
+			body:    oversized,
+			status:  http.StatusRequestEntityTooLarge,
+			message: "Invalid request: request body exceeds 1 MB: request body too large",
+		},
+		{
+			name:    "invalid JSON body",
+			path:    "/v1/chat/completions",
+			body:    `{"model":"gpt-x",`,
+			status:  http.StatusBadRequest,
+			message: "Invalid request: invalid JSON request body",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, w := newJSONTestContext(t, http.MethodPost, tt.path, tt.body)
+
+			Distribute()(c)
+
+			require.True(t, c.IsAborted())
+			assert.Equal(t, tt.status, w.Code)
+			assert.Contains(t, w.Body.String(), `"message":"`+tt.message)
+		})
+	}
+}
+
+// A failed read consumes and closes the body, so a later reader must get the
+// same cause instead of "http: invalid Read on closed Body".
+func TestGetRequestBodyKeepsTheReadFailureForLaterReaders(t *testing.T) {
+	previous := constant.MaxRequestBodyMB
+	constant.MaxRequestBodyMB = 1
+	t.Cleanup(func() { constant.MaxRequestBodyMB = previous })
+	c, _ := newJSONTestContext(t, http.MethodPost, "/v1/chat/completions", `{"prompt":"`+strings.Repeat("a", 1<<20)+`"}`)
+
+	_, firstErr := common.GetBodyStorage(c)
+	_, secondErr := common.GetBodyStorage(c)
+
+	require.Error(t, firstErr)
+	require.Error(t, secondErr)
+	assert.True(t, common.IsRequestBodyTooLargeError(secondErr))
+	assert.Equal(t, firstErr.Error(), secondErr.Error())
+}
+
 // The task-fetch exemption must stay scoped: submit endpoints and ordinary
 // relay requests keep enforcing the allowlist, including when the request
 // carries no model name at all.

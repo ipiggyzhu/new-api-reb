@@ -17,7 +17,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { Check, Moon, Sun } from 'lucide-react'
-import { useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
@@ -33,16 +32,6 @@ import { cn } from '@/lib/utils'
 export function ThemeSwitch() {
   const { t } = useTranslation()
   const { theme, setTheme } = useTheme()
-
-  /* Update theme-color meta tag when theme is updated.
-   * Both values are dark because Aurum keeps a black canvas in both modes —
-   * `light` is the charcoal tier, `dark` the reference obsidian tier.
-   * These hex values mirror `--background` in styles/theme.css. */
-  useEffect(() => {
-    const themeColor = theme === 'light' ? '#121214' : '#0a0a0b'
-    const metaThemeColor = document.querySelector("meta[name='theme-color']")
-    if (metaThemeColor) metaThemeColor.setAttribute('content', themeColor)
-  }, [theme])
 
   return (
     <DropdownMenu modal={false}>

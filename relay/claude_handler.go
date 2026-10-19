@@ -77,10 +77,17 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			strings.HasPrefix(request.Model, "claude-opus-4-7") ||
 			strings.HasPrefix(request.Model, "claude-opus-4-8")) {
 		request.Model = baseModel
-		request.Thinking = &dto.Thinking{
-			Type: "adaptive",
+		// The suffix replaces the client's reasoning settings, but block_binding
+		// is a conversation control, not one of them, so it carries over.
+		var blockBinding json.RawMessage
+		if request.Thinking != nil {
+			blockBinding = request.Thinking.BlockBinding
 		}
-		request.OutputConfig = json.RawMessage(fmt.Sprintf(`{"effort":"%s"}`, effortLevel))
+		request.Thinking = &dto.Thinking{
+			Type:         "adaptive",
+			BlockBinding: blockBinding,
+		}
+		request.OutputConfig = json.RawMessage(fmt.Sprintf(`{"effort":"%s"}`, reasoning.ClaudeSuffixEffort(baseModel, effortLevel)))
 		if strings.HasPrefix(request.Model, "claude-opus-4-7") ||
 			strings.HasPrefix(request.Model, "claude-opus-4-8") {
 			// Opus 4.7/4.8 reject non-default temperature/top_p/top_k with 400
@@ -172,6 +179,9 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 
 	var requestBody io.Reader
+	// The converted body, kept for the thinking-history rewrite below. Left nil
+	// on passthrough: that body is the client's own bytes, sent as they came.
+	var jsonData []byte
 	// A channel test has no client request to pass through: controller/channel-test.go
 	// builds its payload as a Go struct and leaves the gin body nil, so reading it
 	// here would send an empty body upstream and make a healthy channel look broken.
@@ -188,7 +198,7 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
 		relaycommon.AppendRequestConversionFromRequest(info, convertedRequest)
-		jsonData, err := common.Marshal(convertedRequest)
+		jsonData, err = common.Marshal(convertedRequest)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
@@ -202,6 +212,9 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 
 	usage, newAPIError := doUpstreamRoundTrip(c, info, adaptor, requestBody, true)
+	if jsonData != nil {
+		usage, newAPIError = rectifyClaudeThinkingHistory(c, info, adaptor, jsonData, usage, newAPIError)
+	}
 	if newAPIError != nil {
 		return newAPIError
 	}

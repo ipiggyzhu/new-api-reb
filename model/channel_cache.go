@@ -295,6 +295,7 @@ func buildCachedCandidates(group string, modelName string, requestPath string, s
 			priority:       channel.GetPriority(),
 			weight:         channel.GetWeight(),
 			maxConcurrency: channel.GetMaxConcurrency(),
+			coolingDown:    ChannelCoolingDown(channelId, modelName),
 		})
 	}
 	return candidates, nil

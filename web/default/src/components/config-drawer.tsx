@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { Radio as RadioPrimitive } from '@base-ui/react/radio'
 import { RadioGroup as Radio } from '@base-ui/react/radio-group'
 import { CircleCheck, Palette, RotateCcw } from 'lucide-react'
-import type { SVGProps } from 'react'
+import { useId, type SVGProps } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { IconDir } from '@/assets/custom/icon-dir'
@@ -90,7 +90,6 @@ export function ConfigDrawer() {
             size='icon'
             variant='ghost'
             aria-label={t('Open theme settings')}
-            aria-describedby='config-drawer-description'
             className='max-md:hidden'
           />
         }
@@ -135,6 +134,7 @@ function SectionTitle(props: {
   onReset?: () => void
   className?: string
 }) {
+  const { t } = useTranslation()
   return (
     <div
       className={cn(
@@ -149,7 +149,7 @@ function SectionTitle(props: {
           variant='secondary'
           className='size-4'
           onClick={props.onReset}
-          aria-label='Reset'
+          aria-label={t('Reset')}
         >
           <RotateCcw className='size-3' aria-hidden='true' />
         </Button>
@@ -167,12 +167,16 @@ function RadioGroupItem(props: {
   isTheme?: boolean
 }) {
   const isTheme = props.isTheme ?? false
+  // Option values repeat across groups and collide with the groups' own
+  // description ids (e.g. `sidebar` → `sidebar-description`), so the id must
+  // not be derived from the value.
+  const descriptionId = useId()
   return (
     <Item
       value={props.item.value}
       className={cn('group outline-none', 'transition duration-200 ease-in')}
-      aria-label={`Select ${props.item.label.toLowerCase()}`}
-      aria-describedby={`${props.item.value}-description`}
+      aria-label={props.item.label}
+      aria-describedby={descriptionId}
     >
       <div
         className={cn(
@@ -180,9 +184,7 @@ function RadioGroupItem(props: {
           'group-data-checked:ring-primary group-data-checked:shadow-2xl',
           'group-focus-visible:ring-2'
         )}
-        role='img'
-        aria-hidden='false'
-        aria-label={`${props.item.label} option preview`}
+        aria-hidden='true'
       >
         <CircleCheck
           className={cn(
@@ -200,11 +202,7 @@ function RadioGroupItem(props: {
           aria-hidden='true'
         />
       </div>
-      <div
-        className='mt-1 text-xs'
-        id={`${props.item.value}-description`}
-        aria-live='polite'
-      >
+      <div className='mt-1 text-xs' id={descriptionId} aria-live='polite'>
         {props.item.label}
       </div>
     </Item>
@@ -213,13 +211,13 @@ function RadioGroupItem(props: {
 
 function ThemeConfig() {
   const { t } = useTranslation()
-  const { defaultTheme, theme, setTheme } = useTheme()
+  const { defaultTheme, theme, setTheme, resetTheme } = useTheme()
   return (
     <div>
       <SectionTitle
         title={t('Theme')}
         showReset={theme !== defaultTheme}
-        onReset={() => setTheme(defaultTheme)}
+        onReset={resetTheme}
       />
       <Radio
         value={theme}

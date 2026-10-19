@@ -318,6 +318,7 @@ docker run --name new-api -d --restart always \
 | `SQL_DSN` | 資料庫連接字符串                                                     | - |
 | `REDIS_CONN_STRING` | Redis 連接字符串                                                  | - |
 | `STREAMING_TIMEOUT` | 流式超時時間（秒）                                                    | `300` |
+| `STREAMING_FIRST_OUTPUT_TIMEOUT` | Responses 串流在多少秒內沒有輸出就換渠道重試，keepalive 不會重置它；`0` 為關閉 | `0` |
 | `STREAM_SCANNER_MAX_BUFFER_MB` | 流式掃描器單行最大緩衝（MB），圖像生成等超大 `data:` 片段（如 4K 圖片 base64）需適當調大 | `64` |
 | `MAX_REQUEST_BODY_MB` | 請求體最大大小（MB，**解壓縮後**計；防止超大請求/zip bomb 導致記憶體暴漲），超過將返回 `413` | `32` |
 | `AZURE_DEFAULT_API_VERSION` | Azure API 版本                                                 | `2025-04-01-preview` |

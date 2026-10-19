@@ -116,12 +116,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			}
 			logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
+			upstreamURLs := service.UpstreamAddresses(c)
 
 			var errorBody gin.H
 			if relayFormat == types.RelayFormatClaude {
-				errorBody = gin.H{"type": "error", "error": newAPIError.ToClaudeError()}
+				errorBody = gin.H{"type": "error", "error": newAPIError.ToClaudeError(upstreamURLs...)}
 			} else {
-				errorBody = gin.H{"error": newAPIError.ToOpenAIError()}
+				errorBody = gin.H{"error": newAPIError.ToOpenAIError(upstreamURLs...)}
 			}
 
 			// A streaming attempt sets the event-stream headers before the upstream
@@ -138,7 +139,45 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 			switch {
 			case relayFormat == types.RelayFormatOpenAIRealtime:
-				helper.WssError(c, ws, newAPIError.ToOpenAIError())
+				helper.WssError(c, ws, newAPIError.ToOpenAIError(upstreamURLs...))
+			case isEventStream && c.Writer.Written() && relayFormat == types.RelayFormatClaude:
+				// Anthropic SDKs dispatch on the SSE event name and drop frames without
+				// one, so a bare data frame (and an OpenAI-style [DONE]) never reaches
+				// the caller: the stream just ends and the client can only report a
+				// generic "API error". `event: error` is what they turn into an APIError
+				// carrying this message.
+				if errorJson, marshalErr := common.Marshal(errorBody); marshalErr != nil {
+					logger.LogError(c, fmt.Sprintf("marshal stream error payload failed: %s", marshalErr.Error()))
+				} else {
+					helper.ClaudeChunkData(c, dto.ClaudeResponse{Type: "error"}, string(errorJson))
+				}
+			case isEventStream && c.Writer.Written() && relayFormat == types.RelayFormatOpenAIResponses:
+				// Responses clients (Codex) decode every frame as a typed event and
+				// skip the ones without a `type`, so an {"error":...} frame plus
+				// [DONE] is invisible to them: the stream ends without a terminal
+				// event and they report "stream closed before response.completed" and
+				// retry, even for a policy block. response.failed is the protocol's
+				// terminal failure event, and its error.code is what they classify on.
+				openAIError := newAPIError.ToOpenAIError(upstreamURLs...)
+				code := openAIError.Type
+				if openAIError.Code != nil && fmt.Sprintf("%v", openAIError.Code) != "" {
+					code = fmt.Sprintf("%v", openAIError.Code)
+				}
+				failedEvent := gin.H{
+					"type": "response.failed",
+					"response": gin.H{
+						"id":     "resp_" + requestId,
+						"object": "response",
+						"status": "failed",
+						"output": []any{},
+						"error":  gin.H{"code": code, "message": openAIError.Message},
+					},
+				}
+				if eventJson, marshalErr := common.Marshal(failedEvent); marshalErr != nil {
+					logger.LogError(c, fmt.Sprintf("marshal stream error payload failed: %s", marshalErr.Error()))
+				} else {
+					_ = helper.ResponseChunkData(c, dto.ResponsesStreamResponse{Type: "response.failed"}, string(eventJson))
+				}
 			case isEventStream && c.Writer.Written():
 				if errorJson, marshalErr := common.Marshal(errorBody); marshalErr != nil {
 					logger.LogError(c, fmt.Sprintf("marshal stream error payload failed: %s", marshalErr.Error()))
@@ -369,6 +408,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		// next channel and fault that one too.
 		if c.Request.Context().Err() != nil {
 			break
+		}
+		// A 429/529 says how the channel will answer the next requests for this
+		// model too, so selection passes it over until the window ends. Not for a
+		// multi-key channel: the refusal came from one key, and cooling the
+		// channel would also hide the keys that still have quota.
+		if cooldown := service.ChannelCooldownFor(newAPIError); cooldown > 0 && !relayInfo.IsChannelTest && !channel.ChannelInfo.IsMultiKey {
+			model.MarkChannelCooldown(channel.Id, relayInfo.OriginModelName, time.Now().Add(cooldown))
+			logger.LogWarn(c, fmt.Sprintf("channel #%d cooling down for model %s for %s after status %d",
+				channel.Id, relayInfo.OriginModelName, cooldown, newAPIError.StatusCode))
 		}
 		// Report this attempt, not just the request's final outcome. The
 		// distributor's post-c.Next() hook only ever sees the last channel, so
@@ -698,7 +746,7 @@ func recordRelayErrorLog(c *gin.Context, channelError *types.ChannelError, err *
 	}
 	useTimeSeconds := int(time.Since(startTime).Seconds())
 	model.RecordErrorLog(c, c.GetInt("id"), channelId, c.GetString("original_model"), c.GetString("token_name"),
-		err.MaskSensitiveErrorWithStatusCode(), c.GetInt("token_id"), useTimeSeconds,
+		err.MaskSensitiveErrorWithStatusCode(service.UpstreamAddresses(c)...), c.GetInt("token_id"), useTimeSeconds,
 		common.GetContextKeyBool(c, constant.ContextKeyIsStream), c.GetString("group"), other)
 }
 
@@ -966,6 +1014,9 @@ func respondTaskError(c *gin.Context, taskErr *dto.TaskError) {
 	if taskErr.StatusCode == http.StatusTooManyRequests {
 		taskErr.Message = "当前分组上游负载已饱和，请稍后再试"
 	}
+	// Task adaptors wrap upstream bodies and dial errors from many call sites;
+	// masking once here, with the channel the last attempt used, covers them all.
+	taskErr.Message = common.MaskSensitiveInfo(taskErr.Message, service.UpstreamAddresses(c)...)
 	c.JSON(taskErr.StatusCode, taskErr)
 }
 

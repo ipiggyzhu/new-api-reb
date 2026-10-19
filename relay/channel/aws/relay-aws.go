@@ -273,11 +273,12 @@ func awsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (
 		Usage:        &dto.Usage{},
 	}
 
+	var preamble claude.StreamPreamble
 	for event := range stream.Events() {
 		switch v := event.(type) {
 		case *bedrockruntimeTypes.ResponseStreamMemberChunk:
 			info.SetFirstResponseTime()
-			respErr := claude.HandleStreamResponseData(c, info, claudeInfo, string(v.Value.Bytes))
+			respErr := claude.HandleStreamResponseData(c, info, claudeInfo, &preamble, string(v.Value.Bytes))
 			if respErr != nil {
 				return respErr, nil
 			}
@@ -295,6 +296,7 @@ func awsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor) (
 	if streamErr := claude.StreamProducedNoContentError(info, claudeInfo); streamErr != nil {
 		return streamErr, nil
 	}
+	preamble.Flush(c, info)
 
 	claude.HandleStreamFinalResponse(c, info, claudeInfo)
 	return nil, claudeInfo.Usage

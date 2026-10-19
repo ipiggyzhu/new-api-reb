@@ -39,7 +39,13 @@ func Distribute() func(c *gin.Context) {
 		channelId, ok := common.GetContextKey(c, constant.ContextKeyTokenSpecificChannelId)
 		modelRequest, shouldSelectChannel, err := getModelRequest(c)
 		if err != nil {
-			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
+			// The distributor is the first reader of a relay body, so a body over
+			// MAX_REQUEST_BODY_MB is answered here.
+			status := http.StatusBadRequest
+			if common.IsRequestBodyTooLargeError(err) {
+				status = http.StatusRequestEntityTooLarge
+			}
+			abortWithOpenAiMessage(c, status, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
 		}
 		if ok {
@@ -122,7 +128,14 @@ func Distribute() func(c *gin.Context) {
 						// its slot here is what keeps affinity and the concurrency cap
 						// consistent: the pin wins only while the channel has room, and
 						// the overflow falls through to ordinary tier selection below.
-						if !model.AcquireChannelSlot(preferred.Id, preferred.GetMaxConcurrency()) {
+						//
+						// One cooling down after a 429/529 is passed over the same way, so
+						// the pin does not walk this request into a refusal and the
+						// conversation comes back to its warm upstream once the window ends.
+						// Selection still lands on it if nothing else is left.
+						if model.ChannelCoolingDown(preferred.Id, modelRequest.Model) {
+							affinitySaturated = true
+						} else if !model.AcquireChannelSlot(preferred.Id, preferred.GetMaxConcurrency()) {
 							affinitySaturated = true
 						} else if usingGroup == "auto" {
 							userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
@@ -238,18 +251,16 @@ func channelSupportsRequestPath(channel *model.Channel, requestPath string, requ
 // - application/x-www-form-urlencoded
 // - multipart/form-data
 func getModelFromRequest(c *gin.Context) (*ModelRequest, error) {
+	// Errors stay unwrapped: Distribute adds the "Invalid request" prefix once
+	// and maps an oversized body to 413.
 	if strings.HasPrefix(c.Request.Header.Get("Content-Type"), "application/json") {
-		modelRequest, err := getModelFromJSONBody(c)
-		if err != nil {
-			return nil, errors.New(i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
-		}
-		return modelRequest, nil
+		return getModelFromJSONBody(c)
 	}
 
 	var modelRequest ModelRequest
 	err := common.UnmarshalBodyReusable(c, &modelRequest)
 	if err != nil {
-		return nil, errors.New(i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
+		return nil, err
 	}
 	return &modelRequest, nil
 }
@@ -334,7 +345,7 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 			midjourneyRequest := dto.MidjourneyRequest{}
 			err = common.UnmarshalBodyReusable(c, &midjourneyRequest)
 			if err != nil {
-				return nil, false, errors.New(i18n.T(c, i18n.MsgDistributorInvalidMidjourney, map[string]any{"Error": err.Error()}))
+				return nil, false, err
 			}
 			midjourneyModel, mjErr, success := service.GetMjRequestModel(relayMode, &midjourneyRequest)
 			if mjErr != nil {

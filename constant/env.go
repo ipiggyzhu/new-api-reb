@@ -1,6 +1,11 @@
 package constant
 
 var StreamingTimeout int
+
+// StreamingFirstOutputTimeout bounds, in seconds, how long a Responses stream
+// may stay without output after its headers. Unlike StreamingTimeout it is not
+// reset by keepalives or lifecycle frames; 0 disables it.
+var StreamingFirstOutputTimeout int
 var DifyDebug bool
 var MaxFileDownloadMB int
 var StreamScannerMaxBufferMB int

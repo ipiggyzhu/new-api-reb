@@ -17,6 +17,21 @@ func TrimEffortSuffix(modelName string) (string, string, bool) {
 	return TrimEffortSuffixWithSuffixes(modelName, EffortSuffixes)
 }
 
+// ClaudeSuffixEffort maps an effort suffix to a level the Claude model accepts.
+// Claude has no "minimal", and Opus 4.6 supports "max" but not "xhigh"; both
+// would otherwise be sent verbatim and rejected with a 400.
+func ClaudeSuffixEffort(baseModel string, effort string) string {
+	switch effort {
+	case "minimal":
+		return "low"
+	case "xhigh":
+		if strings.HasPrefix(baseModel, "claude-opus-4-6") {
+			return "max"
+		}
+	}
+	return effort
+}
+
 func TrimEffortSuffixWithSuffixes(modelName string, suffixes []string) (string, string, bool) {
 	suffix, found := lo.Find(suffixes, func(s string) bool {
 		return strings.HasSuffix(modelName, s)

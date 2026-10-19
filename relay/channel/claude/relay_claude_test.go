@@ -351,6 +351,33 @@ func TestOpenAIChatRequestToClaudeMessages_ClaudeOpus48HighUsesAdaptiveThinking(
 	require.Nil(t, claudeRequest.TopK)
 }
 
+func TestOpenAIChatRequestToClaudeMessages_EffortSuffixSendsALevelTheModelAccepts(t *testing.T) {
+	tests := []struct {
+		model      string
+		wantModel  string
+		wantEffort string
+	}{
+		{model: "claude-opus-4-6-xhigh", wantModel: "claude-opus-4-6", wantEffort: "max"},
+		{model: "claude-opus-4-6-max", wantModel: "claude-opus-4-6", wantEffort: "max"},
+		{model: "claude-opus-4-7-xhigh", wantModel: "claude-opus-4-7", wantEffort: "xhigh"},
+		{model: "claude-opus-4-8-minimal", wantModel: "claude-opus-4-8", wantEffort: "low"},
+		{model: "claude-opus-4-6-minimal", wantModel: "claude-opus-4-6", wantEffort: "low"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			request := dto.GeneralOpenAIRequest{
+				Model:    tt.model,
+				Messages: []dto.Message{{Role: "user", Content: "hello"}},
+			}
+
+			claudeRequest, err := relayconvert.OpenAIChatRequestToClaudeMessages(nil, request)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantModel, claudeRequest.Model)
+			assert.JSONEq(t, `{"effort":"`+tt.wantEffort+`"}`, string(claudeRequest.OutputConfig))
+		})
+	}
+}
+
 func TestOpenAIChatRequestToClaudeMessages_ClaudeOpus48ThinkingUsesAdaptiveHighEffort(t *testing.T) {
 	request := dto.GeneralOpenAIRequest{
 		Model:       "claude-opus-4-8-thinking",

@@ -39,18 +39,22 @@ func formatRequest(requestBody io.Reader, requestHeader http.Header) (*AwsClaude
 	}
 	awsClaudeRequest.AnthropicVersion = "bedrock-2023-05-31"
 
-	// check header anthropic-beta
-	anthropicBetaValues := requestHeader.Get("anthropic-beta")
-	if len(anthropicBetaValues) > 0 {
-		var tempArray []string
-		tempArray = strings.Split(anthropicBetaValues, ",")
-		if len(tempArray) > 0 {
-			betaJson, err := common.Marshal(tempArray)
-			if err != nil {
-				return nil, err
+	// check header anthropic-beta. Bedrock matches each entry exactly, so the
+	// spaces after commas ("a, b") and empty entries must not reach it.
+	var betas []string
+	for _, line := range requestHeader.Values("anthropic-beta") {
+		for beta := range strings.SplitSeq(line, ",") {
+			if beta = strings.TrimSpace(beta); beta != "" {
+				betas = append(betas, beta)
 			}
-			awsClaudeRequest.AnthropicBeta = betaJson
 		}
+	}
+	if len(betas) > 0 {
+		betaJson, err := common.Marshal(betas)
+		if err != nil {
+			return nil, err
+		}
+		awsClaudeRequest.AnthropicBeta = betaJson
 	}
 	logger.LogJson(context.Background(), "json", awsClaudeRequest)
 	return &awsClaudeRequest, nil

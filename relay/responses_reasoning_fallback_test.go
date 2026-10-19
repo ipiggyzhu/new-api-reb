@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -59,8 +61,18 @@ func (a *reasoningFallbackTestAdaptor) DoResponse(_ *gin.Context, resp *http.Res
 	return &dto.Usage{}, a.responseErr
 }
 
+// A finished test's *testing.T address is reused by later tests, so it cannot
+// isolate the process-wide retired cache. Each live test instead keeps its own
+// sequence number until cleanup, shared by every fixture call in that test.
+var reasoningFallbackScopes sync.Map
+var reasoningFallbackScopeSeq atomic.Int64
+
 func reasoningFallbackFixture(t *testing.T, body string) (*gin.Context, *relaycommon.RelayInfo) {
 	t.Helper()
+	scope, loaded := reasoningFallbackScopes.LoadOrStore(t, reasoningFallbackScopeSeq.Add(1))
+	if !loaded {
+		t.Cleanup(func() { reasoningFallbackScopes.Delete(t) })
+	}
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
 	return c, &relaycommon.RelayInfo{
@@ -70,7 +82,7 @@ func reasoningFallbackFixture(t *testing.T, body string) (*gin.Context, *relayco
 		ChannelMeta: &relaycommon.ChannelMeta{
 			ChannelId:      33,
 			ChannelBaseUrl: "https://upstream.example/v1",
-			ApiKey:         fmt.Sprintf("fixture-%p", t), // Isolate repeated runs without a global purge.
+			ApiKey:         fmt.Sprintf("fixture-%d", scope), // Isolate repeated runs without a global purge.
 			ChannelSetting: dto.ChannelSettings{
 				ResponsesReasoningFallback: true,
 			},

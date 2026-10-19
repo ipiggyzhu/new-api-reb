@@ -125,6 +125,10 @@ type channelCandidate struct {
 	// pass, which is what makes overflow cascade down to the next priority tier
 	// instead of queueing on a saturated upstream.
 	maxConcurrency int
+	// coolingDown marks a channel that recently answered 429/529 for this model
+	// (ChannelCoolingDown). It is passed over like a saturated one, but only
+	// while some candidate that is not cooling remains.
+	coolingDown bool
 }
 
 // effectiveChannelWeight converts a configured weight into the share used by the
@@ -173,6 +177,10 @@ func pickWeightedIndex(weights []int, draw int) int {
 // one, so a saturated tier demotes to the next tier down. The count is read live;
 // the caller is expected to take the slot it wins (selectAndAcquireChannel) since
 // nothing here reserves it.
+//
+// A cooling channel is skipped the same way, so a rate-limited tier also
+// demotes, unless every remaining channel is cooling: then they compete as if
+// none were, since one of them answering beats having nothing to try.
 func selectChannelCandidate(candidates []channelCandidate, retry int, excludedChannelIds map[int]bool) (int, bool) {
 	if len(candidates) == 0 {
 		return 0, false
@@ -197,12 +205,22 @@ func selectChannelCandidate(candidates []channelCandidate, retry int, excludedCh
 		}
 	}
 
+	skipCooling := false
+	for _, candidate := range candidates {
+		if !candidate.coolingDown && candidate.priority <= tiers[startTier] &&
+			!excludedChannelIds[candidate.channelId] && !candidate.isSaturated() {
+			skipCooling = true
+			break
+		}
+	}
+
 	for _, tier := range tiers[startTier:] {
 		tierChannelIds := make([]int, 0, len(candidates))
 		tierWeights := make([]int, 0, len(candidates))
 		totalWeight := 0
 		for _, candidate := range candidates {
-			if candidate.priority != tier || excludedChannelIds[candidate.channelId] || candidate.isSaturated() {
+			if candidate.priority != tier || excludedChannelIds[candidate.channelId] || candidate.isSaturated() ||
+				(skipCooling && candidate.coolingDown) {
 				continue
 			}
 			weight := effectiveChannelWeight(candidate.weight)
@@ -368,6 +386,7 @@ func buildDBCandidates(group string, modelName string, requestPath string) ([]ch
 			priority:       priority,
 			weight:         saturatingUintToInt(ability.Weight),
 			maxConcurrency: maxConcurrency,
+			coolingDown:    ChannelCoolingDown(ability.ChannelId, modelName),
 		})
 	}
 	return candidates, nil

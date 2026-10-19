@@ -14,12 +14,79 @@
       content="Unified AI API gateway and admin dashboard."
     />
 
-    <meta name="theme-color" content="#0a0a0b" />
+    <!-- Static fallback: the shipped Anthropic light canvas. The theme
+         customization provider rewrites it from the live --background. -->
+    <meta name="theme-color" content="#fafaf7" />
     <!--umami-->
     <!--Google Analytics-->
   </head>
 
   <body>
+    <!-- Apply the persisted theme before first paint. React mounts only after
+         the deferred bundle loads, and until then there is no html mode class
+         and no <body> preset attribute, so every load painted Aurum light in
+         sans first. Mirrors ThemeProvider (html class) and
+         ThemeCustomizationProvider (body data-theme-*); the allowlists restate
+         src/lib/theme-customization.ts and theme-boot-script.test.ts checks
+         them against it. -->
+    <script>
+      ;(function () {
+        function cookie(name, allowed, fallback) {
+          var match = ('; ' + document.cookie).split('; ' + name + '=')
+          var value = match.length === 2 ? match[1].split(';')[0] : ''
+          return allowed.indexOf(value) >= 0 ? value : fallback
+        }
+        var theme = cookie(
+          'vite-ui-theme',
+          ['dark', 'light', 'system'],
+          'system'
+        )
+        if (theme === 'system') {
+          theme = window.matchMedia('(prefers-color-scheme: dark)').matches
+            ? 'dark'
+            : 'light'
+        }
+        document.documentElement.classList.add(theme)
+
+        var body = document.body
+        var preset = cookie(
+          'theme_preset',
+          [
+            'default',
+            'anthropic',
+            'simple-large',
+            'underground',
+            'rose-garden',
+            'lake-view',
+            'sunset-glow',
+            'forest-whisper',
+            'ocean-breeze',
+            'lavender-dream',
+          ],
+          'anthropic'
+        )
+        if (preset !== 'default') body.setAttribute('data-theme-preset', preset)
+        var font = cookie('theme_font', ['default', 'sans', 'serif'], 'default')
+        if (font === 'default') font = preset === 'anthropic' ? 'serif' : 'sans'
+        body.setAttribute('data-theme-font', font)
+        var radius = cookie(
+          'theme_radius',
+          ['default', 'none', 'sm', 'md', 'lg', 'xl'],
+          'default'
+        )
+        if (radius !== 'default') body.setAttribute('data-theme-radius', radius)
+        var scale = cookie(
+          'theme_scale',
+          ['default', 'sm', 'lg', 'xl'],
+          'default'
+        )
+        if (scale !== 'default') body.setAttribute('data-theme-scale', scale)
+        body.setAttribute(
+          'data-theme-content-layout',
+          cookie('theme_content_layout', ['full', 'centered'], 'full')
+        )
+      })()
+    </script>
     <div id="root" translate="no" class="notranslate"></div>
   </body>
 </html>

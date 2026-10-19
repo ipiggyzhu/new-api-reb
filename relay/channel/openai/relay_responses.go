@@ -5,8 +5,11 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -138,6 +141,26 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	var outputErr *types.NewAPIError
 	var upstreamErr *types.NewAPIError
 
+	// STREAMING_TIMEOUT restarts on every line, so an upstream that keeps sending
+	// keepalives or lifecycle frames without output can hold the request until the
+	// client gives up. While nothing but pings has reached the client the attempt
+	// can still move to another channel, so the deadline ends it at that point.
+	// The mutex decides whether the deadline or the first committed frame wins.
+	var firstOutputMu sync.Mutex
+	var firstOutputCommitted, firstOutputTimedOut bool
+	if constant.StreamingFirstOutputTimeout > 0 {
+		firstOutputTimer := time.AfterFunc(time.Duration(constant.StreamingFirstOutputTimeout)*time.Second, func() {
+			firstOutputMu.Lock()
+			defer firstOutputMu.Unlock()
+			if !firstOutputCommitted {
+				firstOutputTimedOut = true
+				// Unblocks the scanner; the handler then reports the timeout.
+				_ = resp.Body.Close()
+			}
+		})
+		defer firstOutputTimer.Stop()
+	}
+
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 
 		var streamResponse dto.ResponsesStreamResponse
@@ -180,6 +203,14 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			// runs at the terminal event; retries stop once frames are written.
 			preambleFlushed = true
 		}
+		firstOutputMu.Lock()
+		if firstOutputTimedOut {
+			firstOutputMu.Unlock()
+			sr.Stop(nil)
+			return
+		}
+		firstOutputCommitted = true
+		firstOutputMu.Unlock()
 		for _, pending := range preamble.chunks {
 			pendingResponse := dto.ResponsesStreamResponse{Type: gjson.Get(pending, "type").String()}
 			sendResponsesStreamData(c, pendingResponse, pending)
@@ -221,6 +252,14 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	}
 	if upstreamErr != nil && !hasOutput {
 		return nil, upstreamErr
+	}
+	// After the upstream's own errors: a deadline that fires while an error
+	// event is already stopping the stream must not replace that error.
+	firstOutputMu.Lock()
+	timedOut := firstOutputTimedOut
+	firstOutputMu.Unlock()
+	if timedOut {
+		return nil, types.NewErrorWithStatusCode(fmt.Errorf("upstream produced no output within %ds", constant.StreamingFirstOutputTimeout), types.ErrorCodeEmptyResponse, http.StatusBadGateway)
 	}
 	if outputErr != nil {
 		return nil, outputErr

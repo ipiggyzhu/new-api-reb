@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/types"
@@ -18,6 +20,58 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
+
+// An upstream that keeps the connection alive without producing output resets
+// STREAMING_TIMEOUT forever. The first-output deadline must end that attempt
+// while it is still retryable, and must never cut a stream that has started.
+func TestNativeResponsesStreamFirstOutputDeadline(t *testing.T) {
+	oldTimeout := constant.StreamingFirstOutputTimeout
+	constant.StreamingFirstOutputTimeout = 1
+	t.Cleanup(func() { constant.StreamingFirstOutputTimeout = oldTimeout })
+	deadline := time.Duration(constant.StreamingFirstOutputTimeout) * time.Second
+	created := `{"type":"response.created","response":{"id":"resp_1","status":"in_progress","output":[]}}`
+	completed := `{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}}}`
+
+	t.Run("no output before the deadline", func(t *testing.T) {
+		c, info, _, recorder := newOutputValidationTest(t, "", true, true)
+		upstreamBody, upstream := io.Pipe()
+		go func() {
+			// Keepalives and lifecycle frames, then silence.
+			_, _ = io.WriteString(upstream, ": keepalive\n\ndata: "+created+"\n\n")
+		}()
+		resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: upstreamBody}
+
+		usage, apiErr := OaiResponsesStreamHandler(c, info, resp)
+
+		require.NotNil(t, apiErr)
+		assert.Nil(t, usage)
+		assert.Equal(t, types.ErrorCodeEmptyResponse, apiErr.GetErrorCode())
+		assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+		assert.Equal(t, "upstream produced no output within 1s", apiErr.Error())
+		assert.False(t, c.Writer.Written(), "the buffered lifecycle frame must not reach the client")
+		assert.Empty(t, recorder.Body.String())
+	})
+
+	t.Run("output before the deadline keeps the stream past it", func(t *testing.T) {
+		c, info, _, recorder := newOutputValidationTest(t, "", true, true)
+		upstreamBody, upstream := io.Pipe()
+		go func() {
+			_, _ = io.WriteString(upstream, "data: "+created+"\n\ndata: "+`{"type":"response.output_text.delta","delta":"OK"}`+"\n\n")
+			<-time.After(deadline + 200*time.Millisecond)
+			_, _ = io.WriteString(upstream, "data: "+completed+"\n\n")
+			_ = upstream.Close()
+		}()
+		resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: upstreamBody}
+
+		usage, apiErr := OaiResponsesStreamHandler(c, info, resp)
+
+		require.Nil(t, apiErr)
+		require.NotNil(t, usage)
+		assert.Equal(t, 2, usage.CompletionTokens)
+		assert.Contains(t, recorder.Body.String(), `"delta":"OK"`)
+		assert.Contains(t, recorder.Body.String(), completed)
+	})
+}
 
 func TestNativeResponsesStreamStopsAtTerminalEvent(t *testing.T) {
 	for _, eventType := range []string{"response.completed", "response.done", "response.incomplete"} {
