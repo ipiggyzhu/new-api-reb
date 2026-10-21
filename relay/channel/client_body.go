@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/reasoning"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -192,13 +194,35 @@ func prepareCLIRequest(c *gin.Context, info *relaycommon.RelayInfo, requestURL s
 			headers.Set("Accept-Encoding", "gzip, deflate, br, zstd")
 			headers.Set("Connection", "keep-alive")
 		}
-		err = shapeClaudeCodeBody(body, identity, version)
+		// Conversion always fills max_tokens; only the caller's own request
+		// tells whether an output limit was actually asked for.
+		callerMaxTokens := false
+		for _, path := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens", "generationConfig.maxOutputTokens", "generationConfig.max_output_tokens"} {
+			callerMaxTokens = callerMaxTokens || gjson.GetBytes(reference, path).Int() > 0
+		}
+		// Conversion turns an OpenAI caller's effort into a thinking budget that
+		// the profile's thinking replaces; keep the effort itself as the caller's
+		// output_config.effort. Levels Claude has no equivalent for are not sent.
+		callerEffort := ""
+		if info.RelayFormat == types.RelayFormatOpenAI || info.RelayFormat == types.RelayFormatOpenAIResponses {
+			effort := gjson.GetBytes(reference, "reasoning_effort").String()
+			if effort == "" {
+				effort = gjson.GetBytes(reference, "reasoning.effort").String()
+			}
+			effort = reasoning.ClaudeSuffixEffort(gjson.GetBytes(data, "model").String(), effort)
+			if slices.Contains([]string{"low", "medium", "high", "xhigh", "max"}, effort) {
+				callerEffort = effort
+			}
+		}
+		err = shapeClaudeCodeBody(body, identity, isNativeClaudeCodeRequest(c, info, body), callerMaxTokens, callerEffort, version)
 		query := u.Query()
 		query.Set("beta", "true")
 		u.RawQuery = query.Encode()
 		headers.Set("anthropic-beta", claudeCodeBeta)
 		headers.Set("X-Claude-Code-Session-Id", identity.session)
 		if version != nil {
+			// Captured with the profile's TTL mode: a 1h profile's set includes
+			// extended-cache-ttl-2025-04-11, a default profile's does not.
 			headers.Set("anthropic-beta", version.Headers["anthropic-beta"])
 			headers.Set("Accept-Encoding", version.Headers["accept-encoding"])
 			if version.LegacyUserID {
@@ -221,7 +245,7 @@ func prepareCLIRequest(c *gin.Context, info *relaycommon.RelayInfo, requestURL s
 			} else {
 				headers.Del("x-openai-internal-codex-responses-lite")
 			}
-			if version.Version == "0.134.0" {
+			if version.RequestIDIsSession {
 				headers.Set("x-client-request-id", identity.session)
 			}
 			var metadata cliObject
@@ -247,6 +271,11 @@ func prepareCLIRequest(c *gin.Context, info *relaycommon.RelayInfo, requestURL s
 	}
 	if version != nil {
 		data = orderVersionedCLIJSON(gjson.ParseBytes(data), gjson.ParseBytes(reference), "", version)
+		if claude {
+			// Header layer only: the beta set follows the TTLs the final body
+			// carries, wherever its breakpoints came from.
+			headers.Set("anthropic-beta", service.CoherentAnthropicBeta(version.Headers["anthropic-beta"], claudeBodyHasHourTTL(data)))
+		}
 		if codex {
 			turn := orderVersionedCLIJSON(gjson.Parse(headers.Get("x-codex-turn-metadata")), gjson.Result{}, "turn_metadata", version)
 			headers.Set("x-codex-turn-metadata", string(turn))
@@ -281,7 +310,84 @@ func cliContentBlocks(raw json.RawMessage, textType string) ([]cliObject, error)
 	return blocks, nil
 }
 
-func shapeClaudeCodeBody(body cliObject, identity cliIdentity, versions ...*service.CLIVersionProfile) error {
+// isNativeClaudeCodeRequest reports whether the Claude body is the real Claude
+// Code client's own request: Claude format end to end, never converted, from a
+// client identifying as Claude Code. Only such a request already carries the
+// profile's cache layout. Conversion output (whose cache_control came from an
+// OpenAI/Responses/Gemini client) and other Anthropic SDK clients do not.
+func isNativeClaudeCodeRequest(c *gin.Context, info *relaycommon.RelayInfo, body cliObject) bool {
+	if info.IsChannelTest || info.RelayFormat != types.RelayFormatClaude {
+		return false
+	}
+	for _, format := range info.RequestConversionChain {
+		if format != types.RelayFormatClaude {
+			return false
+		}
+	}
+	if strings.HasPrefix(c.Request.Header.Get("User-Agent"), "claude-cli/") {
+		return true
+	}
+	// Proxies may rewrite User-Agent; Claude Code's metadata.user_id survives.
+	userID := gjson.GetBytes(body["metadata"], "user_id").String()
+	return gjson.Get(userID, "session_id").String() != "" ||
+		(strings.HasPrefix(userID, "user_") && strings.Contains(userID, "_account_") && strings.Contains(userID, "_session_"))
+}
+
+// stripCacheBreakpoints removes prompt-cache breakpoints from content blocks,
+// including blocks nested in tool_result content, so that only the selected
+// profile's cache policy reaches upstream.
+func stripCacheBreakpoints(blocks []cliObject) {
+	for _, block := range blocks {
+		delete(block, "cache_control")
+		if common.GetJsonType(block["content"]) != "array" {
+			continue
+		}
+		var nested []cliObject
+		if err := common.Unmarshal(block["content"], &nested); err != nil {
+			continue
+		}
+		stripCacheBreakpoints(nested)
+		block["content"] = cliField(nested)
+	}
+}
+
+// claudePromptBreakpoints appends every cache_control Anthropic reads as a
+// breakpoint in a system, tools or messages array: on its blocks, including
+// content nested in tool results. Tool schemas and tool_use inputs are caller
+// data, so a property named cache_control there is not a breakpoint.
+func claudePromptBreakpoints(blocks gjson.Result, found []gjson.Result) []gjson.Result {
+	for _, block := range blocks.Array() {
+		if !block.IsObject() {
+			continue
+		}
+		if breakpoint := block.Get("cache_control"); breakpoint.Exists() {
+			found = append(found, breakpoint)
+		}
+		if content := block.Get("content"); content.IsArray() {
+			found = claudePromptBreakpoints(content, found)
+		}
+	}
+	return found
+}
+
+// claudeBodyHasHourTTL reports whether a final Claude body carries a 1h
+// breakpoint, top-level or on a block, and so needs the extended-cache-ttl beta.
+func claudeBodyHasHourTTL(data []byte) bool {
+	final := gjson.ParseBytes(data)
+	if final.Get("cache_control.ttl").String() == "1h" {
+		return true
+	}
+	for _, field := range []string{"system", "tools", "messages"} {
+		for _, breakpoint := range claudePromptBreakpoints(final.Get(field), nil) {
+			if breakpoint.Get("ttl").String() == "1h" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func shapeClaudeCodeBody(body cliObject, identity cliIdentity, nativeCLI bool, callerMaxTokens bool, callerEffort string, versions ...*service.CLIVersionProfile) error {
 	var version *service.CLIVersionProfile
 	if len(versions) > 0 {
 		version = versions[0]
@@ -290,20 +396,44 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity, versions ...*serv
 	if err != nil {
 		return err
 	}
-	// Preserve existing cache policy. Only add breakpoints when none were sent,
-	// so the four-breakpoint provider limit and explicit TTLs stay intact.
+	// The real Claude Code client already sends the profile's cache layout:
+	// keep its breakpoints and only add ours when it sent none. Every other
+	// sender's cache_control (converted from another format, or another SDK's
+	// own TTLs and positions) is replaced by the profile's placement below.
 	hasCache := false
-	for _, key := range []string{"system", "tools", "messages", "cache_control"} {
-		if bytes.Contains(body[key], []byte(`"cache_control"`)) || (key == "cache_control" && len(body[key]) > 0) {
-			hasCache = true
+	if nativeCLI {
+		for _, key := range []string{"system", "tools", "messages", "cache_control"} {
+			if key == "cache_control" {
+				hasCache = hasCache || len(body[key]) > 0
+			} else if version != nil {
+				hasCache = hasCache || len(claudePromptBreakpoints(gjson.ParseBytes(body[key]), nil)) > 0
+			} else {
+				hasCache = hasCache || bytes.Contains(body[key], []byte(`"cache_control"`))
+			}
 		}
+	} else {
+		delete(body, "cache_control")
+		stripCacheBreakpoints(system)
 	}
+	// The profile client's leading billing block is never cached; breakpoints
+	// are placed over the caller's own blocks, then the captured one leads.
+	billing := version != nil && !nativeCLI && version.BillingHeader != ""
+	if billing && len(system) > 0 && gjson.ParseBytes(system[0]["type"]).String() == "text" &&
+		strings.HasPrefix(gjson.ParseBytes(system[0]["text"]).String(), "x-anthropic-billing-header:") {
+		system = system[1:]
+	}
+	// Breakpoints we place carry the profile's TTL mode; its headers carry the
+	// matching beta flag (see prepareCLIRequest).
+	cacheControl := version.CacheControl()
 	if !hasCache {
 		for i := len(system) - 1; i >= 0 && i >= len(system)-2; i-- {
 			if gjson.ParseBytes(system[i]["type"]).String() == "text" {
-				system[i]["cache_control"] = json.RawMessage(`{"type":"ephemeral"}`)
+				system[i]["cache_control"] = cacheControl
 			}
 		}
+	}
+	if billing {
+		system = append([]cliObject{{"type": cliField("text"), "text": cliField(version.BillingHeader)}}, system...)
 	}
 	if len(system) > 0 {
 		body["system"] = cliField(system)
@@ -320,11 +450,14 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity, versions ...*serv
 		if err != nil {
 			return err
 		}
+		if !nativeCLI {
+			stripCacheBreakpoints(blocks)
+		}
 		if !hasCache && i == len(messages)-1 && len(blocks) > 0 {
 			last := blocks[len(blocks)-1]
 			switch gjson.ParseBytes(last["type"]).String() {
 			case "text", "image", "document", "tool_result", "tool_use":
-				last["cache_control"] = json.RawMessage(`{"type":"ephemeral"}`)
+				last["cache_control"] = cacheControl
 			}
 		}
 		if blocks != nil {
@@ -340,6 +473,9 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity, versions ...*serv
 		for _, tool := range tools {
 			if tool == nil {
 				return fmt.Errorf("Claude CLI tools must be objects")
+			}
+			if !nativeCLI {
+				delete(tool, "cache_control")
 			}
 			// The sample's deferred placeholder has only type/properties. It is
 			// not a regular executable tool schema: preserve that minimal shape.
@@ -387,6 +523,46 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity, versions ...*serv
 		body["max_tokens"] = json.RawMessage(`128000`)
 		if version != nil {
 			body["max_tokens"] = cliField(version.MaxTokens)
+		}
+	}
+	// Under a versioned profile a non-native request carries the captured
+	// client's thinking, effort and output limit, but only for the model it
+	// was captured with: the capture says nothing about other models' limits.
+	// A caller's own output limit and effort are kept (caller intent).
+	if version != nil && !nativeCLI && version.CapturedModel != "" &&
+		strings.HasPrefix(gjson.ParseBytes(body["model"]).String(), version.CapturedModel) {
+		if !callerMaxTokens && version.MaxTokens > 0 {
+			body["max_tokens"] = cliField(version.MaxTokens)
+		}
+		// Anthropic rejects thinking with a forced tool choice or changed
+		// sampling; the captured client sends neither.
+		toolChoice := gjson.GetBytes(body["tool_choice"], "type").String()
+		if len(version.Thinking) > 0 && toolChoice != "any" && toolChoice != "tool" {
+			body["thinking"] = version.Thinking
+			delete(body, "temperature")
+			delete(body, "top_p")
+			delete(body, "top_k")
+		}
+		if len(version.OutputConfig) > 0 {
+			// Output settings are caller intent (effort, format): the captured
+			// values only fill keys the caller did not set.
+			var outputConfig, captured cliObject
+			_ = common.Unmarshal(body["output_config"], &outputConfig)
+			if err := common.Unmarshal(version.OutputConfig, &captured); err != nil {
+				return fmt.Errorf("CLI version profile output_config must be an object")
+			}
+			if outputConfig == nil {
+				outputConfig = cliObject{}
+			}
+			if _, ok := outputConfig["effort"]; !ok && callerEffort != "" {
+				outputConfig["effort"] = cliField(callerEffort)
+			}
+			for key, value := range captured {
+				if _, ok := outputConfig[key]; !ok {
+					outputConfig[key] = value
+				}
+			}
+			body["output_config"] = cliField(outputConfig)
 		}
 	}
 	// Adaptive thinking is model-dependent. Do not impose an Opus 5.5-only
@@ -458,10 +634,19 @@ func shapeCodexBody(body cliObject, identity cliIdentity, versions ...*service.C
 		// Keep the empty field for Codex backends that require its presence.
 		body["instructions"] = cliField("")
 	}
+	// A versioned client that carries instructions as a developer message has
+	// no instructions key at all; neither the empty field above nor the Codex
+	// adaptor's default may add one its capture does not have.
+	if version != nil && toolsInInput && !slices.Contains(version.BodyOrder[""], "instructions") &&
+		common.GetJsonType(body["instructions"]) == "string" && gjson.ParseBytes(body["instructions"]).String() == "" {
+		delete(body, "instructions")
+	}
 	for i, item := range input {
 		if item == nil {
 			return fmt.Errorf("Codex CLI input items must be objects")
 		}
+		// Codex has no cache breakpoints; its cache identity is prompt_cache_key.
+		delete(item, "cache_control")
 		role := gjson.ParseBytes(item["role"]).String()
 		kind := gjson.ParseBytes(item["type"]).String()
 		if kind == "additional_tools" {
@@ -473,6 +658,13 @@ func shapeCodexBody(body cliObject, identity cliIdentity, versions ...*service.C
 				return err
 			}
 			item["tools"] = cliField(tools)
+		}
+		if common.GetJsonType(item["output"]) == "array" {
+			var output []cliObject
+			if err := common.Unmarshal(item["output"], &output); err == nil {
+				stripCacheBreakpoints(output)
+				item["output"] = cliField(output)
+			}
 		}
 		if kind != "" && kind != "message" {
 			continue // Keep tool calls/results, reasoning, and tool snapshot positions.
@@ -491,6 +683,7 @@ func shapeCodexBody(body cliObject, identity cliIdentity, versions ...*service.C
 		if err != nil {
 			return err
 		}
+		stripCacheBreakpoints(blocks)
 		if blocks != nil {
 			item["content"] = cliField(blocks)
 		}
@@ -547,7 +740,12 @@ func shapeCodexBody(body cliObject, identity cliIdentity, versions ...*service.C
 	}
 	// service_tier=priority is a paid routing choice, not a structural default.
 	// Keep explicit tier, max_output_tokens, and reasoning settings unchanged.
+	// Cache policy belongs to the profile: Codex sends only the session's
+	// prompt_cache_key, never a caller's retention, options or breakpoints.
 	body["prompt_cache_key"] = cliField(identity.session)
+	delete(body, "prompt_cache_retention")
+	delete(body, "prompt_cache_options")
+	delete(body, "cache_control")
 	// Preserve the capture's field set and JSON scalar types, including the
 	// nested JSON string. These are client metadata, not gateway permissions.
 	// Identifiers and the turn timestamp always come from this isolated request.
@@ -641,6 +839,8 @@ func shapeCodexTools(tools []cliObject) error {
 				tool["strict"] = json.RawMessage(`false`)
 			}
 		}
+		// After flattening, so a Chat-style wrapper cannot carry one through.
+		delete(tool, "cache_control")
 	}
 	return nil
 }

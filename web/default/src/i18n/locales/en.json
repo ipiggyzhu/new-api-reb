@@ -2298,6 +2298,8 @@
     "History of MjProxy-style image tasks.": "History of MjProxy-style image tasks.",
     "Hit criteria: If cached tokens exist in usage, it counts as a hit.": "Hit criteria: If cached tokens exist in usage, it counts as a hit.",
     "Hit Rate": "Hit Rate",
+    "Cached Token Rate": "Cached Token Rate",
+    "Cached token rate: cache-read tokens divided by all input tokens, including cache writes. It is comparable to provider consoles; the hit rate counts requests, so each cold or short request is a full miss.": "Cached token rate: cache-read tokens divided by all input tokens, including cache writes. It is comparable to provider consoles; the hit rate counts requests, so each cold or short request is a full miss.",
     "Hit tier": "Hit tier",
     "Home": "Home",
     "Home Page Content": "Home Page Content",

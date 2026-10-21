@@ -69,6 +69,53 @@ func shiftByTiers(tiers []int64, priority int64, offset int) int64 {
 	return tiers[target]
 }
 
+// TierPosition is the inverse of shiftByTiers: the rank priority occupies on
+// tiers (sorted descending, as built from the baseline candidates), where 0 is the
+// top tier. A priority promoted past the top yields a negative rank and one demoted
+// past the bottom yields a rank beyond the last index, so for every result of
+// shiftByTiers TierPosition(tiers, shiftByTiers(tiers, p, offset)) is p's rank
+// minus offset (until the int64 saturation in addClamped stops the movement).
+//
+// A difference of two ranks is therefore the number of tiers the selector walks
+// between two candidates, whatever magnitudes the admin chose for the priorities.
+// Affinity revalidation needs exactly that distance to apply a margin; the raw
+// priorities cannot provide it, since one tier can be 1 apart or 1000.
+//
+// A priority strictly between two tiers (never produced by shiftByTiers) ranks
+// with the tier below it.
+func TierPosition(tiers []int64, priority int64) int {
+	if len(tiers) == 0 {
+		return 0
+	}
+	if priority > tiers[0] {
+		return -tierDistance(priority, tiers[0])
+	}
+	last := len(tiers) - 1
+	if priority < tiers[last] {
+		return last + tierDistance(tiers[last], priority)
+	}
+	for i, tier := range tiers {
+		if priority >= tier {
+			return i
+		}
+	}
+	return last
+}
+
+// tierDistance is how many single-tier steps past the end of the ladder separate
+// higher from lower (higher > lower). shiftByTiers extends the ladder in steps of
+// exactly one priority unit, so the gap is the step count; it is computed in uint64
+// because the two ends of an int64 range are further apart than int64 can hold, and
+// it saturates because no real offset is anywhere near that far.
+func tierDistance(higher int64, lower int64) int {
+	const maxDistance = math.MaxInt32
+	gap := uint64(higher) - uint64(lower)
+	if gap > maxDistance {
+		return maxDistance
+	}
+	return int(gap)
+}
+
 // addClamped returns base+delta, saturating at the int64 bounds instead of
 // wrapping.
 //

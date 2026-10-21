@@ -88,12 +88,34 @@ func TestCLIVersionProfilesAreFamilyBoundAndOptIn(t *testing.T) {
 		require.NoError(t, err)
 		assert.Nil(t, p)
 	}
-	assert.Equal(t, map[string]int{"claude": 5, "codex": 5}, counts)
+	assert.Equal(t, map[string]int{"claude": 7, "codex": 6}, counts)
 	p, err := ResolveCLIVersionProfile("", "codex", "chrome", true)
 	require.NoError(t, err)
 	assert.Nil(t, p, "legacy configuration remains unchanged")
 	_, err = ResolveCLIVersionProfile("codex-made-up", "codex", "", false)
 	require.Error(t, err)
+}
+
+// A profile is one client build in one cache mode: the breakpoint TTL and the
+// beta flag that enables it were captured together and must not drift apart.
+func TestCLIVersionProfileCacheTTLMatchesCapturedBetaSet(t *testing.T) {
+	const extendedTTLBeta = "extended-cache-ttl-2025-04-11"
+	for _, p := range cliVersionProfiles {
+		t.Run(p.ID, func(t *testing.T) {
+			betas := strings.Split(p.Headers["anthropic-beta"], ",")
+			if p.CacheTTL == "1h" {
+				assert.Contains(t, betas, extendedTTLBeta)
+				assert.JSONEq(t, `{"type":"ephemeral","ttl":"1h"}`, string(p.CacheControl()))
+				assert.Equal(t, []string{"type", "ttl"}, p.BodyOrder["cache_control"])
+				return
+			}
+			assert.Empty(t, p.CacheTTL)
+			assert.NotContains(t, betas, extendedTTLBeta)
+			assert.JSONEq(t, `{"type":"ephemeral"}`, string(p.CacheControl()))
+		})
+	}
+	var unversioned *CLIVersionProfile
+	assert.JSONEq(t, `{"type":"ephemeral"}`, string(unversioned.CacheControl()))
 }
 
 func TestCLIVersionProfilesActualTLSAndHTTPWire(t *testing.T) {

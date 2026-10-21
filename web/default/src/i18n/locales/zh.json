@@ -2298,6 +2298,8 @@
     "History of MjProxy-style image tasks.": "MjProxy 风格图像任务历史。",
     "Hit criteria: If cached tokens exist in usage, it counts as a hit.": "命中判定：usage 中存在 cached tokens 即视为命中。",
     "Hit Rate": "命中率",
+    "Cached Token Rate": "缓存 Token 占比",
+    "Cached token rate: cache-read tokens divided by all input tokens, including cache writes. It is comparable to provider consoles; the hit rate counts requests, so each cold or short request is a full miss.": "缓存 Token 占比：缓存读取 token 除以全部输入 token（含缓存写入），可与上游控制台的缓存命中率对照；命中率按请求计数，每个冷启动或短请求都算一次完全未命中。",
     "Hit tier": "命中档位",
     "Home": "主页",
     "Home Page Content": "首页内容",

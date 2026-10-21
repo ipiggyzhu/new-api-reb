@@ -2298,6 +2298,8 @@
     "History of MjProxy-style image tasks.": "Historique des tâches d'images style MjProxy.",
     "Hit criteria: If cached tokens exist in usage, it counts as a hit.": "Critère de hit : si des tokens en cache existent dans l'utilisation, cela compte comme un hit.",
     "Hit Rate": "Taux de succès",
+    "Cached Token Rate": "Taux de jetons en cache",
+    "Cached token rate: cache-read tokens divided by all input tokens, including cache writes. It is comparable to provider consoles; the hit rate counts requests, so each cold or short request is a full miss.": "Taux de jetons en cache : jetons lus depuis le cache divisés par l’ensemble des jetons d’entrée, écritures en cache comprises. Il est comparable aux consoles des fournisseurs ; le taux de succès compte les requêtes, donc chaque requête à froid ou courte est un échec complet.",
     "Hit tier": "Palier atteint",
     "Home": "Accueil",
     "Home Page Content": "Contenu de la page d'accueil",

@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/service/relayconvert"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 
@@ -344,6 +345,22 @@ func usageSemanticFromUsage(relayInfo *relaycommon.RelayInfo, usage *dto.Usage) 
 	return "openai"
 }
 
+// observeTextUsageCacheStats records the channel affinity cache stats of a text
+// request in one token shape for every upstream: prompt tokens are all input
+// tokens the upstream processed, cached tokens are the cache reads among them.
+// Anthropic reports input_tokens as only the uncached remainder, so Claude
+// semantic usage is widened with cache reads and writes first. Choosing the
+// shape by the usage semantic rather than the client relay format keeps the
+// cached token rate right when a Claude client is served by an OpenAI-style
+// channel or an OpenAI client by a Claude channel.
+func observeTextUsageCacheStats(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage) {
+	statsUsage := usage
+	if usageSemanticFromUsage(relayInfo, usage) == "anthropic" || isLegacyClaudeDerivedOpenAIUsage(relayInfo, usage) {
+		statsUsage = relayconvert.UsageFromClaudeUsage(usage)
+	}
+	ObserveChannelAffinityUsageCacheFromContext(ctx, statsUsage, cacheTokenRateModeCachedOverPrompt)
+}
+
 func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []string) {
 	originUsage := usage
 	billingUsage := effectiveBillingUsage(usage)
@@ -351,7 +368,7 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		extraContent = append(extraContent, "上游无计费信息")
 	}
 	if originUsage != nil {
-		ObserveChannelAffinityUsageCacheByRelayFormat(ctx, billingUsage, relayInfo.GetFinalRequestRelayFormat())
+		observeTextUsageCacheStats(ctx, relayInfo, billingUsage)
 	}
 
 	adminRejectReason := common.GetContextKeyString(ctx, constant.ContextKeyAdminRejectReason)

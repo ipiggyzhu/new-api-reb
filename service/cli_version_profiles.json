@@ -800,6 +800,318 @@
     }
   },
   {
+    "id": "claude-2.1.306-linux-x64",
+    "family": "claude",
+    "version": "2.1.306",
+    "label": "Claude Code 2.1.306 / Linux x64 / Node v26.3.0 / 5m prompt cache",
+    "ja3_md5": "1523504b38f0fae0d881d4b6554aac1b",
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json",
+      "user-agent": "claude-cli/2.1.306 (external, sdk-cli)",
+      "x-stainless-arch": "x64",
+      "x-stainless-lang": "js",
+      "x-stainless-os": "Linux",
+      "x-stainless-package-version": "0.128.0",
+      "x-stainless-retry-count": "0",
+      "x-stainless-runtime": "node",
+      "x-stainless-runtime-version": "v26.3.0",
+      "x-stainless-timeout": "600",
+      "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,inline-tools-2026-09-15,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "anthropic-version": "2023-06-01",
+      "x-app": "cli",
+      "connection": "keep-alive",
+      "accept-encoding": "gzip, deflate, br, zstd"
+    },
+    "header_order": [
+      "Accept",
+      "Content-Type",
+      "User-Agent",
+      "X-Claude-Code-Session-Id",
+      "X-Stainless-Arch",
+      "X-Stainless-Lang",
+      "X-Stainless-OS",
+      "X-Stainless-Package-Version",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "X-Stainless-Timeout",
+      "anthropic-beta",
+      "anthropic-dangerous-direct-browser-access",
+      "anthropic-version",
+      "x-api-key",
+      "x-app",
+      "Connection",
+      "Host",
+      "Accept-Encoding",
+      "Content-Length"
+    ],
+    "client_hello_hex": "16030105d7010005d3030300000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000000022130113021303c02bc02fc02cc030cca9cca8c009c013c00ac014009c009d002f0035010005680000000e000c0000096c6f63616c686f737400170000ff01000100000a000a000811ec001d00170018000b00020100002300000010000b000908687474702f312e31000500050100000000000d001800160403080404010503080505010806060108070603020100120000003304ea04e811ec04c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001d00200000000000000000000000000000000000000000000000000000000000000000002d00020101002b00050403040303",
+    "body_order": {
+      "": [
+        "model",
+        "messages",
+        "system",
+        "tools",
+        "metadata",
+        "max_tokens",
+        "thinking",
+        "context_management",
+        "output_config",
+        "stream"
+      ],
+      "messages": [
+        "role",
+        "content",
+        "output_config"
+      ],
+      "content#text": [
+        "type",
+        "text",
+        "cache_control"
+      ],
+      "cache_control": [
+        "type"
+      ],
+      "output_config": [
+        "effort"
+      ],
+      "system#text": [
+        "type",
+        "text",
+        "cache_control"
+      ],
+      "tools": [
+        "name",
+        "description",
+        "input_schema",
+        "defer_loading"
+      ],
+      "input_schema": [
+        "$schema",
+        "type",
+        "properties",
+        "required",
+        "additionalProperties"
+      ],
+      "metadata": [
+        "user_id"
+      ],
+      "user_id": [
+        "device_id",
+        "account_uuid",
+        "session_id"
+      ],
+      "thinking": [
+        "type",
+        "display"
+      ],
+      "context_management": [
+        "edits"
+      ],
+      "edits#clear_thinking_20251015": [
+        "type",
+        "keep"
+      ]
+    },
+    "tool_order": [
+      "Agent",
+      "Bash",
+      "Edit",
+      "ListAgents",
+      "Read",
+      "ReportFindings",
+      "ScheduleWakeup",
+      "Skill",
+      "ToolSearch",
+      "Workflow",
+      "DeferredToolPlaceholder",
+      "Write"
+    ],
+    "tools_in_input": false,
+    "message_ids": false,
+    "metadata_keys": [],
+    "turn_defaults": {},
+    "max_tokens": 128000,
+    "captured_model": "claude-opus-5-5",
+    "thinking": {
+      "type": "adaptive",
+      "display": "omitted"
+    },
+    "output_config": {
+      "effort": "medium"
+    },
+    "billing_header": "x-anthropic-billing-header: cc_version=2.1.306.813; cc_entrypoint=sdk-cli;",
+    "legacy_user_id": false,
+    "context_management": true,
+    "parallel_tool_calls": false,
+    "text_default": null,
+    "provenance": {
+      "source": "local official CLI installation (Linux x64)",
+      "capture_sha256": "228991ab9ce6ee15fae5d9c77e81afa53a5894bf42568f25674b407d6e331333",
+      "http_capture_sha256": "c59a8412a710d7edb307b027f212a0bc50a928c675a26ddabc81ab28138bb61b",
+      "redaction": "Captured against a local listener (SNI localhost); client random, TLS session ID and public key-share bytes zeroed. Runtime regenerates them; static protocol shape is unchanged."
+    }
+  },
+  {
+    "id": "claude-2.1.306-linux-x64-1h",
+    "family": "claude",
+    "version": "2.1.306",
+    "label": "Claude Code 2.1.306 / Linux x64 / Node v26.3.0 / 1h prompt cache",
+    "ja3_md5": "1523504b38f0fae0d881d4b6554aac1b",
+    "headers": {
+      "accept": "application/json",
+      "content-type": "application/json",
+      "user-agent": "claude-cli/2.1.306 (external, sdk-cli)",
+      "x-stainless-arch": "x64",
+      "x-stainless-lang": "js",
+      "x-stainless-os": "Linux",
+      "x-stainless-package-version": "0.128.0",
+      "x-stainless-retry-count": "0",
+      "x-stainless-runtime": "node",
+      "x-stainless-runtime-version": "v26.3.0",
+      "x-stainless-timeout": "600",
+      "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,inline-tools-2026-09-15,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11",
+      "anthropic-dangerous-direct-browser-access": "true",
+      "anthropic-version": "2023-06-01",
+      "x-app": "cli",
+      "connection": "keep-alive",
+      "accept-encoding": "gzip, deflate, br, zstd"
+    },
+    "header_order": [
+      "Accept",
+      "Content-Type",
+      "User-Agent",
+      "X-Claude-Code-Session-Id",
+      "X-Stainless-Arch",
+      "X-Stainless-Lang",
+      "X-Stainless-OS",
+      "X-Stainless-Package-Version",
+      "X-Stainless-Retry-Count",
+      "X-Stainless-Runtime",
+      "X-Stainless-Runtime-Version",
+      "X-Stainless-Timeout",
+      "anthropic-beta",
+      "anthropic-dangerous-direct-browser-access",
+      "anthropic-version",
+      "x-api-key",
+      "x-app",
+      "Connection",
+      "Host",
+      "Accept-Encoding",
+      "Content-Length"
+    ],
+    "client_hello_hex": "16030105d7010005d3030300000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000000022130113021303c02bc02fc02cc030cca9cca8c009c013c00ac014009c009d002f0035010005680000000e000c0000096c6f63616c686f737400170000ff01000100000a000a000811ec001d00170018000b00020100002300000010000b000908687474702f312e31000500050100000000000d001800160403080404010503080505010806060108070603020100120000003304ea04e811ec04c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001d00200000000000000000000000000000000000000000000000000000000000000000002d00020101002b00050403040303",
+    "body_order": {
+      "": [
+        "model",
+        "messages",
+        "system",
+        "tools",
+        "metadata",
+        "max_tokens",
+        "thinking",
+        "context_management",
+        "output_config",
+        "stream"
+      ],
+      "messages": [
+        "role",
+        "content",
+        "output_config"
+      ],
+      "content#text": [
+        "type",
+        "text",
+        "cache_control"
+      ],
+      "cache_control": [
+        "type",
+        "ttl"
+      ],
+      "output_config": [
+        "effort"
+      ],
+      "system#text": [
+        "type",
+        "text",
+        "cache_control"
+      ],
+      "tools": [
+        "name",
+        "description",
+        "input_schema",
+        "defer_loading"
+      ],
+      "input_schema": [
+        "$schema",
+        "type",
+        "properties",
+        "required",
+        "additionalProperties"
+      ],
+      "metadata": [
+        "user_id"
+      ],
+      "user_id": [
+        "device_id",
+        "account_uuid",
+        "session_id"
+      ],
+      "thinking": [
+        "type",
+        "display"
+      ],
+      "context_management": [
+        "edits"
+      ],
+      "edits#clear_thinking_20251015": [
+        "type",
+        "keep"
+      ]
+    },
+    "tool_order": [
+      "Agent",
+      "Bash",
+      "Edit",
+      "ListAgents",
+      "Read",
+      "ReportFindings",
+      "ScheduleWakeup",
+      "Skill",
+      "ToolSearch",
+      "Workflow",
+      "DeferredToolPlaceholder",
+      "Write"
+    ],
+    "tools_in_input": false,
+    "message_ids": false,
+    "metadata_keys": [],
+    "turn_defaults": {},
+    "max_tokens": 128000,
+    "captured_model": "claude-opus-5-5",
+    "thinking": {
+      "type": "adaptive",
+      "display": "omitted"
+    },
+    "output_config": {
+      "effort": "medium"
+    },
+    "billing_header": "x-anthropic-billing-header: cc_version=2.1.306.813; cc_entrypoint=sdk-cli;",
+    "legacy_user_id": false,
+    "context_management": true,
+    "parallel_tool_calls": false,
+    "text_default": null,
+    "cache_ttl": "1h",
+    "provenance": {
+      "source": "local official CLI installation (Linux x64)",
+      "capture_sha256": "a8a1ed4f7508449c3076b69cd0dfda63b46161ff466f59cdf8ef89e2358b20ea",
+      "http_capture_sha256": "b7942c6f0b88506f8ce9853b90c0f3e66d4d4519dcc8c0ca8dd9a1fb1eeb2984",
+      "redaction": "Captured against a local listener (SNI localhost); client random, TLS session ID and public key-share bytes zeroed. Runtime regenerates them; static protocol shape is unchanged."
+    }
+  },
+  {
     "id": "codex-0.134.0-windows-x64",
     "family": "codex",
     "version": "0.134.0",
@@ -905,6 +1217,7 @@
     "context_management": false,
     "parallel_tool_calls": false,
     "text_default": null,
+    "request_id_is_session": true,
     "provenance": {
       "family": "codex",
       "version": "0.134.0",
@@ -1540,6 +1853,168 @@
       "source": "local official CLI installation",
       "capture_sha256": "4176da7814e08c506e3e22c7728ff92872eb94af22b9336ed4cee0bde82203ec",
       "redaction": "Destination SNI replaced with localhost; captured random, TLS session ID and public key-share bytes zeroed. Runtime regenerates them; static protocol shape is unchanged."
+    }
+  },
+  {
+    "id": "codex-0.163.0-linux-x64",
+    "family": "codex",
+    "version": "0.163.0",
+    "label": "Codex exec 0.163.0 / Linux x64 (Debian 13)",
+    "ja3_md5": "0b85eb0d4981e69064e40753e4f0ac5f",
+    "headers": {
+      "x-codex-beta-features": "remote_compaction_v2",
+      "x-openai-internal-codex-responses-lite": "true",
+      "accept": "text/event-stream",
+      "content-type": "application/json",
+      "originator": "codex_exec",
+      "user-agent": "codex_exec/0.163.0 (Debian 13.0.0; x86_64) unknown (codex_exec; 0.163.0)"
+    },
+    "header_order": [
+      "x-codex-beta-features",
+      "x-codex-window-id",
+      "x-codex-turn-metadata",
+      "x-openai-internal-codex-responses-lite",
+      "x-client-request-id",
+      "session-id",
+      "thread-id",
+      "accept",
+      "content-type",
+      "authorization",
+      "originator",
+      "user-agent",
+      "host",
+      "content-length"
+    ],
+    "client_hello_hex": "16030105ff010005fb03030000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000003c130213031301c02cc030009fcca9cca8ccaac02bc02f009ec024c028006bc023c0270067c00ac0140039c009c0130033009d009c003d003c0035002f01000576ff010001000000000e000c0000096c6f63616c686f7374000b00020100000a0012001011ec001d0017001e0018001901000101002300000016000000170000000d0036003409050906090404030503060308070808081a081b081c0809080a080b080408050806040105010601030303010302040205020602002b00050403040303002d00020101003304ea04e811ec04c000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001d00200000000000000000000000000000000000000000000000000000000000000000",
+    "body_order": {
+      "": [
+        "model",
+        "stream",
+        "input",
+        "tool_choice",
+        "parallel_tool_calls",
+        "reasoning",
+        "store",
+        "include",
+        "prompt_cache_key",
+        "text",
+        "client_metadata"
+      ],
+      "input#additional_tools": [
+        "type",
+        "id",
+        "role",
+        "tools"
+      ],
+      "tools#namespace": [
+        "type",
+        "name",
+        "description",
+        "tools"
+      ],
+      "tools#custom": [
+        "type",
+        "name",
+        "description",
+        "format"
+      ],
+      "tools#function": [
+        "type",
+        "name",
+        "description",
+        "strict",
+        "parameters"
+      ],
+      "input#message": [
+        "type",
+        "id",
+        "role",
+        "content"
+      ],
+      "content#input_text": [
+        "type",
+        "text"
+      ],
+      "reasoning": [
+        "effort",
+        "context"
+      ],
+      "text": [
+        "verbosity"
+      ],
+      "client_metadata": [
+        "x-codex-installation-id",
+        "thread_id",
+        "session_id",
+        "x-codex-window-id",
+        "root_turn_id",
+        "turn_id",
+        "x-codex-turn-metadata"
+      ],
+      "turn_metadata": [
+        "installation_id",
+        "session_id",
+        "thread_id",
+        "agent_name",
+        "turn_id",
+        "window_id",
+        "window_number",
+        "context_window_id",
+        "request_kind",
+        "history_initialization",
+        "root_turn_id",
+        "thread_source",
+        "turn_trigger",
+        "sandbox",
+        "sandbox_mode",
+        "auto_review_enabled",
+        "node_repl_auto_review_required",
+        "node_repl_disabled",
+        "turn_started_at_unix_ms",
+        "analytics_enabled",
+        "model",
+        "reasoning_effort"
+      ]
+    },
+    "tool_order": [],
+    "tools_in_input": true,
+    "message_ids": true,
+    "metadata_keys": [
+      "x-codex-installation-id",
+      "thread_id",
+      "session_id",
+      "x-codex-window-id",
+      "root_turn_id",
+      "turn_id",
+      "x-codex-turn-metadata"
+    ],
+    "turn_defaults": {
+      "agent_name": "/root",
+      "window_number": 0,
+      "request_kind": "turn",
+      "history_initialization": "new",
+      "thread_source": "user",
+      "turn_trigger": "exec",
+      "sandbox": "none",
+      "sandbox_mode": "danger-full-access",
+      "auto_review_enabled": false,
+      "node_repl_auto_review_required": true,
+      "node_repl_disabled": false,
+      "analytics_enabled": true
+    },
+    "max_tokens": 0,
+    "legacy_user_id": false,
+    "context_management": false,
+    "parallel_tool_calls": false,
+    "text_default": {
+      "verbosity": "low"
+    },
+    "request_id_is_session": true,
+    "provenance": {
+      "source": "local official CLI installation (Linux x64)",
+      "capture_sha256": "9cbfecdc858b69b47045607738f2b4696659c33e20a3320f851d9b9ba8123bc8",
+      "http_capture_sha256": "a4fb0a53ba56104796b9164f84f7141fb3f80c11cf636327db5a7fc46db2686e",
+      "redaction": "Captured against a local listener (SNI localhost); client random, TLS session ID and public key-share bytes zeroed. Runtime regenerates them; static protocol shape is unchanged."
     }
   }
 ]

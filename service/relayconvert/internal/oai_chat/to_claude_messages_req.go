@@ -281,8 +281,9 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 				for _, ctx := range message.ParseContent() {
 					if ctx.Type == "text" && ctx.Text != "" {
 						systemMessages = append(systemMessages, dto.ClaudeMediaMessage{
-							Type: "text",
-							Text: common.GetPointer[string](ctx.Text),
+							Type:         "text",
+							Text:         common.GetPointer[string](ctx.Text),
+							CacheControl: ctx.CacheControl,
 						})
 					}
 				}
@@ -350,8 +351,9 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 				case "text":
 					if mediaMessage.Text != "" {
 						claudeMediaMessages = append(claudeMediaMessages, dto.ClaudeMediaMessage{
-							Type: "text",
-							Text: common.GetPointer[string](mediaMessage.Text),
+							Type:         "text",
+							Text:         common.GetPointer[string](mediaMessage.Text),
+							CacheControl: mediaMessage.CacheControl,
 						})
 					}
 				default:
@@ -367,6 +369,7 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 						Source: &dto.ClaudeMessageSource{
 							Type: "base64",
 						},
+						CacheControl: mediaMessage.CacheControl,
 					}
 					if strings.HasPrefix(mimeType, "application/pdf") {
 						claudeMediaMessage.Type = "document"
@@ -402,6 +405,7 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 		claudeMessages = append(claudeMessages, claudeMessage)
 	}
 
+	limitClaudeCacheBreakpoints(systemMessages, claudeMessages)
 	if len(systemMessages) > 0 {
 		claudeRequest.System = systemMessages
 	}
@@ -409,4 +413,52 @@ func OpenAIChatRequestToClaudeMessages(c *gin.Context, textRequest dto.GeneralOp
 	claudeRequest.Prompt = ""
 	claudeRequest.Messages = claudeMessages
 	return &claudeRequest, nil
+}
+
+// Anthropic rejects a request with more than four cache_control breakpoints.
+const maxClaudeCacheBreakpoints = 4
+
+type claudeCacheBreakpoint struct {
+	block *dto.ClaudeMediaMessage // a converted system or message block
+	part  map[string]any          // a client part nested in tool_result content
+}
+
+// limitClaudeCacheBreakpoints keeps the client's cache_control from producing
+// a request Anthropic rejects. Over the limit, the latest breakpoints in
+// prompt order are kept: they cover the longest prefix, so later turns can
+// still read the cache the earlier ones wrote.
+func limitClaudeCacheBreakpoints(system []dto.ClaudeMediaMessage, messages []dto.ClaudeMessage) {
+	var breakpoints []claudeCacheBreakpoint
+	for i := range system {
+		if len(system[i].CacheControl) > 0 {
+			breakpoints = append(breakpoints, claudeCacheBreakpoint{block: &system[i]})
+		}
+	}
+	for _, message := range messages {
+		blocks, ok := message.Content.([]dto.ClaudeMediaMessage)
+		if !ok {
+			continue
+		}
+		for i := range blocks {
+			// tool_result content is the OpenAI client's own part list.
+			if parts, ok := blocks[i].Content.([]any); ok {
+				for _, part := range parts {
+					if part, ok := part.(map[string]any); ok && part["cache_control"] != nil {
+						breakpoints = append(breakpoints, claudeCacheBreakpoint{part: part})
+					}
+				}
+			}
+			if len(blocks[i].CacheControl) > 0 {
+				breakpoints = append(breakpoints, claudeCacheBreakpoint{block: &blocks[i]})
+			}
+		}
+	}
+	for len(breakpoints) > maxClaudeCacheBreakpoints {
+		if breakpoints[0].block != nil {
+			breakpoints[0].block.CacheControl = nil
+		} else {
+			delete(breakpoints[0].part, "cache_control")
+		}
+		breakpoints = breakpoints[1:]
+	}
 }

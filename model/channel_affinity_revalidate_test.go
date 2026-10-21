@@ -163,65 +163,97 @@ func TestValidateChannelAffinityPinIgnoresDynamicScores(t *testing.T) {
 		"a promotion alone must not break the pin")
 }
 
-// TestValidateChannelAffinityPinKeepsPinBelowADemotedChannel is the reported
-// "affinity and dynamic priority fight" case. A top-priority channel that scoring
-// had demoted for failing used to outrank every pin below it, so the pin on the
-// channel actually answering was dropped on every request and selection kept
-// walking back into the failing channel.
-func TestValidateChannelAffinityPinKeepsPinBelowADemotedChannel(t *testing.T) {
+// TestValidateChannelAffinityPinAppliesAHysteresisMargin covers the "affinity and
+// dynamic priority fight" reports. A top-priority channel that scoring had
+// demoted for failing used to outrank every pin below it; and once it earned the
+// demotion back it outranked them again, so every failover pin was torn off its
+// warm upstream the moment the failed channel recovered, with no failure on the
+// pinned channel at all. With scoring on, another channel must now lead the pin's
+// scored position by affinityPinOutrankMarginTiers tiers.
+func TestValidateChannelAffinityPinAppliesAHysteresisMargin(t *testing.T) {
 	const (
 		group     = "default"
 		modelName = "gpt-test"
 		higher    = 30
 		pinned    = 21
 	)
+	threeTiers := func() []*Channel {
+		return []*Channel{channelWithPriority(higher, 10), channelWithPriority(pinned, 7), channelWithPriority(5, 0)}
+	}
+	sharedTop := func() []*Channel {
+		return []*Channel{channelWithPriority(higher, 7), channelWithPriority(pinned, 7), channelWithPriority(5, 0)}
+	}
+	// Channels 141 and 142 are saturated fillers: they shape the ladder without
+	// being eligible to displace the pin themselves.
+	wideLadder := func() []*Channel {
+		return []*Channel{channelWithPriority(higher, 50), channelWithConcurrency(141, 40, 1), channelWithConcurrency(142, 30, 1), channelWithPriority(pinned, 10)}
+	}
 
 	cases := []struct {
-		name     string
-		channels []*Channel
-		faults   int
-		want     ChannelAffinityPinVerdict
-		explain  string
+		name      string
+		channels  []*Channel
+		saturated []int
+		faults    map[int]int
+		successes map[int]int
+		want      ChannelAffinityPinVerdict
+		explain   string
 	}{
-		{
-			name:     "healthy higher channel outranks the pin",
-			channels: []*Channel{channelWithPriority(higher, 10), channelWithPriority(pinned, 7), channelWithPriority(5, 0)},
-			want:     ChannelAffinityPinOutranked,
-			explain:  "the admin ranked it higher and nothing has demoted it",
-		},
-		{
-			name:     "higher channel demoted into the pin's tier",
-			channels: []*Channel{channelWithPriority(higher, 10), channelWithPriority(pinned, 7), channelWithPriority(5, 0)},
-			faults:   1,
-			want:     ChannelAffinityPinValid,
-			explain:  "selection no longer prefers it, so dropping the pin buys nothing",
-		},
-		{
-			name:     "higher channel demoted below the pin",
-			channels: []*Channel{channelWithPriority(higher, 10), channelWithPriority(pinned, 7), channelWithPriority(5, 0)},
-			faults:   2,
-			want:     ChannelAffinityPinValid,
-			explain:  "a channel ranked below the pin cannot displace it",
-		},
-		{
-			name:     "demotion that stops short of the pin's tier",
-			channels: []*Channel{channelWithPriority(higher, 50), channelWithPriority(40, 30), channelWithPriority(pinned, 10)},
-			faults:   1,
-			want:     ChannelAffinityPinOutranked,
-			explain:  "still above the pin after scoring, so the admin ranking stands",
-		},
+		{name: "healthy channel one tier above keeps the pin", channels: threeTiers(), want: ChannelAffinityPinValid,
+			explain: "a recovered channel one tier up must not pull a failover pin back"},
+		{name: "promotion does not widen the lead", channels: threeTiers(), successes: map[int]int{higher: 5}, want: ChannelAffinityPinValid,
+			explain: "a promotion past the top is not a lead the pin has to yield to"},
+		{name: "healthy channel two tiers above outranks the pin", channels: []*Channel{channelWithPriority(higher, 10), channelWithPriority(25, 8), channelWithPriority(pinned, 7)},
+			want: ChannelAffinityPinOutranked, explain: "a clear configured lead still retires the pin"},
+		{name: "higher channel demoted into the pin's tier", channels: threeTiers(), faults: map[int]int{higher: 1}, want: ChannelAffinityPinValid,
+			explain: "selection no longer prefers it, so dropping the pin buys nothing"},
+		{name: "higher channel demoted below the pin", channels: threeTiers(), faults: map[int]int{higher: 2}, want: ChannelAffinityPinValid,
+			explain: "a channel ranked below the pin cannot displace it"},
+		{name: "demotion that leaves a clear lead", channels: wideLadder(), saturated: []int{141, 142}, faults: map[int]int{higher: 1},
+			want: ChannelAffinityPinOutranked, explain: "still two tiers above the pin after scoring, so the ranking stands"},
+		{name: "demotion that closes the margin", channels: wideLadder(), saturated: []int{141, 142}, faults: map[int]int{higher: 2},
+			want: ChannelAffinityPinValid, explain: "one tier above the pin is inside the band"},
+		{name: "pinned channel demoted under a higher one", channels: threeTiers(), faults: map[int]int{pinned: 1}, want: ChannelAffinityPinOutranked,
+			explain: "the pin's own faults count against it"},
+		{name: "one fault against an equal sibling is noise", channels: sharedTop(), faults: map[int]int{pinned: 1}, want: ChannelAffinityPinValid,
+			explain: "a single sporadic fault is inside the band"},
+		{name: "repeated faults against an equal sibling", channels: sharedTop(), faults: map[int]int{pinned: 2}, want: ChannelAffinityPinOutranked,
+			explain: "a pin that keeps failing yields to the healthy sibling"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			enableScoringForTest(t)
 			useChannelCacheForTest(t, tc.channels, group, modelName)
-			for i := 0; i < tc.faults; i++ {
-				channel_score.Report(higher, group, modelName, channel_score.OutcomeFault)
+			for _, channelId := range tc.saturated {
+				holdChannelSlotsForTest(t, channelId, 1)
+			}
+			for channelId, count := range tc.faults {
+				for i := 0; i < count; i++ {
+					channel_score.Report(channelId, group, modelName, channel_score.OutcomeFault)
+				}
+			}
+			for channelId, count := range tc.successes {
+				for i := 0; i < count; i++ {
+					channel_score.Report(channelId, group, modelName, channel_score.OutcomeSuccess)
+				}
 			}
 			assert.Equal(t, tc.want, ValidateChannelAffinityPin(pinned, group, modelName, ""), tc.explain)
 		})
 	}
+}
+
+// TestValidateChannelAffinityPinStrictWithoutScoring keeps the admin-edit
+// contract for deployments without dynamic scoring: nothing moves between
+// requests there, so a channel configured even one tier above the pin retires it
+// on the next request rather than after the TTL.
+func TestValidateChannelAffinityPinStrictWithoutScoring(t *testing.T) {
+	useChannelCacheForTest(t, []*Channel{
+		channelWithPriority(30, 10),
+		channelWithPriority(21, 7),
+		channelWithPriority(5, 0),
+	}, "default", "gpt-test")
+	assert.Equal(t, ChannelAffinityPinOutranked, ValidateChannelAffinityPin(21, "default", "gpt-test", ""),
+		"with scoring off the configured priority is the whole ranking")
 }
 
 // channelWithConcurrency is channelWithPriority plus a concurrency cap, for the

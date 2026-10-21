@@ -636,10 +636,11 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 			// until the TTL expired (an hour by default), which read as "raising a
 			// channel's priority does nothing".
 			//
-			// Only a channel the admin configured higher can outrank the pin, and
-			// only while dynamic scoring has not demoted it to or below the pin's
-			// tier. Scores never break the pin on their own: they move with ordinary
-			// traffic, and letting them would defeat what the pin is for.
+			// With dynamic scoring on, the pin is retired only when another usable
+			// channel leads its scored position by a clear margin; score movement
+			// inside that band never moves a pin that is answering. A fault on the
+			// pinned channel is handled separately, by RecordChannelAffinity
+			// releasing the pin so the next request follows the failover order.
 			var verdict model.ChannelAffinityPinVerdict
 			if usingGroup == "auto" {
 				// Use the same first eligible concrete group the distributor will
@@ -663,7 +664,7 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 				return 0, false
 			case model.ChannelAffinityPinOutranked:
 				info["cache"] = "stale_outranked"
-				logger.LogDebug(c, "channel affinity dropped, higher priority channel configured: rule=%s, key=%s, channel=%d", meta.RuleName, cacheKeyFull, channelID)
+				logger.LogDebug(c, "channel affinity dropped, another channel clearly outranks it: rule=%s, key=%s, channel=%d", meta.RuleName, cacheKeyFull, channelID)
 				dropChannelAffinityEntry(cacheKeySuffix, channelID)
 				return 0, false
 			}

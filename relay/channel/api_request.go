@@ -456,6 +456,28 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 		return nil, err
 	}
 	applyHeaderOverrideToRequest(req, headerOverride)
+	// The overrides re-apply a versioned Claude profile's captured beta set
+	// (and any admin beta override); what leaves must still agree with the
+	// breakpoints of the body actually sent, native or shaped.
+	if version := service.LookupCLIVersionProfile(info.ChannelSetting.CLIVersionProfile); version != nil &&
+		version.Family == ClientHeaderFamilyClaude && cliHeaders != nil {
+		if req.GetBody == nil {
+			return nil, fmt.Errorf("CLI request body is not replayable")
+		}
+		final, err := req.GetBody()
+		if err != nil {
+			return nil, fmt.Errorf("read CLI request body: %w", err)
+		}
+		data, err := io.ReadAll(final)
+		if err != nil {
+			return nil, fmt.Errorf("read CLI request body: %w", err)
+		}
+		if beta := service.CoherentAnthropicBeta(req.Header.Get("anthropic-beta"), claudeBodyHasHourTTL(data)); beta != "" {
+			req.Header.Set("anthropic-beta", beta)
+		} else {
+			req.Header.Del("anthropic-beta")
+		}
+	}
 	resp, err := doRequest(c, req, info)
 	if err != nil {
 		return nil, fmt.Errorf("do request failed: %w", err)

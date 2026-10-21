@@ -580,13 +580,22 @@ func (m *Message) ParseContent() []MediaContent {
 		if !ok {
 			continue
 		}
+		// Carry a part's prompt-cache breakpoint along so converters such as
+		// OpenAI -> Claude can keep the client's cache policy.
+		var cacheControl json.RawMessage
+		if rawCacheControl, exists := contentItem["cache_control"]; exists && rawCacheControl != nil {
+			if encoded, err := common.Marshal(rawCacheControl); err == nil {
+				cacheControl = encoded
+			}
+		}
 
 		switch contentType {
 		case ContentTypeText:
 			if text, ok := contentItem["text"].(string); ok {
 				contentList = append(contentList, MediaContent{
-					Type: ContentTypeText,
-					Text: text,
+					Type:         ContentTypeText,
+					Text:         text,
+					CacheControl: cacheControl,
 				})
 			}
 
@@ -609,8 +618,9 @@ func (m *Message) ParseContent() []MediaContent {
 				}
 			}
 			contentList = append(contentList, MediaContent{
-				Type:     ContentTypeImageURL,
-				ImageUrl: temp,
+				Type:         ContentTypeImageURL,
+				ImageUrl:     temp,
+				CacheControl: cacheControl,
 			})
 
 		case ContentTypeInputAudio:
@@ -623,8 +633,9 @@ func (m *Message) ParseContent() []MediaContent {
 						Format: format,
 					}
 					contentList = append(contentList, MediaContent{
-						Type:       ContentTypeInputAudio,
-						InputAudio: temp,
+						Type:         ContentTypeInputAudio,
+						InputAudio:   temp,
+						CacheControl: cacheControl,
 					})
 				}
 			}
@@ -637,6 +648,7 @@ func (m *Message) ParseContent() []MediaContent {
 						File: &MessageFile{
 							FileId: fileId,
 						},
+						CacheControl: cacheControl,
 					})
 				} else {
 					fileName, ok1 := fileData["filename"].(string)
@@ -648,6 +660,7 @@ func (m *Message) ParseContent() []MediaContent {
 								FileName: fileName,
 								FileData: fileDataStr,
 							},
+							CacheControl: cacheControl,
 						})
 					}
 				}
@@ -659,6 +672,7 @@ func (m *Message) ParseContent() []MediaContent {
 					VideoUrl: &MessageVideoUrl{
 						Url: videoUrl,
 					},
+					CacheControl: cacheControl,
 				})
 			}
 		}

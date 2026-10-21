@@ -2298,6 +2298,8 @@
     "History of MjProxy-style image tasks.": "История задач генерации изображений в стиле MjProxy.",
     "Hit criteria: If cached tokens exist in usage, it counts as a hit.": "Критерий попадания: если в usage есть кэшированные токены, это считается попаданием.",
     "Hit Rate": "Частота попаданий",
+    "Cached Token Rate": "Доля кэшированных токенов",
+    "Cached token rate: cache-read tokens divided by all input tokens, including cache writes. It is comparable to provider consoles; the hit rate counts requests, so each cold or short request is a full miss.": "Доля кэшированных токенов: токены, прочитанные из кэша, делённые на все входные токены, включая запись в кэш. Сопоставима с консолями провайдеров; частота попаданий считает запросы, поэтому каждый холодный или короткий запрос — полный промах.",
     "Hit tier": "Совпавший уровень",
     "Home": "Главная",
     "Home Page Content": "Содержимое главной страницы",

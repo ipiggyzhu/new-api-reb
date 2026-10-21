@@ -2298,6 +2298,8 @@
     "History of MjProxy-style image tasks.": "MjProxyスタイルの画像タスクの履歴。",
     "Hit criteria: If cached tokens exist in usage, it counts as a hit.": "ヒット判定：usage に cached tokens が存在すればヒットとみなします。",
     "Hit Rate": "ヒット率",
+    "Cached Token Rate": "キャッシュトークン率",
+    "Cached token rate: cache-read tokens divided by all input tokens, including cache writes. It is comparable to provider consoles; the hit rate counts requests, so each cold or short request is a full miss.": "キャッシュトークン率：キャッシュ読み取りトークンを全入力トークン（キャッシュ書き込みを含む）で割った値で、プロバイダーのコンソールと比較できます。ヒット率はリクエスト単位のため、コールドリクエストや短いリクエストはそれぞれ完全なミスになります。",
     "Hit tier": "一致したティア",
     "Home": "ホーム",
     "Home Page Content": "ホームコンテンツ",

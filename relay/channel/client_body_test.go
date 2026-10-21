@@ -99,8 +99,10 @@ func TestClaudeCLIShapePreservesContentToolsAndExplicitParameters(t *testing.T) 
 	assert.Equal(t, headers, sameHeaders)
 }
 
+// Only the real Claude Code client's own breakpoints are kept; other senders'
+// cache_control is replaced (see client_body_cache_test.go).
 func TestClaudeCLIHonorsCacheBreakpointsAndModelCapabilities(t *testing.T) {
-	c, info := cliTestRequest("claude")
+	c, info := nativeClaudeCodeRequest()
 	_, reader, _, err := prepareCLIRequest(c, info, "https://upstream.test/v1/messages", strings.NewReader(`{"model":"claude-3-haiku","system":[{"type":"text","text":"system","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"aW1hZ2U="}},{"type":"text","text":"hi"}]}],"tools":[{"name":"Read","cache_control":{"type":"ephemeral"},"input_schema":{"type":"object"}},{"name":"Bash","input_schema":{"type":"object"}}]}`))
 	require.NoError(t, err)
 	data, err := io.ReadAll(reader)

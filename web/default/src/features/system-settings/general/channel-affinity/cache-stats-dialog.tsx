@@ -32,6 +32,24 @@ function formatRate(hit: number, total: number): string {
   return `${r.toFixed(2)}%`
 }
 
+// Share of input tokens served from the upstream prompt cache. Current
+// backends record cached_over_prompt for every format (prompt tokens include
+// cache reads and writes); cached_over_prompt_plus_cached is the older Claude
+// shape. A bucket that mixes both shapes cannot be summed into one rate.
+function formatCachedTokenRate(
+  cachedTokens: number,
+  promptTokens: number,
+  mode: unknown
+): string {
+  if (mode === 'cached_over_prompt') {
+    return formatRate(cachedTokens, promptTokens)
+  }
+  if (mode === 'cached_over_prompt_plus_cached') {
+    return formatRate(cachedTokens, promptTokens + cachedTokens)
+  }
+  return '-'
+}
+
 interface Props {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -62,7 +80,7 @@ export function CacheStatsDialog(props: Props) {
 
     setStats(null)
 
-    getAffinityUsageCache(props.target)
+    void getAffinityUsageCache(props.target)
       .then((res) => {
         if (seq !== seqRef.current) return
         if (res.success) setStats((res.data as Record<string, unknown>) || {})
@@ -84,48 +102,67 @@ export function CacheStatsDialog(props: Props) {
     const data: { key: string; value: string | number }[] = []
     const hit = Number(s.hit || 0)
     const total = Number(s.total || 0)
-
-    if (s.rule_name || props.target?.rule_name)
-      data.push({
-        key: t('Rule'),
-        value: (s.rule_name || props.target?.rule_name || '') as string,
-      })
-    if (s.using_group || props.target?.using_group)
-      data.push({
-        key: t('Group'),
-        value: (s.using_group || props.target?.using_group || '') as string,
-      })
-    if (props.target?.key_hint)
-      data.push({ key: t('Key Summary'), value: props.target.key_hint })
-    if (s.key_fp || props.target?.key_fp)
-      data.push({
-        key: t('Key Fingerprint'),
-        value: (s.key_fp || props.target?.key_fp || '') as string,
-      })
-    if (Number(s.window_seconds || 0) > 0)
-      data.push({ key: t('TTL (seconds)'), value: s.window_seconds as number })
-    if (total > 0)
-      data.push({
-        key: t('Hit Rate'),
-        value: `${hit}/${total} (${formatRate(hit, total)})`,
-      })
-    if (Number(s.last_seen_at || 0) > 0)
-      data.push({
-        key: t('Last Seen'),
-        value: formatTimestampToDate(s.last_seen_at as number | undefined),
-      })
-
     const promptTokens = Number(s.prompt_tokens || 0)
     const cachedTokens = Number(s.cached_tokens || 0)
     const completionTokens = Number(s.completion_tokens || 0)
     const totalTokens = Number(s.total_tokens || 0)
 
-    if (promptTokens > 0)
+    if (s.rule_name || props.target?.rule_name) {
+      data.push({
+        key: t('Rule'),
+        value: (s.rule_name || props.target?.rule_name || '') as string,
+      })
+    }
+    if (s.using_group || props.target?.using_group) {
+      data.push({
+        key: t('Group'),
+        value: (s.using_group || props.target?.using_group || '') as string,
+      })
+    }
+    if (props.target?.key_hint) {
+      data.push({ key: t('Key Summary'), value: props.target.key_hint })
+    }
+    if (s.key_fp || props.target?.key_fp) {
+      data.push({
+        key: t('Key Fingerprint'),
+        value: (s.key_fp || props.target?.key_fp || '') as string,
+      })
+    }
+    if (Number(s.window_seconds || 0) > 0) {
+      data.push({ key: t('TTL (seconds)'), value: s.window_seconds as number })
+    }
+    if (total > 0) {
+      data.push({
+        key: t('Hit Rate'),
+        value: `${hit}/${total} (${formatRate(hit, total)})`,
+      })
+    }
+    if (promptTokens > 0) {
+      data.push({
+        key: t('Cached Token Rate'),
+        value: formatCachedTokenRate(
+          cachedTokens,
+          promptTokens,
+          s.cached_token_rate_mode
+        ),
+      })
+    }
+    if (Number(s.last_seen_at || 0) > 0) {
+      data.push({
+        key: t('Last Seen'),
+        value: formatTimestampToDate(s.last_seen_at as number | undefined),
+      })
+    }
+
+    if (promptTokens > 0) {
       data.push({ key: 'Prompt tokens', value: promptTokens })
-    if (cachedTokens > 0)
+    }
+    if (cachedTokens > 0) {
       data.push({ key: 'Cached tokens', value: cachedTokens })
-    if (completionTokens > 0)
+    }
+    if (completionTokens > 0) {
       data.push({ key: 'Completion tokens', value: completionTokens })
+    }
     if (totalTokens > 0) data.push({ key: 'Total tokens', value: totalTokens })
 
     return data
@@ -140,16 +177,24 @@ export function CacheStatsDialog(props: Props) {
       contentHeight='auto'
       bodyClassName='space-y-4'
     >
-      <p className='text-muted-foreground text-xs'>
-        {t(
-          'Hit criteria: If cached tokens exist in usage, it counts as a hit.'
-        )}
-      </p>
-      {loading ? (
+      <div className='text-muted-foreground space-y-1 text-xs'>
+        <p>
+          {t(
+            'Hit criteria: If cached tokens exist in usage, it counts as a hit.'
+          )}
+        </p>
+        <p>
+          {t(
+            'Cached token rate: cache-read tokens divided by all input tokens, including cache writes. It is comparable to provider consoles; the hit rate counts requests, so each cold or short request is a full miss.'
+          )}
+        </p>
+      </div>
+      {loading && (
         <div className='text-muted-foreground py-8 text-center text-sm'>
           {t('Loading...')}
         </div>
-      ) : rows.length > 0 ? (
+      )}
+      {!loading && rows.length > 0 && (
         <div className='space-y-2'>
           {rows.map((row) => (
             <div
@@ -163,7 +208,8 @@ export function CacheStatsDialog(props: Props) {
             </div>
           ))}
         </div>
-      ) : (
+      )}
+      {!loading && rows.length === 0 && (
         <div className='text-muted-foreground py-8 text-center text-sm'>
           {t('No data available')}
         </div>

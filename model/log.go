@@ -127,6 +127,11 @@ func clientIpForLog(c *gin.Context, userId int) string {
 			return ""
 		}
 	}
+	// Behind Cloudflare the TCP peer is a public edge IP gin does not trust, so
+	// ClientIP() would record the edge; take CF-Connecting-IP from verified edges.
+	if ip := common.CloudflareClientIP(c); ip != "" {
+		return ip
+	}
 	return c.ClientIP()
 }
 

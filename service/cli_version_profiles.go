@@ -36,15 +36,64 @@ type CLIVersionProfile struct {
 	ContextManagement bool                `json:"context_management"`
 	ParallelToolCalls bool                `json:"parallel_tool_calls"`
 	TextDefault       json.RawMessage     `json:"text_default"`
+	// CacheTTL is the prompt-cache mode the client was captured in: empty for
+	// its default breakpoints, "1h" when it ran with 1h caching. The beta flag
+	// that mode needs is part of Headers, captured from the same run.
+	CacheTTL string `json:"cache_ttl"`
+	// RequestIDIsSession: x-client-request-id carries the session, not the turn.
+	RequestIDIsSession bool `json:"request_id_is_session"`
+	// The captured main call's model-dependent request shape: thinking,
+	// output_config and max_tokens are only known for CapturedModel.
+	CapturedModel string          `json:"captured_model"`
+	Thinking      json.RawMessage `json:"thinking"`
+	OutputConfig  json.RawMessage `json:"output_config"`
+	// BillingHeader is the text of the client's leading, never-cached system
+	// block, verbatim from the capture.
+	BillingHeader string `json:"billing_header"`
 }
+
+// ExtendedCacheTTLBeta is the Anthropic beta flag a request needs once any of
+// its cache breakpoints has ttl "1h".
+const ExtendedCacheTTLBeta = "extended-cache-ttl-2025-04-11"
 
 var cliVersionProfiles = func() []CLIVersionProfile {
 	var profiles []CLIVersionProfile
 	if err := common.Unmarshal(cliVersionProfilesJSON, &profiles); err != nil {
 		panic(fmt.Sprintf("invalid embedded CLI version profiles: %v", err))
 	}
+	for _, p := range profiles {
+		if p.CacheTTL != "" && p.CacheTTL != "1h" {
+			panic(fmt.Sprintf("CLI version profile %s has uncaptured cache TTL mode %q", p.ID, p.CacheTTL))
+		}
+	}
 	return profiles
 }()
+
+// CacheControl is the breakpoint the profile's client writes, key order
+// included. Unversioned shaping (nil) keeps the plain default breakpoint.
+func (p *CLIVersionProfile) CacheControl() json.RawMessage {
+	if p == nil || p.CacheTTL == "" {
+		return json.RawMessage(`{"type":"ephemeral"}`)
+	}
+	return json.RawMessage(`{"type":"ephemeral","ttl":"` + p.CacheTTL + `"}`)
+}
+
+// CoherentAnthropicBeta makes an anthropic-beta list agree with the final
+// body: the extended-cache-ttl flag is present exactly when a breakpoint has
+// ttl "1h", appended last as the 1h capture sends it. Other flags keep their
+// order.
+func CoherentAnthropicBeta(list string, hourTTL bool) string {
+	var betas []string
+	for _, beta := range strings.Split(list, ",") {
+		if beta != "" && beta != ExtendedCacheTTLBeta {
+			betas = append(betas, beta)
+		}
+	}
+	if hourTTL {
+		betas = append(betas, ExtendedCacheTTLBeta)
+	}
+	return strings.Join(betas, ",")
+}
 
 type CLIVersionProfileOption struct {
 	ID      string `json:"id"`

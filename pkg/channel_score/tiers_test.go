@@ -218,6 +218,37 @@ func TestShiftByTiersSaturatesInsteadOfWrapping(t *testing.T) {
 		"promoting past the top of a normal list still extends by one")
 }
 
+// TestTierPositionInvertsShiftByTiers pins the contract affinity revalidation
+// relies on: the rank recovered from a shifted priority is exactly the baseline
+// rank minus the offset, including movement past either end of the ladder, so a
+// rank difference is the number of tiers between two candidates.
+func TestTierPositionInvertsShiftByTiers(t *testing.T) {
+	ladders := [][]int64{
+		{100, 50, 0},
+		{10, 7, 0},
+		{-1, -10},
+		{5},
+	}
+	for _, tiers := range ladders {
+		for rank, baseline := range tiers {
+			for offset := -4; offset <= 2; offset++ {
+				shifted := shiftByTiers(tiers, baseline, offset)
+				assert.Equal(t, rank-offset, TierPosition(tiers, shifted),
+					"tiers=%v baseline=%d offset=%d shifted=%d", tiers, baseline, offset, shifted)
+			}
+		}
+	}
+}
+
+func TestTierPositionEdgeCases(t *testing.T) {
+	assert.Equal(t, 0, TierPosition(nil, 42), "an empty ladder has only the top rank")
+	assert.Equal(t, 2, TierPosition([]int64{100, 50, 0}, 20), "a priority between tiers ranks with the tier below")
+	assert.Equal(t, math.MaxInt32, TierPosition([]int64{math.MaxInt64}, math.MinInt64),
+		"a distance wider than int64 saturates instead of wrapping")
+	assert.Equal(t, -math.MaxInt32, TierPosition([]int64{math.MinInt64}, math.MaxInt64),
+		"the same saturation applies above the top tier")
+}
+
 // TestRotateSlidingWindow drives the window with an injected clock rather than
 // sleeping, so the boundaries are exact.
 func TestRotateSlidingWindow(t *testing.T) {
