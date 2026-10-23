@@ -34,6 +34,7 @@ import {
   Copy,
   FileText,
   Eraser,
+  HeartPulse,
   Plus,
   Eye,
   RefreshCw,
@@ -144,6 +145,12 @@ import {
   FIELD_DESCRIPTIONS,
   FIELD_PLACEHOLDERS,
   MODEL_FETCHABLE_TYPES,
+  UPSTREAM_KEEPALIVE_DEFAULT_ACTIVE_WINDOW_MINUTES,
+  UPSTREAM_KEEPALIVE_DEFAULT_INTERVAL_MINUTES,
+  UPSTREAM_KEEPALIVE_MAX_ACTIVE_WINDOW_MINUTES,
+  UPSTREAM_KEEPALIVE_MAX_INTERVAL_MINUTES,
+  UPSTREAM_KEEPALIVE_MIN_ACTIVE_WINDOW_MINUTES,
+  UPSTREAM_KEEPALIVE_MIN_INTERVAL_MINUTES,
 } from '../../constants'
 import { useChannelMutateForm } from '../../hooks/use-channel-mutate-form'
 import {
@@ -259,6 +266,7 @@ const ADVANCED_SETTINGS_SECTION_IDS = {
   extraSettings: 'channel-section-advanced-extra-settings',
   fieldPassthrough: 'channel-section-advanced-field-passthrough',
   upstreamModelDetection: 'channel-section-advanced-upstream-model-detection',
+  upstreamKeepalive: 'channel-section-advanced-upstream-keepalive',
 } as const
 const ADVANCED_SETTINGS_CHILD_SECTION_IDS: string[] = Object.values(
   ADVANCED_SETTINGS_SECTION_IDS
@@ -308,6 +316,9 @@ const SENSITIVE_FORM_FIELDS = [
   'upstream_model_update_check_enabled',
   'upstream_model_update_auto_sync_enabled',
   'upstream_model_update_ignored_models',
+  'upstream_keepalive_enabled',
+  'upstream_keepalive_interval_minutes',
+  'upstream_keepalive_active_window_minutes',
 ] satisfies (keyof ChannelFormValues)[]
 
 function readAdvancedSettingsPreference(): boolean {
@@ -357,7 +368,8 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.claude_beta_query ||
     values.upstream_model_update_check_enabled ||
     values.upstream_model_update_auto_sync_enabled ||
-    values.upstream_model_update_ignored_models?.trim()
+    values.upstream_model_update_ignored_models?.trim() ||
+    values.upstream_keepalive_enabled
   )
 }
 
@@ -782,6 +794,9 @@ export function ChannelMutateDrawer({
   const currentUpstreamModelUpdateIgnoredModels = form.watch(
     'upstream_model_update_ignored_models'
   )
+  const currentUpstreamKeepaliveEnabled = form.watch(
+    'upstream_keepalive_enabled'
+  )
   const {
     unlocked: doubaoApiEditUnlocked,
     handleClick: handleApiConfigSecretClick,
@@ -1060,13 +1075,15 @@ export function ChannelMutateDrawer({
     currentUpstreamModelUpdateAutoSyncEnabled ||
     currentUpstreamModelUpdateIgnoredModels?.trim()
   )
+  const upstreamKeepaliveConfigured = currentUpstreamKeepaliveEnabled === true
   const advancedConfigured = Boolean(
     routingStrategyConfigured ||
     internalNotesConfigured ||
     overrideRulesConfigured ||
     extraSettingsConfigured ||
     fieldPassthroughConfigured ||
-    upstreamModelDetectionConfigured
+    upstreamModelDetectionConfigured ||
+    upstreamKeepaliveConfigured
   )
   const advancedNavChildren: ChannelEditorNavChildItem[] = [
     {
@@ -1104,6 +1121,11 @@ export function ChannelMutateDrawer({
       configured: upstreamModelDetectionConfigured,
     })
   }
+  advancedNavChildren.push({
+    id: ADVANCED_SETTINGS_SECTION_IDS.upstreamKeepalive,
+    title: t('Upstream keepalive'),
+    configured: upstreamKeepaliveConfigured,
+  })
   const editorNavItems: ChannelEditorNavItem[] = [
     {
       id: CHANNEL_EDITOR_SECTION_IDS.identity,
@@ -1255,6 +1277,11 @@ export function ChannelMutateDrawer({
       detectedModels: [...new Set(detectedModels)],
     }
   }, [currentSettings])
+
+  const upstreamKeepaliveLastTime = useMemo(
+    () => parseSettingsRecord(currentSettings).upstream_keepalive_last_time,
+    [currentSettings]
+  )
 
   const upstreamDetectedModelsPreview = upstreamUpdateMeta.detectedModels.slice(
     0,
@@ -4857,6 +4884,137 @@ export function ChannelMutateDrawer({
                             </fieldset>
                           </div>
                         )}
+
+                        <div
+                          id={ADVANCED_SETTINGS_SECTION_IDS.upstreamKeepalive}
+                          className={sideDrawerSectionClassName(
+                            configuredAdvancedSectionClassName(
+                              'scroll-mt-4',
+                              upstreamKeepaliveConfigured
+                            )
+                          )}
+                        >
+                          <CardHeading
+                            title={t('Upstream keepalive')}
+                            icon={<HeartPulse className='h-4 w-4' />}
+                            iconTone='info'
+                          />
+                          <fieldset
+                            disabled={sensitiveLocked}
+                            className='space-y-4 disabled:opacity-60'
+                          >
+                            <div className='divide-border space-y-0 divide-y border-y'>
+                              <FormField
+                                control={form.control}
+                                name='upstream_keepalive_enabled'
+                                render={({ field }) => (
+                                  <FormItem className='flex items-center justify-between px-4 py-3'>
+                                    <div className='space-y-0.5'>
+                                      <FormLabel>
+                                        {t('Enable upstream keepalive')}
+                                      </FormLabel>
+                                      <FormDescription>
+                                        {t(
+                                          "While the channel is in use, send a tiny request with the channel's own key whenever real requests pause, so the upstream does not go idle in the gaps. Nothing is sent while real requests are flowing or once the active window has passed. Keepalive traffic is not billed, not logged as usage, does not affect channel scoring, and never disables the channel."
+                                        )}
+                                      </FormDescription>
+                                    </div>
+                                    <FormControl>
+                                      <Switch
+                                        checked={field.value}
+                                        onCheckedChange={field.onChange}
+                                      />
+                                    </FormControl>
+                                  </FormItem>
+                                )}
+                              />
+                            </div>
+                            <FormField
+                              control={form.control}
+                              name='upstream_keepalive_interval_minutes'
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>
+                                    {t('Keepalive interval (minutes)')}
+                                  </FormLabel>
+                                  <FormControl>
+                                    <Input
+                                      type='number'
+                                      min={
+                                        UPSTREAM_KEEPALIVE_MIN_INTERVAL_MINUTES
+                                      }
+                                      max={
+                                        UPSTREAM_KEEPALIVE_MAX_INTERVAL_MINUTES
+                                      }
+                                      step={1}
+                                      placeholder={String(
+                                        UPSTREAM_KEEPALIVE_DEFAULT_INTERVAL_MINUTES
+                                      )}
+                                      {...field}
+                                      disabled={
+                                        !currentUpstreamKeepaliveEnabled
+                                      }
+                                      onChange={(e) =>
+                                        field.onChange(Number(e.target.value))
+                                      }
+                                    />
+                                  </FormControl>
+                                  <FormDescription>
+                                    {t(
+                                      'Between 5 and 10080 minutes. Each send is offset by up to ±10% so channels do not fire together.'
+                                    )}
+                                  </FormDescription>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                            <FormField
+                              control={form.control}
+                              name='upstream_keepalive_active_window_minutes'
+                              render={({ field }) => (
+                                <FormItem>
+                                  <FormLabel>
+                                    {t('Keepalive active window (minutes)')}
+                                  </FormLabel>
+                                  <FormControl>
+                                    <Input
+                                      type='number'
+                                      min={
+                                        UPSTREAM_KEEPALIVE_MIN_ACTIVE_WINDOW_MINUTES
+                                      }
+                                      max={
+                                        UPSTREAM_KEEPALIVE_MAX_ACTIVE_WINDOW_MINUTES
+                                      }
+                                      step={1}
+                                      placeholder={String(
+                                        UPSTREAM_KEEPALIVE_DEFAULT_ACTIVE_WINDOW_MINUTES
+                                      )}
+                                      {...field}
+                                      disabled={
+                                        !currentUpstreamKeepaliveEnabled
+                                      }
+                                      onChange={(e) =>
+                                        field.onChange(Number(e.target.value))
+                                      }
+                                    />
+                                  </FormControl>
+                                  <FormDescription>
+                                    {t(
+                                      'Between 5 and 10080 minutes. Keepalives continue for this long after the last real request, then stop until the channel is used again. Set it longer than the interval.'
+                                    )}
+                                  </FormDescription>
+                                  <FormMessage />
+                                </FormItem>
+                              )}
+                            />
+                            <div className='text-muted-foreground border-t pt-3 text-xs'>
+                              <span className='text-foreground font-medium'>
+                                {t('Last keepalive time')}:
+                              </span>{' '}
+                              {formatUnixTime(upstreamKeepaliveLastTime)}
+                            </div>
+                          </fieldset>
+                        </div>
                       </ChannelAdvancedSection>
                     </div>
                   </div>

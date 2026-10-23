@@ -25,6 +25,9 @@ const (
 	// weight. Scheduled like the others so the DB lease keeps two masters from
 	// writing the same mirrors concurrently.
 	SystemTaskTypeScoreProjection = "score_projection"
+	// SystemTaskTypeChannelKeepalive sends the per-channel upstream keepalives
+	// that are due. A row exists only for a run that had at least one to send.
+	SystemTaskTypeChannelKeepalive = "channel_keepalive"
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")

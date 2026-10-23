@@ -5422,6 +5422,18 @@
     "Failed to load TLS fingerprints": "Не удалось загрузить TLS-отпечатки",
     "Enter channel IDs as positive integers separated by commas or newlines.": "Введите ID каналов как положительные целые числа через запятую или с новой строки.",
     "Excluded Channel IDs": "ID исключённых каналов",
-    "Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.": "Разделяйте ID запятыми или переносами строк. Глобальное обновление моделей пропускает эти каналы даже при проверке всех включённых каналов. Каждый канал по-прежнему можно проверить вручную. Пустое поле означает отсутствие исключений."
+    "Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.": "Разделяйте ID запятыми или переносами строк. Глобальное обновление моделей пропускает эти каналы даже при проверке всех включённых каналов. Каждый канал по-прежнему можно проверить вручную. Пустое поле означает отсутствие исключений.",
+    "Upstream keepalive": "Поддержание активности провайдера",
+    "Enable upstream keepalive": "Включить поддержание активности провайдера",
+    "While the channel is in use, send a tiny request with the channel's own key whenever real requests pause, so the upstream does not go idle in the gaps. Nothing is sent while real requests are flowing or once the active window has passed. Keepalive traffic is not billed, not logged as usage, does not affect channel scoring, and never disables the channel.": "Пока канал используется, при паузе в реальных запросах отправляет крошечный запрос с собственным ключом канала, чтобы апстрим не считался простаивающим в промежутках. Ничего не отправляется, пока идут реальные запросы, и после окончания окна активности. Трафик keepalive не тарифицируется, не записывается в журнал использования, не влияет на оценку канала и никогда не отключает канал.",
+    "Keepalive interval (minutes)": "Интервал поддержания (минуты)",
+    "Between 5 and 10080 minutes. Each send is offset by up to ±10% so channels do not fire together.": "От 5 до 10080 минут. Каждая отправка смещается не более чем на ±10%, чтобы каналы не срабатывали одновременно.",
+    "Last keepalive time": "Время последнего поддержания",
+    "Keepalive interval must be at least 5 minutes": "Интервал поддержания должен быть не меньше 5 минут",
+    "Keepalive interval must be at most 10080 minutes": "Интервал поддержания должен быть не больше 10080 минут",
+    "Keepalive active window (minutes)": "Окно активности keepalive (минуты)",
+    "Between 5 and 10080 minutes. Keepalives continue for this long after the last real request, then stop until the channel is used again. Set it longer than the interval.": "От 5 до 10080 минут. Keepalive продолжается в течение этого времени после последнего реального запроса, затем останавливается до следующего использования канала. Укажите значение больше интервала.",
+    "Keepalive active window must be at least 5 minutes": "Окно активности keepalive должно быть не меньше 5 минут",
+    "Keepalive active window must be at most 10080 minutes": "Окно активности keepalive должно быть не больше 10080 минут"
   }
 }

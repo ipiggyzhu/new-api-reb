@@ -166,6 +166,44 @@ func TestRepairChannelModelAvailabilityRemovesLegacyDeletionQueueAlone(t *testin
 	assert.True(t, gjson.Get(stored.OtherSettings, "future.kept").Bool())
 }
 
+// The keepalive task stamps its send time into `settings` on its own schedule.
+// A sweep that spans one of those stamps must still apply, and must keep the
+// stamp, while a real settings edit during the sweep is still refused.
+func TestApplyChannelModelSweepToleratesKeepaliveStamp(t *testing.T) {
+	for _, scenario := range []string{"keepalive stamped", "keepalive stamped and settings edited"} {
+		t.Run(scenario, func(t *testing.T) {
+			channel := openChannelSettingsTestDB(t)
+			require.NoError(t, DB.AutoMigrate(&Ability{}))
+			channel.Status = common.ChannelStatusEnabled
+			channel.SetOtherSettings(dto.ChannelOtherSettings{UpstreamKeepaliveEnabled: true, UpstreamKeepaliveLastTime: 100})
+			require.NoError(t, DB.Save(channel).Error)
+			require.NoError(t, channel.AddAbilities(nil))
+
+			require.NoError(t, MutateChannelSettings(channel.Id, func(settings *dto.ChannelOtherSettings) bool {
+				settings.UpstreamKeepaliveLastTime = 200
+				if scenario == "keepalive stamped and settings edited" {
+					settings.UpstreamKeepaliveIntervalMinutes = 60
+				}
+				return true
+			}))
+
+			applied, err := ApplyChannelModelSweep(channel, "gpt-4o-mini", nil, false)
+			stored, loadErr := GetChannelById(channel.Id, true)
+			require.NoError(t, loadErr)
+			if scenario == "keepalive stamped" {
+				require.NoError(t, err)
+				assert.True(t, applied)
+				assert.Equal(t, "gpt-4o-mini", stored.Models)
+				assert.Equal(t, int64(200), stored.GetOtherSettings().UpstreamKeepaliveLastTime)
+				return
+			}
+			require.ErrorContains(t, err, "configuration changed")
+			assert.False(t, applied)
+			assert.Equal(t, "gpt-4o", stored.Models)
+		})
+	}
+}
+
 func TestApplyChannelModelSweepClearsLegacyStateWithoutCatalogueChange(t *testing.T) {
 	channel := openChannelSettingsTestDB(t)
 	require.NoError(t, DB.AutoMigrate(&Ability{}))

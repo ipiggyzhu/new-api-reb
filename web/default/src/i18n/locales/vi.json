@@ -5422,6 +5422,18 @@
     "Failed to load TLS fingerprints": "Không tải được dấu vân tay TLS",
     "Enter channel IDs as positive integers separated by commas or newlines.": "Nhập ID kênh là số nguyên dương, phân cách bằng dấu phẩy hoặc xuống dòng.",
     "Excluded Channel IDs": "ID kênh loại trừ khỏi cập nhật tự động",
-    "Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.": "Phân cách ID kênh bằng dấu phẩy hoặc xuống dòng. Cập nhật mô hình toàn cục bỏ qua các kênh này ngay cả khi quét tất cả kênh đang bật. Vẫn có thể kiểm tra thủ công từng kênh. Để trống nếu không muốn loại trừ."
+    "Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.": "Phân cách ID kênh bằng dấu phẩy hoặc xuống dòng. Cập nhật mô hình toàn cục bỏ qua các kênh này ngay cả khi quét tất cả kênh đang bật. Vẫn có thể kiểm tra thủ công từng kênh. Để trống nếu không muốn loại trừ.",
+    "Upstream keepalive": "Giữ kết nối nguồn",
+    "Enable upstream keepalive": "Bật giữ kết nối nguồn",
+    "While the channel is in use, send a tiny request with the channel's own key whenever real requests pause, so the upstream does not go idle in the gaps. Nothing is sent while real requests are flowing or once the active window has passed. Keepalive traffic is not billed, not logged as usage, does not affect channel scoring, and never disables the channel.": "Khi kênh đang được sử dụng, gửi một yêu cầu rất nhỏ bằng khóa của chính kênh mỗi khi yêu cầu thật tạm dừng, để phía upstream không bị coi là nhàn rỗi trong các khoảng trống. Không gửi gì khi yêu cầu thật đang diễn ra hoặc sau khi cửa sổ hoạt động đã qua. Lưu lượng keepalive không bị tính phí, không ghi vào nhật ký sử dụng, không ảnh hưởng đến điểm kênh và không bao giờ vô hiệu hóa kênh.",
+    "Keepalive interval (minutes)": "Khoảng thời gian giữ kết nối (phút)",
+    "Between 5 and 10080 minutes. Each send is offset by up to ±10% so channels do not fire together.": "Từ 5 đến 10080 phút. Mỗi lần gửi được lệch tối đa ±10% để các kênh không gửi cùng lúc.",
+    "Last keepalive time": "Thời gian giữ kết nối gần nhất",
+    "Keepalive interval must be at least 5 minutes": "Khoảng thời gian giữ kết nối phải ít nhất 5 phút",
+    "Keepalive interval must be at most 10080 minutes": "Khoảng thời gian giữ kết nối tối đa là 10080 phút",
+    "Keepalive active window (minutes)": "Cửa sổ hoạt động keepalive (phút)",
+    "Between 5 and 10080 minutes. Keepalives continue for this long after the last real request, then stop until the channel is used again. Set it longer than the interval.": "Từ 5 đến 10080 phút. Keepalive tiếp tục trong khoảng thời gian này sau yêu cầu thật cuối cùng, sau đó dừng cho đến khi kênh được dùng lại. Nên đặt lớn hơn khoảng thời gian.",
+    "Keepalive active window must be at least 5 minutes": "Cửa sổ hoạt động keepalive phải ít nhất 5 phút",
+    "Keepalive active window must be at most 10080 minutes": "Cửa sổ hoạt động keepalive tối đa 10080 phút"
   }
 }

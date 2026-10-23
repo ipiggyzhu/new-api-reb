@@ -282,6 +282,17 @@ export const DEFAULT_CHANNEL_VALUES = {
   remark: '',
 } as const
 
+// Upstream keepalive interval bounds, in minutes. Mirrors
+// dto.UpstreamKeepalive*IntervalMinutes on the backend.
+export const UPSTREAM_KEEPALIVE_DEFAULT_INTERVAL_MINUTES = 30
+export const UPSTREAM_KEEPALIVE_MIN_INTERVAL_MINUTES = 5
+export const UPSTREAM_KEEPALIVE_MAX_INTERVAL_MINUTES = 7 * 24 * 60
+// Active window bounds, in minutes: how long after the last real request the
+// keepalive keeps bridging. Mirrors dto.UpstreamKeepalive*ActiveWindowMinutes.
+export const UPSTREAM_KEEPALIVE_DEFAULT_ACTIVE_WINDOW_MINUTES = 120
+export const UPSTREAM_KEEPALIVE_MIN_ACTIVE_WINDOW_MINUTES = 5
+export const UPSTREAM_KEEPALIVE_MAX_ACTIVE_WINDOW_MINUTES = 7 * 24 * 60
+
 // ============================================================================
 // Table Configuration
 // ============================================================================

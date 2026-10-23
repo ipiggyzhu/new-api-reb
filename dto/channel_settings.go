@@ -2,6 +2,7 @@ package dto
 
 import (
 	"fmt"
+	"hash/fnv"
 	"net/url"
 	"regexp"
 	"strings"
@@ -176,6 +177,108 @@ type ChannelOtherSettings struct {
 	// 抖动变成永久回退。保存渠道会清零本项，这就是"手动重新开启"的动作。
 	WebsocketUnsupported bool                  `json:"websocket_unsupported,omitempty"`
 	AdvancedCustom       *AdvancedCustomConfig `json:"advanced_custom,omitempty"`
+	// 上游保活：开关打开后，渠道在真实请求停下之后的活动窗口内，后台按间隔用
+	// 渠道自己的 key 发一笔极小的请求，桥接使用中的请求间隙；有真实请求在流动
+	// 时不发，超过活动窗口仍无真实请求就停，直到下一次真实请求。保活是系统
+	// 流量：不挂用户、不计费、不写消费日志、不进渠道评分，失败也不禁用渠道，
+	// 也不算渠道活动。
+	UpstreamKeepaliveEnabled         bool `json:"upstream_keepalive_enabled,omitempty"`          // 是否开启上游保活
+	UpstreamKeepaliveIntervalMinutes int  `json:"upstream_keepalive_interval_minutes,omitempty"` // 保活间隔（分钟），0 表示默认值
+	// 活动窗口（分钟），0 表示默认值：最后一次真实请求之后多久内继续保活。
+	UpstreamKeepaliveActiveWindowMinutes int `json:"upstream_keepalive_active_window_minutes,omitempty"`
+	// 上次保活的发送时间，由保活任务在发送前写入（失败也写），所以重启后不会
+	// 把所有渠道当成到期而齐射。它是任务进度而不是配置，模型校验比对渠道配置
+	// 是否被改动时会忽略这一项。
+	UpstreamKeepaliveLastTime int64 `json:"upstream_keepalive_last_time,omitempty"`
+}
+
+const (
+	UpstreamKeepaliveDefaultIntervalMinutes = 30
+	UpstreamKeepaliveMinIntervalMinutes     = 5
+	UpstreamKeepaliveMaxIntervalMinutes     = 7 * 24 * 60
+
+	UpstreamKeepaliveDefaultActiveWindowMinutes = 120
+	UpstreamKeepaliveMinActiveWindowMinutes     = 5
+	UpstreamKeepaliveMaxActiveWindowMinutes     = 7 * 24 * 60
+)
+
+// ValidateUpstreamKeepalive rejects an interval or active window outside the
+// supported range. 0 means "use the default" and is always accepted.
+func (s *ChannelOtherSettings) ValidateUpstreamKeepalive() error {
+	if minutes := s.UpstreamKeepaliveIntervalMinutes; minutes != 0 &&
+		(minutes < UpstreamKeepaliveMinIntervalMinutes || minutes > UpstreamKeepaliveMaxIntervalMinutes) {
+		return fmt.Errorf("upstream_keepalive_interval_minutes must be between %d and %d, got %d",
+			UpstreamKeepaliveMinIntervalMinutes, UpstreamKeepaliveMaxIntervalMinutes, minutes)
+	}
+	if minutes := s.UpstreamKeepaliveActiveWindowMinutes; minutes != 0 &&
+		(minutes < UpstreamKeepaliveMinActiveWindowMinutes || minutes > UpstreamKeepaliveMaxActiveWindowMinutes) {
+		return fmt.Errorf("upstream_keepalive_active_window_minutes must be between %d and %d, got %d",
+			UpstreamKeepaliveMinActiveWindowMinutes, UpstreamKeepaliveMaxActiveWindowMinutes, minutes)
+	}
+	return nil
+}
+
+// UpstreamKeepaliveInterval is the effective interval in seconds. Stored values
+// that bypassed validation (direct DB edits, imports) are clamped into range
+// rather than letting a 0 or 1 turn the keepalive into a request every minute.
+func (s *ChannelOtherSettings) UpstreamKeepaliveInterval() int64 {
+	minutes := s.UpstreamKeepaliveIntervalMinutes
+	switch {
+	case minutes <= 0:
+		minutes = UpstreamKeepaliveDefaultIntervalMinutes
+	case minutes < UpstreamKeepaliveMinIntervalMinutes:
+		minutes = UpstreamKeepaliveMinIntervalMinutes
+	case minutes > UpstreamKeepaliveMaxIntervalMinutes:
+		minutes = UpstreamKeepaliveMaxIntervalMinutes
+	}
+	return int64(minutes) * 60
+}
+
+// UpstreamKeepaliveActiveWindow is the effective active window in seconds,
+// clamped the same way as the interval.
+func (s *ChannelOtherSettings) UpstreamKeepaliveActiveWindow() int64 {
+	minutes := s.UpstreamKeepaliveActiveWindowMinutes
+	switch {
+	case minutes <= 0:
+		minutes = UpstreamKeepaliveDefaultActiveWindowMinutes
+	case minutes < UpstreamKeepaliveMinActiveWindowMinutes:
+		minutes = UpstreamKeepaliveMinActiveWindowMinutes
+	case minutes > UpstreamKeepaliveMaxActiveWindowMinutes:
+		minutes = UpstreamKeepaliveMaxActiveWindowMinutes
+	}
+	return int64(minutes) * 60
+}
+
+// UpstreamKeepaliveDue reports whether channelId's keepalive should be sent at
+// now (unix seconds). lastActive is when real relay traffic last used the
+// channel (now while a request is in flight, 0 when none has been seen).
+//
+// A keepalive only bridges a gap in a channel that is being used: it is due
+// once the channel has been quiet for an interval, counted from the later of
+// the last real request and the last keepalive, and only while the last real
+// request is still inside the active window. A channel no real request has
+// reached is never due, and since a keepalive does not move lastActive, the
+// keepalives stop by themselves when the window closes.
+//
+// The interval carries a ±10% jitter so channels used together drift apart
+// instead of firing in the same minute forever. The jitter is derived from the
+// channel id and the moment the quiet period started rather than drawn at
+// random, so the scheduler's "is anything due" check and the run that follows
+// agree on the same channel, and every send or new request re-rolls the offset.
+func (s *ChannelOtherSettings) UpstreamKeepaliveDue(channelId int, lastActive int64, now int64) bool {
+	if !s.UpstreamKeepaliveEnabled || lastActive <= 0 {
+		return false
+	}
+	if now-lastActive >= s.UpstreamKeepaliveActiveWindow() {
+		return false
+	}
+	quietSince := max(lastActive, s.UpstreamKeepaliveLastTime)
+	interval := s.UpstreamKeepaliveInterval()
+	span := interval / 10
+	hash := fnv.New64a()
+	_, _ = fmt.Fprintf(hash, "%d:%d", channelId, quietSince)
+	jitter := int64(hash.Sum64()%uint64(2*span+1)) - span
+	return now-quietSince >= interval+jitter
 }
 
 // ModelHealthState 记录一个模型连续验证失败的情况。只有被判定为渠道故障

@@ -2,6 +2,7 @@ package common
 
 import (
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 
@@ -63,14 +64,26 @@ func isCloudflareIP(ip net.IP) bool {
 }
 
 // CloudflareClientIP returns the visitor IP from CF-Connecting-IP, but only when
-// the direct TCP peer is a Cloudflare edge; anyone else could forge the header.
-// It returns "" when the peer is not Cloudflare or the header is missing/invalid.
+// the direct TCP peer is a Cloudflare edge or a loopback/private/link-local hop,
+// i.e. a local reverse proxy sitting between Cloudflare and this app. A public
+// peer outside Cloudflare's ranges is never trusted; it could forge the header.
+// It returns "" when the peer is untrusted or the header is missing/invalid.
 func CloudflareClientIP(c *gin.Context) string {
 	if c == nil || c.Request == nil {
 		return ""
 	}
-	peer := net.ParseIP(c.RemoteIP())
-	if peer == nil || !isCloudflareIP(peer) {
+	remoteIP := c.RemoteIP()
+	peer := net.ParseIP(remoteIP)
+	trusted := peer != nil && isCloudflareIP(peer)
+	if !trusted {
+		// netip, unlike net.ParseIP, accepts the zone Go puts on link-local
+		// peers ("fe80::1%eth0"). Unmap so "::ffff:10.0.0.1" classifies as IPv4.
+		if addr, err := netip.ParseAddr(remoteIP); err == nil {
+			addr = addr.Unmap()
+			trusted = addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast()
+		}
+	}
+	if !trusted {
 		return ""
 	}
 	clientIP := net.ParseIP(strings.TrimSpace(c.GetHeader("CF-Connecting-IP")))

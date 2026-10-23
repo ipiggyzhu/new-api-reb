@@ -46,15 +46,34 @@ func channelSettingsLock(channelId int) *sync.Mutex {
 
 // channelModelValidationConfigMatches rejects results obtained before a channel edit.
 // Polling progress is excluded because choosing a key updates it during a probe.
+// Keepalive progress is excluded for the same reason: the keepalive task stamps
+// its send time into `settings` on its own schedule, and a sweep of a channel
+// with many models routinely spans one of those stamps.
 func channelModelValidationConfigMatches(current, expected *Channel) bool {
 	return current.Status == expected.Status && current.Models == expected.Models &&
-		current.GetModelMapping() == expected.GetModelMapping() && current.OtherSettings == expected.OtherSettings &&
+		current.GetModelMapping() == expected.GetModelMapping() && channelSettingsMatchIgnoringKeepalive(current.OtherSettings, expected.OtherSettings) &&
 		current.Key == expected.Key && current.Type == expected.Type && current.GetBaseURL() == expected.GetBaseURL() &&
 		reflect.DeepEqual(current.OpenAIOrganization, expected.OpenAIOrganization) &&
 		current.ChannelInfo.IsMultiKey == expected.ChannelInfo.IsMultiKey &&
 		reflect.DeepEqual(current.ChannelInfo.MultiKeyStatusList, expected.ChannelInfo.MultiKeyStatusList) &&
 		current.Other == expected.Other && reflect.DeepEqual(current.Setting, expected.Setting) &&
 		reflect.DeepEqual(current.ParamOverride, expected.ParamOverride) && reflect.DeepEqual(current.HeaderOverride, expected.HeaderOverride)
+}
+
+// channelSettingsMatchIgnoringKeepalive compares two raw `settings` columns with
+// the keepalive send time cleared. Unparsable JSON only matches byte for byte,
+// which is the comparison this replaced.
+func channelSettingsMatchIgnoringKeepalive(current, expected string) bool {
+	if current == expected {
+		return true
+	}
+	var currentSettings, expectedSettings dto.ChannelOtherSettings
+	if common.UnmarshalJsonStr(current, &currentSettings) != nil || common.UnmarshalJsonStr(expected, &expectedSettings) != nil {
+		return false
+	}
+	currentSettings.UpstreamKeepaliveLastTime = 0
+	expectedSettings.UpstreamKeepaliveLastTime = 0
+	return reflect.DeepEqual(currentSettings, expectedSettings)
 }
 
 // ApplyChannelModelSweep commits a validated catalogue, its routes, and a

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -14,7 +15,7 @@ import (
 )
 
 // RegisterScheduledSystemTasks wires the periodic channel test, upstream model
-// update, and async task polling (Midjourney / Suno / video) jobs into the
+// update, upstream keepalive, and async task polling (Midjourney / Suno / video) jobs into the
 // system task framework so a DB lease dedups execution across multiple master
 // instances and each run is recorded as one task row. Call this before
 // service.StartSystemTaskRunner.
@@ -24,6 +25,47 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(midjourneyPollHandler{})
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
 	service.RegisterSystemTaskHandler(scoreProjectionHandler{})
+	service.RegisterSystemTaskHandler(channelKeepaliveHandler{})
+}
+
+// channelKeepaliveHandler sends the per-channel upstream keepalives. Each
+// channel has its own switch, interval and active window in its settings, and
+// is only due in the gaps of its own real traffic, so there is no global
+// cadence: Enabled() asks whether any channel is due, which keeps an idle
+// installation from scheduling a row every minute, and the one-minute Interval
+// is only the resolution at which due channels are picked up.
+type channelKeepaliveHandler struct{}
+
+func (channelKeepaliveHandler) Type() string { return model.SystemTaskTypeChannelKeepalive }
+
+func (channelKeepaliveHandler) Enabled() bool {
+	ids, err := findDueKeepaliveChannelIDs(common.GetTimestamp())
+	return err == nil && len(ids) > 0
+}
+
+func (channelKeepaliveHandler) Interval() time.Duration { return time.Minute }
+
+func (channelKeepaliveHandler) NewPayload() any { return nil }
+
+// Run records a pass in which any keepalive failed as failed, with the failing
+// channel ids in the error column, so the system task list shows it without
+// opening the result. The channels themselves are left alone.
+func (channelKeepaliveHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	summary, err := runChannelKeepalivePass(ctx)
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	if summary.Failed > 0 {
+		ids := make([]string, 0, len(summary.Failures))
+		for _, failure := range summary.Failures {
+			ids = append(ids, fmt.Sprintf("#%d", failure.ChannelId))
+		}
+		err := fmt.Errorf("%d of %d keepalives failed: channels %s", summary.Failed, summary.Due, strings.Join(ids, ", "))
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, summary, nil)
 }
 
 // scoreProjectionHandler refreshes the effective priority and weight shown in the

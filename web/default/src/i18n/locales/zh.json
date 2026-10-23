@@ -5422,6 +5422,18 @@
     "Failed to load TLS fingerprints": "加载 TLS 指纹失败",
     "Enter channel IDs as positive integers separated by commas or newlines.": "请输入正整数渠道 ID，用逗号或换行分隔。",
     "Excluded Channel IDs": "排除自动更新的渠道 ID",
-    "Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.": "用逗号或换行分隔渠道 ID。全局模型更新会跳过这些渠道，即使开启“扫描所有已启用渠道”也不会更新；仍可单独手动检测。留空表示不排除。"
+    "Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.": "用逗号或换行分隔渠道 ID。全局模型更新会跳过这些渠道，即使开启“扫描所有已启用渠道”也不会更新；仍可单独手动检测。留空表示不排除。",
+    "Upstream keepalive": "上游保活",
+    "Enable upstream keepalive": "启用上游保活",
+    "While the channel is in use, send a tiny request with the channel's own key whenever real requests pause, so the upstream does not go idle in the gaps. Nothing is sent while real requests are flowing or once the active window has passed. Keepalive traffic is not billed, not logged as usage, does not affect channel scoring, and never disables the channel.": "渠道使用期间，真实请求一停下就按间隔用本渠道自己的 key 发送一笔极小的请求，避免上游在请求间隙被判定为闲置。有真实请求在流动时不发，超过活动窗口后也不再发。保活流量不计费、不写消费日志、不影响渠道评分，失败也不会禁用渠道。",
+    "Keepalive interval (minutes)": "保活间隔（分钟）",
+    "Between 5 and 10080 minutes. Each send is offset by up to ±10% so channels do not fire together.": "取值 5 到 10080 分钟。每次发送最多偏移 ±10%，避免多个渠道同时发送。",
+    "Last keepalive time": "上次保活时间",
+    "Keepalive interval must be at least 5 minutes": "保活间隔不能少于 5 分钟",
+    "Keepalive interval must be at most 10080 minutes": "保活间隔不能超过 10080 分钟",
+    "Keepalive active window (minutes)": "保活活动窗口（分钟）",
+    "Between 5 and 10080 minutes. Keepalives continue for this long after the last real request, then stop until the channel is used again. Set it longer than the interval.": "取值 5 到 10080 分钟。最后一次真实请求之后的这段时间内继续保活，之后停止，直到渠道再次被使用。应大于保活间隔。",
+    "Keepalive active window must be at least 5 minutes": "保活活动窗口不能少于 5 分钟",
+    "Keepalive active window must be at most 10080 minutes": "保活活动窗口不能超过 10080 分钟"
   }
 }

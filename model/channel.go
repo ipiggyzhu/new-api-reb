@@ -1238,6 +1238,9 @@ func (channel *Channel) ValidateSettings() error {
 			return err
 		}
 	}
+	if err := channelOtherSettings.ValidateUpstreamKeepalive(); err != nil {
+		return err
+	}
 	return nil
 }
 

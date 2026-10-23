@@ -116,3 +116,39 @@ func TestRecordIpLogForAllBindsFromStoredOption(t *testing.T) {
 	}))
 	assert.False(t, operation_setting.ShouldRecordIpForAllUsers())
 }
+
+// Production runs Cloudflare -> nginx on the same host -> app. gin trusts the
+// loopback peer and walks X-Forwarded-For back to the first untrusted hop, which
+// is the Cloudflare edge, so every log row carried the edge IP. With no site
+// option the log row must carry CF-Connecting-IP from that local hop, while a
+// public peer outside Cloudflare's ranges still cannot pick its logged IP.
+func TestClientIpForLogTrustsLocalProxyCfConnectingIp(t *testing.T) {
+	withRecordIpForAll(t, true)
+	gin.SetMode(gin.TestMode)
+
+	tests := []struct {
+		name       string
+		remoteAddr string
+		cfHeader   string
+		want       string
+	}{
+		{name: "local proxy hop logs the visitor", remoteAddr: "127.0.0.1:51234", cfHeader: "203.0.113.7", want: "203.0.113.7"},
+		{name: "local proxy hop without the header keeps what gin resolves", remoteAddr: "127.0.0.1:51234", want: "104.23.160.12"},
+		{name: "public non cloudflare peer cannot forge the logged ip", remoteAddr: "198.51.100.9:443", cfHeader: "203.0.113.7", want: "198.51.100.9"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, engine := gin.CreateTestContext(httptest.NewRecorder())
+			require.NoError(t, engine.SetTrustedProxies([]string{"127.0.0.0/8", "::1"}))
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			c.Request.RemoteAddr = tt.remoteAddr
+			c.Request.Header.Set("X-Forwarded-For", "203.0.113.7, 104.23.160.12")
+			if tt.cfHeader != "" {
+				c.Request.Header.Set("CF-Connecting-IP", tt.cfHeader)
+			}
+
+			assert.Equal(t, tt.want, clientIpForLog(c, 0))
+		})
+	}
+}

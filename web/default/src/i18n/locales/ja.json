@@ -5422,6 +5422,18 @@
     "Failed to load TLS fingerprints": "TLS フィンガープリントの読み込みに失敗しました",
     "Enter channel IDs as positive integers separated by commas or newlines.": "正の整数のチャネル ID をカンマまたは改行で区切って入力してください。",
     "Excluded Channel IDs": "自動更新から除外するチャネル ID",
-    "Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.": "チャネル ID をカンマまたは改行で区切って入力します。すべての有効なチャネルをスキャンする場合も、全体のモデル更新ではこれらを除外します。個別の手動チェックは可能です。空欄の場合は除外しません。"
+    "Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.": "チャネル ID をカンマまたは改行で区切って入力します。すべての有効なチャネルをスキャンする場合も、全体のモデル更新ではこれらを除外します。個別の手動チェックは可能です。空欄の場合は除外しません。",
+    "Upstream keepalive": "アップストリーム キープアライブ",
+    "Enable upstream keepalive": "アップストリーム キープアライブを有効化",
+    "While the channel is in use, send a tiny request with the channel's own key whenever real requests pause, so the upstream does not go idle in the gaps. Nothing is sent while real requests are flowing or once the active window has passed. Keepalive traffic is not billed, not logged as usage, does not affect channel scoring, and never disables the channel.": "チャネルの利用中、実リクエストが途切れたら間隔ごとにチャネル自身のキーでごく小さなリクエストを送り、合間に上流がアイドルと判定されないようにします。実リクエストが流れている間や、アクティブウィンドウを過ぎた後は送信しません。キープアライブのトラフィックは課金されず、使用ログにも記録されず、チャネルスコアにも影響せず、チャネルを無効化することもありません。",
+    "Keepalive interval (minutes)": "キープアライブ間隔（分）",
+    "Between 5 and 10080 minutes. Each send is offset by up to ±10% so channels do not fire together.": "5〜10080 分。各送信は最大 ±10% ずらされ、複数のチャネルが同時に送信しないようにします。",
+    "Last keepalive time": "最終キープアライブ時刻",
+    "Keepalive interval must be at least 5 minutes": "キープアライブ間隔は 5 分以上にしてください",
+    "Keepalive interval must be at most 10080 minutes": "キープアライブ間隔は 10080 分以下にしてください",
+    "Keepalive active window (minutes)": "キープアライブのアクティブウィンドウ（分）",
+    "Between 5 and 10080 minutes. Keepalives continue for this long after the last real request, then stop until the channel is used again. Set it longer than the interval.": "5〜10080 分。最後の実リクエストからこの時間内はキープアライブを続け、その後はチャネルが再び使われるまで停止します。間隔より長く設定してください。",
+    "Keepalive active window must be at least 5 minutes": "キープアライブのアクティブウィンドウは 5 分以上にしてください",
+    "Keepalive active window must be at most 10080 minutes": "キープアライブのアクティブウィンドウは 10080 分以下にしてください"
   }
 }

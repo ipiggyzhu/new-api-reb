@@ -22,6 +22,12 @@ import {
   CHANNEL_STATUS,
   ERROR_MESSAGES,
   MODEL_FETCHABLE_TYPES,
+  UPSTREAM_KEEPALIVE_DEFAULT_ACTIVE_WINDOW_MINUTES,
+  UPSTREAM_KEEPALIVE_DEFAULT_INTERVAL_MINUTES,
+  UPSTREAM_KEEPALIVE_MAX_ACTIVE_WINDOW_MINUTES,
+  UPSTREAM_KEEPALIVE_MAX_INTERVAL_MINUTES,
+  UPSTREAM_KEEPALIVE_MIN_ACTIVE_WINDOW_MINUTES,
+  UPSTREAM_KEEPALIVE_MIN_INTERVAL_MINUTES,
 } from '../constants'
 import type { Channel } from '../types'
 import {
@@ -317,6 +323,32 @@ export const channelFormSchema = z
     upstream_model_update_check_enabled: z.boolean().optional(),
     upstream_model_update_auto_sync_enabled: z.boolean().optional(),
     upstream_model_update_ignored_models: z.string().optional(),
+    // Upstream keepalive (stored in settings JSON); bounds match the backend
+    upstream_keepalive_enabled: z.boolean().optional(),
+    upstream_keepalive_interval_minutes: z
+      .number()
+      .int()
+      .min(
+        UPSTREAM_KEEPALIVE_MIN_INTERVAL_MINUTES,
+        'Keepalive interval must be at least 5 minutes'
+      )
+      .max(
+        UPSTREAM_KEEPALIVE_MAX_INTERVAL_MINUTES,
+        'Keepalive interval must be at most 10080 minutes'
+      )
+      .optional(),
+    upstream_keepalive_active_window_minutes: z
+      .number()
+      .int()
+      .min(
+        UPSTREAM_KEEPALIVE_MIN_ACTIVE_WINDOW_MINUTES,
+        'Keepalive active window must be at least 5 minutes'
+      )
+      .max(
+        UPSTREAM_KEEPALIVE_MAX_ACTIVE_WINDOW_MINUTES,
+        'Keepalive active window must be at most 10080 minutes'
+      )
+      .optional(),
   })
   .superRefine((data, ctx) => {
     if (
@@ -482,6 +514,11 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   upstream_model_update_check_enabled: false,
   upstream_model_update_auto_sync_enabled: false,
   upstream_model_update_ignored_models: '',
+  upstream_keepalive_enabled: false,
+  upstream_keepalive_interval_minutes:
+    UPSTREAM_KEEPALIVE_DEFAULT_INTERVAL_MINUTES,
+  upstream_keepalive_active_window_minutes:
+    UPSTREAM_KEEPALIVE_DEFAULT_ACTIVE_WINDOW_MINUTES,
   advanced_custom: '',
 }
 
@@ -577,6 +614,11 @@ export function transformChannelToFormDefaults(
   let upstreamModelUpdateCheckEnabled = false
   let upstreamModelUpdateAutoSyncEnabled = false
   let upstreamModelUpdateIgnoredModels = ''
+  let upstreamKeepaliveEnabled = false
+  let upstreamKeepaliveIntervalMinutes =
+    UPSTREAM_KEEPALIVE_DEFAULT_INTERVAL_MINUTES
+  let upstreamKeepaliveActiveWindowMinutes =
+    UPSTREAM_KEEPALIVE_DEFAULT_ACTIVE_WINDOW_MINUTES
   let advancedCustom = ''
 
   if (channel.settings) {
@@ -603,6 +645,22 @@ export function transformChannelToFormDefaults(
       )
         ? parsed.upstream_model_update_ignored_models.join(',')
         : ''
+      upstreamKeepaliveEnabled = parsed.upstream_keepalive_enabled === true
+      // 0 or absent means the backend default
+      if (
+        typeof parsed.upstream_keepalive_interval_minutes === 'number' &&
+        parsed.upstream_keepalive_interval_minutes > 0
+      ) {
+        upstreamKeepaliveIntervalMinutes =
+          parsed.upstream_keepalive_interval_minutes
+      }
+      if (
+        typeof parsed.upstream_keepalive_active_window_minutes === 'number' &&
+        parsed.upstream_keepalive_active_window_minutes > 0
+      ) {
+        upstreamKeepaliveActiveWindowMinutes =
+          parsed.upstream_keepalive_active_window_minutes
+      }
       if (parsed.advanced_custom) {
         advancedCustom = stringifyAdvancedCustomConfig(parsed.advanced_custom)
       }
@@ -657,6 +715,10 @@ export function transformChannelToFormDefaults(
     upstream_model_update_check_enabled: upstreamModelUpdateCheckEnabled,
     upstream_model_update_auto_sync_enabled: upstreamModelUpdateAutoSyncEnabled,
     upstream_model_update_ignored_models: upstreamModelUpdateIgnoredModels,
+    upstream_keepalive_enabled: upstreamKeepaliveEnabled,
+    upstream_keepalive_interval_minutes: upstreamKeepaliveIntervalMinutes,
+    upstream_keepalive_active_window_minutes:
+      upstreamKeepaliveActiveWindowMinutes,
     advanced_custom: advancedCustom,
   }
 }
@@ -823,6 +885,17 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
       settingsObj.upstream_model_update_last_check_time = 0
     }
   }
+
+  // Upstream keepalive. upstream_keepalive_last_time is written by the backend
+  // task and survives through the merge above.
+  settingsObj.upstream_keepalive_enabled =
+    formData.upstream_keepalive_enabled === true
+  settingsObj.upstream_keepalive_interval_minutes =
+    formData.upstream_keepalive_interval_minutes ||
+    UPSTREAM_KEEPALIVE_DEFAULT_INTERVAL_MINUTES
+  settingsObj.upstream_keepalive_active_window_minutes =
+    formData.upstream_keepalive_active_window_minutes ||
+    UPSTREAM_KEEPALIVE_DEFAULT_ACTIVE_WINDOW_MINUTES
 
   if (formData.type === CHANNEL_TYPE_ADVANCED_CUSTOM) {
     const advancedCustomConfig = parseAdvancedCustomConfig(

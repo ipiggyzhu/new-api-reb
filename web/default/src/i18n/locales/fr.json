@@ -5422,6 +5422,18 @@
     "Failed to load TLS fingerprints": "Échec du chargement des empreintes TLS",
     "Enter channel IDs as positive integers separated by commas or newlines.": "Saisissez des ID entiers positifs, séparés par des virgules ou des sauts de ligne.",
     "Excluded Channel IDs": "ID des canaux exclus",
-    "Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.": "Séparez les ID par des virgules ou des sauts de ligne. Les mises à jour globales ignorent ces canaux, même si tous les canaux actifs sont analysés. La vérification manuelle reste possible pour chaque canal. Laissez vide pour ne rien exclure."
+    "Separate channel IDs with commas or newlines. Global model updates skip these channels even when scanning all enabled channels. You can still check an excluded channel manually. Leave empty to exclude none.": "Séparez les ID par des virgules ou des sauts de ligne. Les mises à jour globales ignorent ces canaux, même si tous les canaux actifs sont analysés. La vérification manuelle reste possible pour chaque canal. Laissez vide pour ne rien exclure.",
+    "Upstream keepalive": "Maintien en activité amont",
+    "Enable upstream keepalive": "Activer le maintien en activité amont",
+    "While the channel is in use, send a tiny request with the channel's own key whenever real requests pause, so the upstream does not go idle in the gaps. Nothing is sent while real requests are flowing or once the active window has passed. Keepalive traffic is not billed, not logged as usage, does not affect channel scoring, and never disables the channel.": "Tant que le canal est utilisé, envoie une toute petite requête avec la clé du canal dès que les vraies requêtes marquent une pause, afin que l'amont ne soit pas considéré comme inactif pendant ces intervalles. Rien n'est envoyé pendant que de vraies requêtes circulent ni après la fin de la fenêtre d'activité. Ce trafic n'est pas facturé, n'est pas journalisé comme consommation, n'influe pas sur le score du canal et ne désactive jamais le canal.",
+    "Keepalive interval (minutes)": "Intervalle de maintien (minutes)",
+    "Between 5 and 10080 minutes. Each send is offset by up to ±10% so channels do not fire together.": "Entre 5 et 10080 minutes. Chaque envoi est décalé d'au plus ±10 % pour que les canaux ne partent pas tous en même temps.",
+    "Last keepalive time": "Dernier maintien en activité",
+    "Keepalive interval must be at least 5 minutes": "L'intervalle de maintien doit être d'au moins 5 minutes",
+    "Keepalive interval must be at most 10080 minutes": "L'intervalle de maintien doit être d'au plus 10080 minutes",
+    "Keepalive active window (minutes)": "Fenêtre d'activité du keepalive (minutes)",
+    "Between 5 and 10080 minutes. Keepalives continue for this long after the last real request, then stop until the channel is used again. Set it longer than the interval.": "Entre 5 et 10080 minutes. Les keepalives continuent pendant cette durée après la dernière vraie requête, puis s'arrêtent jusqu'à ce que le canal soit de nouveau utilisé. Choisissez une valeur supérieure à l'intervalle.",
+    "Keepalive active window must be at least 5 minutes": "La fenêtre d'activité du keepalive doit être d'au moins 5 minutes",
+    "Keepalive active window must be at most 10080 minutes": "La fenêtre d'activité du keepalive doit être d'au plus 10080 minutes"
   }
 }

@@ -168,6 +168,11 @@ export interface ChannelOtherSettings {
   upstream_model_update_ignored_models?: string[]
   upstream_model_update_last_check_time?: number
   upstream_model_update_last_detected_models?: string[]
+  upstream_keepalive_enabled?: boolean
+  upstream_keepalive_interval_minutes?: number
+  upstream_keepalive_active_window_minutes?: number
+  /** Unix seconds of the last keepalive send; written by the backend task. */
+  upstream_keepalive_last_time?: number
   /**
    * Written by the backend after a handshake proved the upstream refuses the
    * WebSocket upgrade. Read-only in the UI: surface it as a downgrade notice next

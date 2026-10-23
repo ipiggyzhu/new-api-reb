@@ -801,3 +801,64 @@ func TestStreamScannerHandler_PingFailureAfterClientDisconnectIsClientGone(t *te
 	assert.Equal(t, relaycommon.StreamEndReasonClientGone, info.StreamStatus.EndReason)
 	assert.Nil(t, info.StreamStatus.FailureError(), "a client hangup must not be charged to the channel")
 }
+
+// TestStreamScannerHandler_StreamOutlivesPingBudget pins that the ping budget
+// only ends the pings. Stopping the whole stream when it ran out cut every
+// ping-enabled stream at exactly that mark and, with no end reason of its own,
+// the cut surfaced as a bad_response fault charged to the channel.
+func TestStreamScannerHandler_StreamOutlivesPingBudget(t *testing.T) {
+	setting := operation_setting.GetGeneralSetting()
+	oldEnabled := setting.PingIntervalEnabled
+	oldSeconds := setting.PingIntervalSeconds
+	oldMaxPing := maxPingDuration
+	setting.PingIntervalEnabled = true
+	setting.PingIntervalSeconds = 1
+	maxPingDuration = 1500 * time.Millisecond
+	t.Cleanup(func() {
+		setting.PingIntervalEnabled = oldEnabled
+		setting.PingIntervalSeconds = oldSeconds
+		maxPingDuration = oldMaxPing
+	})
+
+	// 8 chunks 300ms apart: the stream runs well past the 1.5s ping budget.
+	const chunks = 8
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pr.Close() })
+	go func() {
+		defer pw.Close()
+		for i := 0; i < chunks; i++ {
+			if _, err := fmt.Fprintf(pw, "data: chunk_%d\n", i); err != nil {
+				return
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		fmt.Fprint(pw, "data: [DONE]\n")
+	}()
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	resp := &http.Response{Body: pr}
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
+
+	var count atomic.Int64
+	done := make(chan struct{})
+	go func() {
+		StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {
+			count.Add(1)
+		})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for stream to finish")
+	}
+
+	assert.GreaterOrEqual(t, strings.Count(recorder.Body.String(), ": PING"), 1,
+		"pings must have been active before the budget ran out")
+	assert.Equal(t, int64(chunks), count.Load(), "the stream must not be truncated when the ping budget runs out")
+	require.NotNil(t, info.StreamStatus)
+	assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
+	assert.Nil(t, info.StreamStatus.FailureError(), "outliving the ping budget must not be charged to the channel")
+}

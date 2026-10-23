@@ -35,6 +35,31 @@ func TestValidateChannelStillRejectsEmptyKeyOnAdd(t *testing.T) {
 	require.Error(t, err, "adding a channel with an empty key must still fail")
 }
 
+// Saving a channel is where an out-of-range keepalive interval is refused, so
+// a channel cannot be configured to keepalive more often than every 5 minutes.
+func TestValidateChannelUpstreamKeepaliveInterval(t *testing.T) {
+	for _, tc := range []struct {
+		name, settings string
+		valid          bool
+	}{
+		{"keepalive off", `{}`, true},
+		{"default interval", `{"upstream_keepalive_enabled":true}`, true},
+		{"lower bound", `{"upstream_keepalive_enabled":true,"upstream_keepalive_interval_minutes":5}`, true},
+		{"below lower bound", `{"upstream_keepalive_enabled":true,"upstream_keepalive_interval_minutes":4}`, false},
+		{"negative", `{"upstream_keepalive_interval_minutes":-1}`, false},
+		{"above upper bound", `{"upstream_keepalive_enabled":true,"upstream_keepalive_interval_minutes":10081}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateChannel(&model.Channel{Type: 1, OtherSettings: tc.settings}, false)
+			if tc.valid {
+				require.NoError(t, err)
+			} else {
+				require.ErrorContains(t, err, "upstream_keepalive_interval_minutes")
+			}
+		})
+	}
+}
+
 func TestValidateChannelCLIVersionConfiguration(t *testing.T) {
 	for _, tc := range []struct {
 		name, setting string

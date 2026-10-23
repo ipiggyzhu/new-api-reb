@@ -43,6 +43,13 @@ const (
 	maxNonStreamBodyBytes = 2 << 10 // 2KB
 )
 
+// maxPingDuration bounds how long one stream keeps sending keepalive pings. It
+// is a budget for the ping goroutine only: reaching it stops the pings and
+// nothing else. Ending the stream here cut every ping-enabled stream at exactly
+// this mark, and the verdict chain then charged the cut to the channel as a
+// bad_response fault. A var so tests can shorten it.
+var maxPingDuration = 30 * time.Minute
+
 // isSSEFramingLine reports the lines an SSE body carries besides its payload:
 // blank separators, comments, and the fields other than data. Healthy streams
 // are full of them, so they are never evidence that a body was not a stream.
@@ -227,7 +234,6 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			}()
 
 			// 添加超时保护，防止 goroutine 无限运行
-			maxPingDuration := 30 * time.Minute // 最大 ping 持续时间
 			pingTimeout := time.NewTimer(maxPingDuration)
 			defer pingTimeout.Stop()
 
@@ -265,8 +271,9 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 					// 监听客户端断开连接
 					return
 				case <-pingTimeout.C:
-					logger.LogError(c, "ping goroutine max duration reached")
-					stop()
+					// Only the pings end; the stream carries on and its end reason
+					// is left to whatever actually ends it.
+					logger.LogWarn(c, "ping goroutine max duration reached, keepalive pings stopped")
 					return
 				}
 			}
