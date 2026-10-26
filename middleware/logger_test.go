@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -91,4 +92,82 @@ func TestAccessLogFallsBackToWebTag(t *testing.T) {
 	server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/untagged", nil))
 
 	assert.Contains(t, out.String(), "| web |", "a route without RouteTag must be logged as web")
+}
+
+// TestAccessLogRedactsQueryCredentials pins what the access log may keep from a
+// query string. Gemini-style clients authenticate with ?key=sk-..., OAuth
+// callbacks carry a one-time code and state, and the log file is read far more
+// widely than the token table, so none of those may reach it, while ordinary
+// parameters stay greppable and the handler still sees the original query.
+func TestAccessLogRedactsQueryCredentials(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	original := gin.DefaultWriter
+	t.Cleanup(func() { gin.DefaultWriter = original })
+
+	cases := []struct {
+		name        string
+		target      string
+		wantInLog   []string
+		wantAbsent  []string
+		handlerSees string
+	}{
+		{
+			name:        "gemini api key in query",
+			target:      "/v1beta/models/gemini-pro:streamGenerateContent?alt=sse&key=sk-live-secret",
+			wantInLog:   []string{"/v1beta/models/gemini-pro:streamGenerateContent?", "alt=sse", "key=%2A%2A%2Amasked%2A%2A%2A"},
+			wantAbsent:  []string{"sk-live-secret"},
+			handlerSees: "sk-live-secret",
+		},
+		{
+			name:        "oauth callback code and state",
+			target:      "/api/oauth/github?code=one-time-code&state=csrf-state",
+			wantInLog:   []string{"GET /api/oauth/github\n"},
+			wantAbsent:  []string{"one-time-code", "csrf-state", "?"},
+			handlerSees: "",
+		},
+		{
+			name:        "malformed query is dropped, not half-masked",
+			target:      "/v1beta/models/gemini-pro:generateContent?key=sk-live-secret%zz",
+			wantInLog:   []string{"GET /v1beta/models/gemini-pro:generateContent\n"},
+			wantAbsent:  []string{"sk-live-secret", "?"},
+			handlerSees: "",
+		},
+		{
+			name:        "ordinary query stays readable",
+			target:      "/api/log/self?p=2&page_size=10",
+			wantInLog:   []string{"/api/log/self?p=2&page_size=10"},
+			handlerSees: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := &bytes.Buffer{}
+			gin.DefaultWriter = out
+
+			var seenKey string
+			server := gin.New()
+			SetUpLogger(server)
+			server.NoRoute(func(c *gin.Context) {
+				seenKey = c.Query("key")
+				c.Status(http.StatusNoContent)
+			})
+
+			recorder := httptest.NewRecorder()
+			server.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, tc.target, nil))
+			require.Equal(t, http.StatusNoContent, recorder.Code)
+
+			line := out.String()
+			for _, want := range tc.wantInLog {
+				assert.Contains(t, line, want)
+			}
+			// The redaction must not reach the request itself.
+			if tc.handlerSees != "" {
+				assert.Equal(t, tc.handlerSees, seenKey)
+			}
+			_, logged, _ := strings.Cut(line, "| GET ")
+			for _, absent := range tc.wantAbsent {
+				assert.NotContains(t, logged, absent)
+			}
+		})
+	}
 }

@@ -182,6 +182,11 @@ func GetFingerprintHTTPClient(proxyURL, fingerprint string, clientFamily ...stri
 	if !ok {
 		return nil, fmt.Errorf("unsupported tls fingerprint: %q", fingerprint)
 	}
+	// A version profile must supply one complete captured TLS record. Reject
+	// missing/oversized captures before creating either HTTP or WS transport.
+	if LookupCLIVersionProfile(fingerprint) != nil && (opt.rawHello == "" || len(opt.rawHello) > 2*(65535+5)) {
+		return nil, fmt.Errorf("invalid captured client hello length for %q", fingerprint)
+	}
 	var customHello []byte
 	if opt.rawHello != "" {
 		decoded, err := hex.DecodeString(opt.rawHello)
@@ -256,6 +261,40 @@ func validateFingerprintProxyURL(proxyURL string) error {
 	default:
 		return fmt.Errorf("unsupported proxy scheme: %s, must be http, https, socks5 or socks5h", parsed.Scheme)
 	}
+}
+
+// NewFingerprintTLSDialer uses the same captured hello and proxy tunnel as HTTP.
+// It owns proxy setup; a WebSocket dialer using it must leave Proxy unset.
+func NewFingerprintTLSDialer(proxyURL, fingerprint string) (func(context.Context, string, string) (net.Conn, error), error) {
+	client, err := GetFingerprintHTTPClient(proxyURL, fingerprint)
+	if err != nil {
+		return nil, err
+	}
+	rt := client.Transport.(*utlsRoundTripper)
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		var parsedProxy *url.URL
+		if proxyURL != "" {
+			parsedProxy, err = url.Parse(proxyURL)
+		} else {
+			parsedProxy, err = http.ProxyFromEnvironment(&http.Request{URL: &url.URL{Scheme: "https", Host: addr}})
+		}
+		if err != nil {
+			return nil, err
+		}
+		conn, err := rt.dialTLS(ctx, host, addr, parsedProxy)
+		if err != nil {
+			return nil, err
+		}
+		if protocol := conn.ConnectionState().NegotiatedProtocol; protocol != "" && protocol != "http/1.1" {
+			_ = conn.Close()
+			return nil, fmt.Errorf("websocket upgrade requires HTTP/1.1, negotiated %s", protocol)
+		}
+		return conn, nil
+	}, nil
 }
 
 // utlsRoundTripper dials a fresh connection per request, performs the utls
@@ -356,6 +395,30 @@ func (rt *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	}
 	addr := net.JoinHostPort(host, port)
 
+	uconn, err := rt.dialTLS(ctx, host, addr, proxyURL)
+	if err != nil {
+		return nil, err
+	}
+
+	if uconn.ConnectionState().NegotiatedProtocol == http2NextProto {
+		cc, err := rt.h2.NewClientConn(uconn)
+		if err != nil {
+			_ = uconn.Close()
+			return nil, err
+		}
+		resp, err := cc.RoundTrip(req)
+		if err != nil {
+			_ = cc.Close()
+			return nil, err
+		}
+		resp.Body = &connClosingBody{ReadCloser: resp.Body, closer: cc}
+		return resp, nil
+	}
+
+	return rt.roundTripOverConn(req, uconn)
+}
+
+func (rt *utlsRoundTripper) dialTLS(ctx context.Context, host, addr string, proxyURL *url.URL) (*utls.UConn, error) {
 	raw, err := rt.dialRaw(ctx, proxyURL, addr)
 	if err != nil {
 		return nil, err
@@ -393,22 +456,7 @@ func (rt *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 		return nil, err
 	}
 
-	if uconn.ConnectionState().NegotiatedProtocol == http2NextProto {
-		cc, err := rt.h2.NewClientConn(uconn)
-		if err != nil {
-			_ = uconn.Close()
-			return nil, err
-		}
-		resp, err := cc.RoundTrip(req)
-		if err != nil {
-			_ = cc.Close()
-			return nil, err
-		}
-		resp.Body = &connClosingBody{ReadCloser: resp.Body, closer: cc}
-		return resp, nil
-	}
-
-	return rt.roundTripOverConn(req, uconn)
+	return uconn, nil
 }
 
 // roundTripOverConn speaks HTTP/1.1 over a connection this round tripper already

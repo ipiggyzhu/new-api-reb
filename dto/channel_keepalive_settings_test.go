@@ -44,11 +44,56 @@ func TestValidateUpstreamKeepalive(t *testing.T) {
 		interval := ChannelOtherSettings{UpstreamKeepaliveIntervalMinutes: tc.minutes}
 		window := ChannelOtherSettings{UpstreamKeepaliveActiveWindowMinutes: tc.minutes}
 		if tc.valid {
-			assert.NoError(t, interval.ValidateUpstreamKeepalive(), "interval minutes=%d", tc.minutes)
-			assert.NoError(t, window.ValidateUpstreamKeepalive(), "window minutes=%d", tc.minutes)
+			assert.NoError(t, interval.ValidateUpstreamKeepalive(nil), "interval minutes=%d", tc.minutes)
+			assert.NoError(t, window.ValidateUpstreamKeepalive(nil), "window minutes=%d", tc.minutes)
 		} else {
-			assert.ErrorContains(t, interval.ValidateUpstreamKeepalive(), "upstream_keepalive_interval_minutes", "minutes=%d", tc.minutes)
-			assert.ErrorContains(t, window.ValidateUpstreamKeepalive(), "upstream_keepalive_active_window_minutes", "minutes=%d", tc.minutes)
+			assert.ErrorContains(t, interval.ValidateUpstreamKeepalive(nil), "upstream_keepalive_interval_minutes", "minutes=%d", tc.minutes)
+			assert.ErrorContains(t, window.ValidateUpstreamKeepalive(nil), "upstream_keepalive_active_window_minutes", "minutes=%d", tc.minutes)
+		}
+	}
+}
+
+// An enabled keepalive must come due before its window closes in every quiet
+// period: the effective window (defaults applied) has to cover the effective
+// interval, its +10% jitter and the one-minute scheduler tick. One minute
+// short of that, some jitter rolls let the window close first and that quiet
+// period gets no keepalive. Only a newly saved switch/interval/window is held
+// to the rule; a channel whose stored keepalive triple predates it still saves
+// unchanged, so editing its other fields keeps working.
+func TestValidateUpstreamKeepaliveWindowFitsInterval(t *testing.T) {
+	on := func(interval, window int) ChannelOtherSettings {
+		return ChannelOtherSettings{UpstreamKeepaliveEnabled: true, UpstreamKeepaliveIntervalMinutes: interval, UpstreamKeepaliveActiveWindowMinutes: window}
+	}
+	legacy := on(180, 0)
+	for _, tc := range []struct {
+		name     string
+		settings ChannelOtherSettings
+		previous *ChannelOtherSettings
+		valid    bool
+	}{
+		{"defaults 30 within 120", on(0, 0), nil, true},
+		{"minimum interval at its minimum window", on(5, 7), nil, true},
+		{"minimum interval one minute short", on(5, 6), nil, false},
+		{"default interval at its minimum window", on(30, 34), nil, true},
+		{"default interval one minute short", on(30, 33), nil, false},
+		{"default window at its minimum", on(120, 133), nil, true},
+		{"default window one minute short", on(120, 132), nil, false},
+		{"interval just below window", on(119, 120), nil, false},
+		{"interval equals window", on(120, 120), nil, false},
+		{"interval above default window", on(180, 0), nil, false},
+		{"default interval above short window", on(0, 30), nil, false},
+		{"switched off keeps any values", ChannelOtherSettings{UpstreamKeepaliveIntervalMinutes: 180, UpstreamKeepaliveActiveWindowMinutes: 60}, nil, true},
+		{"stored legacy triple unchanged", legacy, &legacy, true},
+		{"legacy channel turns on with the bad pair", on(180, 0), &ChannelOtherSettings{UpstreamKeepaliveIntervalMinutes: 180}, false},
+		{"legacy channel changes its interval", on(150, 0), &legacy, false},
+		{"legacy channel fixes its window", on(180, 240), &legacy, true},
+	} {
+		err := tc.settings.ValidateUpstreamKeepalive(tc.previous)
+		if tc.valid {
+			assert.NoError(t, err, tc.name)
+		} else {
+			assert.ErrorContains(t, err, "upstream_keepalive_active_window_minutes", tc.name)
+			assert.ErrorContains(t, err, "must be at least", tc.name)
 		}
 	}
 }

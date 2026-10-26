@@ -145,4 +145,7 @@ var channelNonSensitiveFields = map[string]struct{}{
 	"remark":              {},
 	"channel_info":        {},
 	"multi_key_mode":      {},
+	// A confirmation that the save may leave keys without an environment; what
+	// it confirms is a key or setting change, which is sensitive on its own.
+	"allow_unassigned": {},
 }

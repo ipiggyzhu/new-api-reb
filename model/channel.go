@@ -1,11 +1,14 @@
 package model
 
 import (
+	"crypto/sha256"
 	"database/sql/driver"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -264,7 +267,43 @@ func (channel *Channel) GetKeys() []string {
 	return keys
 }
 
-func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
+// GetEnabledKeyForSeed picks the enabled key a seed (an affinity conversation)
+// sticks to, by rendezvous hash: the same seed gets the same key while it stays
+// enabled, seeds spread evenly over keys, disabling a key moves only the seeds
+// that were on it, and the polling cursor is left untouched.
+//
+// A key cooling down for modelName after a 429 is ranked out the same way a
+// disabled one is, so the seed moves to its next-best key only for the window
+// and comes back once it ends. With every enabled key cooling the ranking is
+// unchanged. An empty modelName ignores key cooldowns.
+func (channel *Channel) GetEnabledKeyForSeed(seed string, modelName string) (string, int, *types.NewAPIError) {
+	if !channel.ChannelInfo.IsMultiKey {
+		return channel.Key, 0, nil
+	}
+	keys := channel.GetKeys()
+	lock := GetChannelPollingLock(channel.Id)
+	lock.Lock()
+	defer lock.Unlock()
+	candidates := channel.selectableKeyIndexes(keys, channel.enabledKeyIndexes(keys), modelName)
+	best, bestScore := -1, uint64(0)
+	for _, i := range candidates {
+		sum := sha256.Sum256([]byte(seed + "\x00" + keys[i]))
+		if score := binary.BigEndian.Uint64(sum[:8]); best < 0 || score > bestScore {
+			best, bestScore = i, score
+		}
+	}
+	if best < 0 {
+		return "", 0, types.NewError(errors.New("no enabled keys"), types.ErrorCodeChannelNoAvailableKey)
+	}
+	return keys[best], best, nil
+}
+
+// GetNextEnabledKey picks a key by the channel's random/polling mode. Keys
+// cooling down for modelName after a 429 are passed over while an enabled key
+// that is not cooling remains; with every enabled key cooling they all compete
+// as before. An empty modelName (admin sync paths with no model) ignores key
+// cooldowns.
+func (channel *Channel) GetNextEnabledKey(modelName string) (string, int, *types.NewAPIError) {
 	// If not in multi-key mode, return the original key string directly.
 	if !channel.ChannelInfo.IsMultiKey {
 		return channel.Key, 0, nil
@@ -281,36 +320,23 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 	lock.Lock()
 	defer lock.Unlock()
 
-	statusList := channel.ChannelInfo.MultiKeyStatusList
-	// helper to get key status, default to enabled when missing
-	getStatus := func(idx int) int {
-		if statusList == nil {
-			return common.ChannelStatusEnabled
-		}
-		if status, ok := statusList[idx]; ok {
-			return status
-		}
-		return common.ChannelStatusEnabled
-	}
-
-	// Collect indexes of enabled keys
-	enabledIdx := make([]int, 0, len(keys))
-	for i := range keys {
-		if getStatus(i) == common.ChannelStatusEnabled {
-			enabledIdx = append(enabledIdx, i)
-		}
-	}
 	// If no specific status list or none enabled, return an explicit error so caller can
 	// properly handle a channel with no available keys (e.g. mark channel disabled).
 	// Returning the first key here caused requests to keep using an already-disabled key.
+	enabledIdx := channel.enabledKeyIndexes(keys)
 	if len(enabledIdx) == 0 {
 		return "", 0, types.NewError(errors.New("no enabled keys"), types.ErrorCodeChannelNoAvailableKey)
+	}
+	candidateIdx := channel.selectableKeyIndexes(keys, enabledIdx, modelName)
+	isCandidate := make(map[int]bool, len(candidateIdx))
+	for _, idx := range candidateIdx {
+		isCandidate[idx] = true
 	}
 
 	switch channel.ChannelInfo.MultiKeyMode {
 	case constant.MultiKeyModeRandom:
 		// Randomly pick one enabled key
-		selectedIdx := enabledIdx[rand.Intn(len(enabledIdx))]
+		selectedIdx := candidateIdx[rand.Intn(len(candidateIdx))]
 		return keys[selectedIdx], selectedIdx, nil
 	case constant.MultiKeyModePolling:
 		// Where the cursor lives depends on the mode. With the memory cache on,
@@ -329,7 +355,7 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		}
 		for i := 0; i < len(keys); i++ {
 			idx := (start + i) % len(keys)
-			if getStatus(idx) == common.ChannelStatusEnabled {
+			if isCandidate[idx] {
 				// point the cursor at the next position for the following call
 				nextIndex := (idx + 1) % len(keys)
 				channel.ChannelInfo.MultiKeyPollingIndex = nextIndex
@@ -345,10 +371,10 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 			}
 		}
 		// Fallback – should not happen, but return first enabled key
-		return keys[enabledIdx[0]], enabledIdx[0], nil
+		return keys[candidateIdx[0]], candidateIdx[0], nil
 	default:
 		// Unknown mode, default to first enabled key (or original key string)
-		return keys[enabledIdx[0]], enabledIdx[0], nil
+		return keys[candidateIdx[0]], candidateIdx[0], nil
 	}
 }
 
@@ -515,6 +541,12 @@ func GetChannelById(id int, selectAll bool) (*Channel, error) {
 }
 
 func BatchInsertChannels(channels []Channel) error {
+	return BatchInsertChannelsWith(channels, nil)
+}
+
+// BatchInsertChannelsWith is BatchInsertChannels with hook run for every
+// created channel inside the insert transaction; an error rolls back the batch.
+func BatchInsertChannelsWith(channels []Channel, hook func(tx *gorm.DB, created *Channel) error) error {
 	if len(channels) == 0 {
 		return nil
 	}
@@ -538,8 +570,14 @@ func BatchInsertChannels(channels []Channel) error {
 			tx.Rollback()
 			return err
 		}
-		for _, channel_ := range chunk {
-			if err := channel_.AddAbilities(tx); err != nil {
+		for i := range chunk {
+			if hook != nil {
+				if err := hook(tx, &chunk[i]); err != nil {
+					tx.Rollback()
+					return err
+				}
+			}
+			if err := chunk[i].AddAbilities(tx); err != nil {
 				tx.Rollback()
 				return err
 			}
@@ -563,6 +601,10 @@ func BatchDeleteChannels(ids []int) error {
 			return err
 		}
 		if err := tx.Where("channel_id in (?)", chunk).Delete(&Ability{}).Error; err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err := deleteChannelKeyEnvironments(tx, chunk); err != nil {
 			tx.Rollback()
 			return err
 		}
@@ -666,6 +708,13 @@ func (channel *Channel) Insert() error {
 }
 
 func (channel *Channel) Update() error {
+	return channel.UpdateWith(nil)
+}
+
+// UpdateWith is Update with hook run inside the save transaction, after the
+// channel has been written and reloaded and before its abilities are rebuilt.
+// An error from hook rolls the whole save back.
+func (channel *Channel) UpdateWith(hook func(tx *gorm.DB, saved *Channel) error) error {
 	if _, err := channel.normalizeClientHeaderProfile(DB); err != nil && !errors.Is(err, errInvalidChannelClientSettings) {
 		return err
 	}
@@ -711,6 +760,14 @@ func (channel *Channel) Update() error {
 	lock.Lock()
 	defer lock.Unlock()
 	err := DB.Transaction(func(tx *gorm.DB) error {
+		// The keepalive send time belongs to the keepalive task, which stamps it
+		// under the lock held here. The form echoes the value it loaded, so the
+		// stored stamp is kept rather than rolled back to the form's.
+		var stored Channel
+		if err := tx.Select("id", "settings").First(&stored, channel.Id).Error; err != nil {
+			return err
+		}
+		keepaliveLastTime := stored.GetOtherSettings().UpstreamKeepaliveLastTime
 		if err := tx.Model(channel).Updates(channel).Error; err != nil {
 			return err
 		}
@@ -727,6 +784,10 @@ func (channel *Channel) Update() error {
 			}
 			delete(fields, "model_availability")
 			delete(fields, "upstream_model_update_last_removed_models")
+			delete(fields, "upstream_keepalive_last_time")
+			if keepaliveLastTime > 0 {
+				fields["upstream_keepalive_last_time"] = json.RawMessage(strconv.FormatInt(keepaliveLastTime, 10))
+			}
 			if raw, ok := fields["upstream_model_update_model_health"]; ok {
 				var health map[string]dto.ModelHealthState
 				if err := common.Unmarshal(raw, &health); err != nil {
@@ -754,6 +815,11 @@ func (channel *Channel) Update() error {
 				if err := tx.Model(channel).Update("settings", cleaned).Error; err != nil {
 					return err
 				}
+			}
+		}
+		if hook != nil {
+			if err := hook(tx, channel); err != nil {
+				return err
 			}
 		}
 		return channel.UpdateAbilities(tx)
@@ -796,13 +862,16 @@ func (channel *Channel) UpdateBalance(balance float64) {
 }
 
 func (channel *Channel) Delete() error {
-	var err error
-	err = DB.Delete(channel).Error
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Delete(channel).Error; err != nil {
+			return err
+		}
+		return deleteChannelKeyEnvironments(tx, []int{channel.Id})
+	})
 	if err != nil {
 		return err
 	}
-	err = channel.DeleteAbilities()
-	return err
+	return channel.DeleteAbilities()
 }
 
 var channelStatusLock sync.Mutex
@@ -1144,13 +1213,38 @@ func updateChannelUsedQuota(db *gorm.DB, id int, quota int) error {
 }
 
 func DeleteChannelByStatus(status int64) (int64, error) {
-	result := DB.Where("status = ?", status).Delete(&Channel{})
-	return result.RowsAffected, result.Error
+	return deleteChannelsWhere("status = ?", status)
 }
 
 func DeleteDisabledChannel() (int64, error) {
-	result := DB.Where("status = ? or status = ?", common.ChannelStatusAutoDisabled, common.ChannelStatusManuallyDisabled).Delete(&Channel{})
-	return result.RowsAffected, result.Error
+	return deleteChannelsWhere("status = ? or status = ?", common.ChannelStatusAutoDisabled, common.ChannelStatusManuallyDisabled)
+}
+
+// deleteChannelsWhere deletes the matching channels together with their key
+// environment rows, which would otherwise keep holding the deleted keys.
+func deleteChannelsWhere(condition string, args ...interface{}) (int64, error) {
+	var deleted int64
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var ids []int
+		if err := tx.Model(&Channel{}).Where(condition, args...).Pluck("id", &ids).Error; err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		for _, chunk := range lo.Chunk(ids, 200) {
+			result := tx.Where("id IN ?", chunk).Delete(&Channel{})
+			if result.Error != nil {
+				return result.Error
+			}
+			deleted += result.RowsAffected
+			if err := deleteChannelKeyEnvironments(tx, chunk); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return deleted, err
 }
 
 func GetPaginatedTags(offset int, limit int) ([]*string, error) {
@@ -1213,7 +1307,9 @@ func SearchTags(keyword string, group string, model string, idSort bool) ([]*str
 	return tags, nil
 }
 
-func (channel *Channel) ValidateSettings() error {
+// ValidateSettings checks the channel's settings JSON. previous is the stored
+// channel being updated, nil when adding one.
+func (channel *Channel) ValidateSettings(previous *Channel) error {
 	channelParams := &dto.ChannelSettings{}
 	if channel.Setting != nil && *channel.Setting != "" {
 		err := common.Unmarshal([]byte(*channel.Setting), channelParams)
@@ -1238,7 +1334,12 @@ func (channel *Channel) ValidateSettings() error {
 			return err
 		}
 	}
-	if err := channelOtherSettings.ValidateUpstreamKeepalive(); err != nil {
+	var previousOtherSettings *dto.ChannelOtherSettings
+	if previous != nil {
+		stored := previous.GetOtherSettings()
+		previousOtherSettings = &stored
+	}
+	if err := channelOtherSettings.ValidateUpstreamKeepalive(previousOtherSettings); err != nil {
 		return err
 	}
 	return nil

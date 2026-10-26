@@ -134,7 +134,7 @@ func TestGetNextEnabledKeyPollingAdvancesUnderConcurrency(t *testing.T) {
 				if err != nil || cached == nil {
 					continue
 				}
-				key, _, apiErr := cached.GetNextEnabledKey()
+				key, _, apiErr := cached.GetNextEnabledKey("")
 				if apiErr != nil {
 					continue
 				}

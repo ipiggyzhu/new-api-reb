@@ -18,19 +18,34 @@ import (
 // pickWeightedIndex owns the draw-to-index mapping, so the distribution can be
 // asserted by enumerating every draw in range instead of sampling and hoping.
 func TestPickWeightedIndexCoversEveryDrawExactlyOnce(t *testing.T) {
-	weights := []int{10, 30, 1}
-	total := 41
-
-	hits := make([]int, len(weights))
-	for draw := 0; draw < total; draw++ {
-		index := pickWeightedIndex(weights, draw)
-		require.GreaterOrEqual(t, index, 0, "draw %d fell through the cumulative walk", draw)
-		hits[index]++
+	for _, tc := range []struct {
+		name       string
+		weights    []int
+		configured bool
+		want       []int
+	}{
+		{"draw mapping", []int{10, 30, 1}, false, []int{10, 30, 1}},
+		{"configured same-tier shares", []int{0, 10, 40}, true, []int{10, 20, 50}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			weights := append([]int(nil), tc.weights...)
+			total := 0
+			for i := range weights {
+				if tc.configured {
+					weights[i] = effectiveChannelWeight(weights[i])
+				}
+				total += weights[i]
+			}
+			hits := make([]int, len(weights))
+			for draw := 0; draw < total; draw++ {
+				index := pickWeightedIndex(weights, draw)
+				require.GreaterOrEqual(t, index, 0, "draw %d fell through the cumulative walk", draw)
+				hits[index]++
+			}
+			assert.Equal(t, tc.want, hits, "every draw belongs to one channel; configured weight zero remains reachable")
+			assert.Equal(t, -1, pickWeightedIndex(weights, total), "an out-of-range draw must not silently pick the last candidate")
+		})
 	}
-
-	assert.Equal(t, weights, hits, "each candidate must own exactly its own weight in draws")
-	assert.Equal(t, -1, pickWeightedIndex(weights, total),
-		"a draw at or past the total is out of contract and must not silently pick the last candidate")
 }
 
 // A weight-0 channel sharing a tier with weighted ones must stay reachable. The

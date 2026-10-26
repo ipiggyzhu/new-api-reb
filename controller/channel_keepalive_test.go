@@ -122,9 +122,9 @@ const (
 )
 
 // TestChannelKeepaliveRequestShape pins what a keepalive sends upstream: the
-// channel's own key, the test model (else the first model), one user message
-// made of a question from the shared channel-test pool plus the reply
-// instruction, a 16-token cap, and no streaming. The channel's client profile
+// channel's own key, the test model (else the first model) that takes a chat
+// request, one user message made of a question from the shared channel-test pool
+// plus the reply instruction, a 16-token cap, and no streaming. The channel's client profile
 // does not apply, so a Claude-profiled Anthropic channel gets none of the
 // Claude Code body, URL or header shaping.
 func TestChannelKeepaliveRequestShape(t *testing.T) {
@@ -155,6 +155,18 @@ func TestChannelKeepaliveRequestShape(t *testing.T) {
 			models: "gpt-4o,gpt-4o-mini", reply: keepaliveChatReply,
 			wantPath: "/v1/chat/completions", wantAuth: [2]string{"Authorization", "Bearer sk-keepalive"},
 			wantBody: map[string]string{"model": "gpt-4o", "messages.0.content": wantPrompt, "max_tokens": "16"},
+		},
+		{
+			name: "models that take no chat request are passed over", channelType: constant.ChannelTypeOpenAI,
+			models: "text-embedding-3-small,bge-reranker-v2,dall-e-3,gpt-4o", reply: keepaliveChatReply,
+			wantPath: "/v1/chat/completions", wantAuth: [2]string{"Authorization", "Bearer sk-keepalive"},
+			wantBody: map[string]string{"model": "gpt-4o", "messages.0.content": wantPrompt, "max_tokens": "16"},
+		},
+		{
+			name: "a test model that takes no chat request is passed over", channelType: constant.ChannelTypeOpenAI,
+			models: "bge-m3,gpt-4o-mini", testModel: "bge-m3", reply: keepaliveChatReply,
+			wantPath: "/v1/chat/completions", wantAuth: [2]string{"Authorization", "Bearer sk-keepalive"},
+			wantBody: map[string]string{"model": "gpt-4o-mini", "messages.0.content": wantPrompt, "max_tokens": "16"},
 		},
 		{
 			name: "codex model uses the responses endpoint", channelType: constant.ChannelTypeOpenAI,
@@ -356,6 +368,111 @@ func TestChannelKeepalivePassIsolation(t *testing.T) {
 	settings := stored.GetOtherSettings()
 	assert.False(t, settings.UpstreamKeepaliveDue(7, reentered, reentered+20*60))
 	assert.True(t, settings.UpstreamKeepaliveDue(7, reentered, reentered+40*60))
+}
+
+// On a multi-key polling channel a keepalive goes out with one of the enabled
+// keys and leaves the polling cursor where real traffic left it, so it cannot
+// reorder the key rotation of real requests.
+func TestChannelKeepaliveLeavesKeyPollingAlone(t *testing.T) {
+	db := setupChannelKeepaliveTest(t)
+	upstream, requests := newKeepaliveUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, keepaliveChatReply)
+	})
+	channel := &model.Channel{
+		Id: 11, Type: constant.ChannelTypeOpenAI, Key: "sk-a\nsk-b\nsk-c", Status: common.ChannelStatusEnabled,
+		Models: "gpt-4o", Group: "default", BaseURL: &upstream.URL,
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModePolling,
+			MultiKeyStatusList: map[int]int{1: common.ChannelStatusAutoDisabled},
+		},
+	}
+	require.NoError(t, db.Create(channel).Error)
+
+	for i := range 3 {
+		stored, err := model.GetChannelById(channel.Id, true)
+		require.NoError(t, err)
+		require.NoError(t, sendChannelKeepalive(context.Background(), stored))
+		after, err := model.GetChannelById(channel.Id, true)
+		require.NoError(t, err)
+		require.Zero(t, after.ChannelInfo.MultiKeyPollingIndex, "keepalive %d must not advance the polling cursor", i)
+	}
+
+	captured := requests()
+	require.Len(t, captured, 3)
+	for _, request := range captured {
+		assert.Contains(t, []string{"Bearer sk-a", "Bearer sk-c"}, request.Header.Get("Authorization"), "a keepalive uses an enabled key")
+	}
+	stored, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	// Positive control: a real request's pick does move the persisted cursor.
+	_, index, apiErr := stored.GetNextEnabledKey("")
+	require.Nil(t, apiErr)
+	assert.Equal(t, 0, index)
+	advanced, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, 1, advanced.ChannelInfo.MultiKeyPollingIndex)
+}
+
+// On an independent key environment channel a keepalive still uses only the
+// keys that may serve, and stays system traffic: it wears neither the selected
+// key's version nor its session identity.
+func TestChannelKeepaliveOnKeyEnvironmentsUsesAssignedKeysWithoutTheirProfile(t *testing.T) {
+	db := setupChannelKeepaliveTest(t)
+	require.NoError(t, db.AutoMigrate(&model.ChannelKeyEnvironment{}))
+	upstream, requests := newKeepaliveUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, keepaliveResponsesReply)
+	})
+	channel := &model.Channel{
+		Id: 12, Type: constant.ChannelTypeOpenAI, Key: "sk-a\nsk-b\nsk-c", Status: common.ChannelStatusEnabled,
+		Models: "gpt-5-codex", Group: "default", BaseURL: &upstream.URL,
+		ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModePolling},
+	}
+	channel.SetSetting(dto.ChannelSettings{SyntheticClientHeadersProfile: constant.ClientHeaderFamilyCodex, KeyEnvironments: true})
+	require.NoError(t, db.Create(channel).Error)
+	for key, profile := range map[string]string{"sk-a": "codex-0.163.0-linux-x64", "sk-c": "codex-0.160.0-windows-x64"} {
+		require.NoError(t, db.Create(&model.ChannelKeyEnvironment{ChannelId: channel.Id, KeyTag: model.ChannelKeyTag(key), ProfileId: lo.ToPtr(profile)}).Error)
+	}
+	require.NoError(t, db.Create(&model.ChannelKeyEnvironment{ChannelId: channel.Id, KeyTag: model.ChannelKeyTag("sk-b")}).Error)
+
+	const rounds = 24
+	for i := range rounds {
+		stored, err := model.GetChannelById(channel.Id, true)
+		require.NoError(t, err)
+		require.NoError(t, sendChannelKeepalive(context.Background(), stored), "keepalive %d", i)
+	}
+
+	captured := requests()
+	require.Len(t, captured, rounds)
+	for _, request := range captured {
+		assert.Contains(t, []string{"Bearer sk-a", "Bearer sk-c"}, request.Header.Get("Authorization"), "the unassigned key is never used")
+		assert.NotContains(t, request.Header.Get("User-Agent"), "codex", "a keepalive does not wear the key's version")
+		assert.Empty(t, request.Header.Get("Originator"))
+		assert.Empty(t, request.Header.Get("Session-Id"))
+		assert.False(t, gjson.GetBytes(request.Body, "client_metadata").Exists(), "no CLI identity in the body: %s", request.Body)
+	}
+}
+
+// A channel with no model that takes a chat request fails its keepalive before
+// anything is sent, instead of sending a request that fails on every interval.
+func TestChannelKeepaliveWithoutChatModelSendsNothing(t *testing.T) {
+	setupChannelKeepaliveTest(t)
+	upstream, requests := newKeepaliveUpstream(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, keepaliveChatReply)
+	})
+	testModel := "text-embedding-3-large"
+	channel := &model.Channel{
+		Id: 12, Type: constant.ChannelTypeOpenAI, Key: "sk-keepalive", Status: common.ChannelStatusEnabled,
+		Models: "text-embedding-3-small,jina-reranker-m0,gpt-image-1", TestModel: &testModel,
+		Group: "default", BaseURL: &upstream.URL,
+	}
+
+	err := sendChannelKeepalive(context.Background(), channel)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no chat model")
+	assert.Empty(t, requests())
 }
 
 // A real relay request through the distributor is what opens the keepalive's

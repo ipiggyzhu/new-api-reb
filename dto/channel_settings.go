@@ -72,6 +72,18 @@ type ChannelSettings struct {
 	ClientDeviceSeed  string `json:"client_device_seed,omitempty"`
 	ClientSessionSeed string `json:"client_session_seed,omitempty"`
 
+	// KeyEnvironments treats every key of a multi-key channel as its own
+	// account: each key is bound to its own captured CLI version, device and
+	// session identity, and a conversation stays on one key. The key → version
+	// assignment lives in the channel_key_environments table. CLIVersionProfile
+	// is kept as saved (the rollback target) and replaced per key at request
+	// time.
+	KeyEnvironments bool `json:"key_environments,omitempty"`
+	// KeyEnvironmentCacheTTL picks the cache mode the pool is drawn from: ""
+	// for the default (5m) captures, "1h" for the 1h ones. Codex captures have
+	// no cache mode.
+	KeyEnvironmentCacheTTL string `json:"key_environment_cache_ttl,omitempty"`
+
 	// WebsocketTransport opts this channel's /v1/responses traffic onto the
 	// Responses API WebSocket transport instead of HTTP+SSE.
 	//
@@ -124,6 +136,10 @@ func (s *ChannelSettings) Normalize(apiType int) {
 	s.CLIVersionProfile = strings.ToLower(strings.TrimSpace(s.CLIVersionProfile))
 	s.ClientDeviceSeed = strings.TrimSpace(s.ClientDeviceSeed)
 	s.ClientSessionSeed = strings.TrimSpace(s.ClientSessionSeed)
+	s.KeyEnvironmentCacheTTL = strings.ToLower(strings.TrimSpace(s.KeyEnvironmentCacheTTL))
+	if s.KeyEnvironmentCacheTTL == "5m" {
+		s.KeyEnvironmentCacheTTL = ""
+	}
 }
 
 type VertexKeyType string
@@ -203,8 +219,16 @@ const (
 )
 
 // ValidateUpstreamKeepalive rejects an interval or active window outside the
-// supported range. 0 means "use the default" and is always accepted.
-func (s *ChannelOtherSettings) ValidateUpstreamKeepalive() error {
+// supported range (0 means "use the default" and is always accepted), and an
+// enabled keepalive whose effective active window does not outlast the latest
+// moment its first send can come due: one interval plus the full +10% jitter
+// after the last real request, rounded up to the scheduler's one-minute tick.
+// A shorter window closes first in some or all quiet periods (which ones
+// depends on the jitter roll), and in those no keepalive is ever sent.
+// previous is the stored settings of the channel being updated (nil when adding
+// one). A keepalive switch, interval and window saved before this rule existed
+// are accepted unchanged, so editing other fields of such a channel still saves.
+func (s *ChannelOtherSettings) ValidateUpstreamKeepalive(previous *ChannelOtherSettings) error {
 	if minutes := s.UpstreamKeepaliveIntervalMinutes; minutes != 0 &&
 		(minutes < UpstreamKeepaliveMinIntervalMinutes || minutes > UpstreamKeepaliveMaxIntervalMinutes) {
 		return fmt.Errorf("upstream_keepalive_interval_minutes must be between %d and %d, got %d",
@@ -214,6 +238,21 @@ func (s *ChannelOtherSettings) ValidateUpstreamKeepalive() error {
 		(minutes < UpstreamKeepaliveMinActiveWindowMinutes || minutes > UpstreamKeepaliveMaxActiveWindowMinutes) {
 		return fmt.Errorf("upstream_keepalive_active_window_minutes must be between %d and %d, got %d",
 			UpstreamKeepaliveMinActiveWindowMinutes, UpstreamKeepaliveMaxActiveWindowMinutes, minutes)
+	}
+	if !s.UpstreamKeepaliveEnabled {
+		return nil
+	}
+	if previous != nil && previous.UpstreamKeepaliveEnabled &&
+		previous.UpstreamKeepaliveIntervalMinutes == s.UpstreamKeepaliveIntervalMinutes &&
+		previous.UpstreamKeepaliveActiveWindowMinutes == s.UpstreamKeepaliveActiveWindowMinutes {
+		return nil
+	}
+	interval, window := s.UpstreamKeepaliveInterval(), s.UpstreamKeepaliveActiveWindow()
+	// The jitter span is the one UpstreamKeepaliveDue draws from; 60 is the
+	// channel_keepalive task's polling interval.
+	if latestDue := interval + interval/10 + 60; window < latestDue {
+		return fmt.Errorf("upstream_keepalive_active_window_minutes (%d) must be at least %d to fit upstream_keepalive_interval_minutes (%d), its 10%% jitter and the one-minute scheduler tick",
+			window/60, (latestDue+59)/60, interval/60)
 	}
 	return nil
 }

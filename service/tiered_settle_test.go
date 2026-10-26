@@ -780,3 +780,46 @@ func BenchmarkRatioBilling_Parallel(b *testing.B) {
 		}
 	})
 }
+
+// Claude upstreams can report cache_creation_input_tokens without the
+// cache_creation.{ephemeral_5m,ephemeral_1h} split (or with only part of it).
+// The unlabelled remainder must still be billed (as 5m writes) and counted in
+// the tier length, instead of silently pricing those tokens at 0.
+func TestBuildTieredTokenParams_ClaudeUnsplitCacheCreationIsBilled(t *testing.T) {
+	tests := []struct {
+		name      string
+		split5m   int
+		split1h   int
+		wantCC    float64
+		wantCC1h  float64
+		wantQuota int
+	}{
+		// 100*2 + 50*10 + 10000*2.5 = 25700 -> 25700/1M*500K
+		{name: "total without split", split5m: 0, split1h: 0, wantCC: 10000, wantCC1h: 0, wantQuota: 12850},
+		// 700 + 6000*2.5 + 4000*4 = 31700
+		{name: "only 1h part reported", split5m: 0, split1h: 4000, wantCC: 6000, wantCC1h: 4000, wantQuota: 15850},
+		// 700 + 7000*2.5 + 3000*4 = 30200
+		{name: "full split unchanged", split5m: 7000, split1h: 3000, wantCC: 7000, wantCC1h: 3000, wantQuota: 15100},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usage := &dto.Usage{
+				PromptTokens:                100,
+				CompletionTokens:            50,
+				UsageSemantic:               "anthropic",
+				PromptTokensDetails:         dto.InputTokenDetails{CachedCreationTokens: 10000},
+				ClaudeCacheCreation5mTokens: tt.split5m,
+				ClaudeCacheCreation1hTokens: tt.split1h,
+			}
+
+			params := BuildTieredTokenParams(usage, true, billingexpr.UsedVars(cacheExpr))
+			assert.Equal(t, tt.wantCC, params.CC)
+			assert.Equal(t, tt.wantCC1h, params.CC1h)
+			assert.Equal(t, float64(100+10000), params.Len, "tier length counts every cache write")
+
+			ok, quota, _ := TryTieredSettle(makeRelayInfo(cacheExpr, 1.0, 100, 50), params)
+			require.True(t, ok)
+			assert.Equal(t, tt.wantQuota, quota)
+		})
+	}
+}

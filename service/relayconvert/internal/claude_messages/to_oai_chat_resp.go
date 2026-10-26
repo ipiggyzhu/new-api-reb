@@ -417,6 +417,9 @@ func FormatClaudeResponseInfo(claudeResponse *dto.ClaudeResponse, oaiResponse *d
 			claudeInfo.Usage.ClaudeCacheCreation1hTokens = claudeResponse.Message.Usage.GetCacheCreation1hTokens()
 			claudeInfo.Usage.CompletionTokens = claudeResponse.Message.Usage.OutputTokens
 			claudeInfo.Usage.BillingUsage = claudeBillingUsageFromSemanticUsage(claudeInfo.Usage)
+			claudeInfo.Usage.StreamStartPromptTokens = claudeInfo.Usage.PromptTokens +
+				claudeInfo.Usage.PromptTokensDetails.CachedTokens +
+				claudeInfo.Usage.PromptTokensDetails.CacheCreationTokensTotal()
 		}
 	} else if claudeResponse.Type == "content_block_delta" {
 		if claudeResponse.Delta != nil {

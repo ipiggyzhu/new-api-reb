@@ -198,6 +198,17 @@ function quotaSaturationKindLabel(
   return t('Invalid (NaN)')
 }
 
+function usageAnomalyKindLabel(
+  kind: 'zero_usage' | 'zero_prompt_tokens' | 'claude_stream_usage_mismatch',
+  t: (key: string) => string
+): string {
+  if (kind === 'zero_usage') return t('Upstream reported no usage')
+  if (kind === 'zero_prompt_tokens') {
+    return t('Upstream reported no prompt tokens')
+  }
+  return t('Stream prompt tokens shrank after message_start')
+}
+
 function BillingBreakdown(props: {
   log: UsageLog
   other: LogOtherData
@@ -804,6 +815,46 @@ export function DetailsDialog(props: DetailsDialogProps) {
               value={other.admin_info.quota_saturation.op}
               mono
             />
+          </DetailSection>
+        )}
+
+        {/* Usage anomaly audit (admin only) */}
+        {props.isAdmin && other?.admin_info?.usage_anomaly && (
+          <DetailSection
+            icon={<AlertTriangle className='size-3.5' aria-hidden='true' />}
+            label={t('Usage anomaly')}
+            variant='danger'
+          >
+            <p className='mb-1 text-xs wrap-break-word'>
+              {t('Recorded for audit only; the charge was not changed')}
+            </p>
+            <DetailRow
+              label={t('Kind')}
+              value={usageAnomalyKindLabel(
+                other.admin_info.usage_anomaly.kind,
+                t
+              )}
+            />
+            <DetailRow
+              label={t('Input tokens')}
+              value={String(other.admin_info.usage_anomaly.prompt_tokens)}
+              mono
+            />
+            <DetailRow
+              label={t('Output tokens')}
+              value={String(other.admin_info.usage_anomaly.completion_tokens)}
+              mono
+            />
+            {other.admin_info.usage_anomaly.stream_start_prompt_tokens !==
+              undefined && (
+              <DetailRow
+                label={t('Input tokens at stream start')}
+                value={String(
+                  other.admin_info.usage_anomaly.stream_start_prompt_tokens
+                )}
+                mono
+              />
+            )}
           </DetailSection>
         )}
 

@@ -56,6 +56,7 @@ import { type SubmitErrorHandler, useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { ConfirmDialog } from '@/components/confirm-dialog'
 import {
   sideDrawerContentClassName,
   sideDrawerFooterClassName,
@@ -173,6 +174,10 @@ import {
   validateModelMappingJson,
   hasAdvancedSettingsErrors,
 } from '../../lib'
+import {
+  keyEnvironmentRejectionMessage,
+  type KeyEnvironmentShortage,
+} from '../../lib/channel-key-environment'
 import {
   collectInvalidStatusCodeEntries,
   collectNewDisallowedStatusCodeRedirects,
@@ -797,6 +802,22 @@ export function ChannelMutateDrawer({
   const currentUpstreamKeepaliveEnabled = form.watch(
     'upstream_keepalive_enabled'
   )
+  // Mirrors the backend rule: an enabled keepalive is first due one interval,
+  // offset by up to +10% jitter, after the last real request and is sent on
+  // the next one-minute scheduler tick, so a shorter active window closes first
+  // in some quiet periods. Empty inputs fall back to the defaults.
+  const upstreamKeepaliveMinActiveWindowMinutes = Math.ceil(
+    ((form.watch('upstream_keepalive_interval_minutes') ||
+      UPSTREAM_KEEPALIVE_DEFAULT_INTERVAL_MINUTES) *
+      66 +
+      60) /
+      60
+  )
+  const upstreamKeepaliveWindowTooShort =
+    currentUpstreamKeepaliveEnabled === true &&
+    (form.watch('upstream_keepalive_active_window_minutes') ||
+      UPSTREAM_KEEPALIVE_DEFAULT_ACTIVE_WINDOW_MINUTES) <
+      upstreamKeepaliveMinActiveWindowMinutes
   const {
     unlocked: doubaoApiEditUnlocked,
     handleClick: handleApiConfigSecretClick,
@@ -1645,11 +1666,32 @@ export function ChannelMutateDrawer({
     }
   }, [])
 
+  const [keyEnvironmentShortage, setKeyEnvironmentShortage] = useState<
+    KeyEnvironmentShortage | undefined
+  >(undefined)
+  const keyEnvironmentShortageResolveRef = useRef<
+    ((confirmed: boolean) => void) | null
+  >(null)
+  const confirmKeyEnvironmentShortage = useCallback(
+    (rejection: KeyEnvironmentShortage): Promise<boolean> =>
+      new Promise((resolve) => {
+        keyEnvironmentShortageResolveRef.current = resolve
+        setKeyEnvironmentShortage(rejection)
+      }),
+    []
+  )
+  const handleKeyEnvironmentShortage = useCallback((confirmed: boolean) => {
+    setKeyEnvironmentShortage(undefined)
+    keyEnvironmentShortageResolveRef.current?.(confirmed)
+    keyEnvironmentShortageResolveRef.current = null
+  }, [])
+
   const channelMutation = useChannelMutateForm({
     currentRow,
     isEditing,
     isMultiKeyChannel,
     onSuccess: handleSuccess,
+    confirmKeyEnvironmentShortage,
   })
 
   const isSubmitting = channelMutation.isPending
@@ -4393,7 +4435,21 @@ export function ChannelMutateDrawer({
                                 )}
                               />
 
-                              <ChannelClientIdentityFields />
+                              <ChannelClientIdentityFields
+                                multiKey={
+                                  isMultiKeyChannel ||
+                                  (!isEditing &&
+                                    multiKeyMode === 'multi_to_single')
+                                }
+                                keyCount={
+                                  isEditing
+                                    ? channelData?.data?.channel_info
+                                        ?.multi_key_size
+                                    : (currentKey ?? '')
+                                        .split('\n')
+                                        .filter((line) => line.trim()).length
+                                }
+                              />
 
                               <FormField
                                 control={form.control}
@@ -5003,6 +5059,20 @@ export function ChannelMutateDrawer({
                                       'Between 5 and 10080 minutes. Keepalives continue for this long after the last real request, then stop until the channel is used again. Set it longer than the interval.'
                                     )}
                                   </FormDescription>
+                                  {upstreamKeepaliveWindowTooShort && (
+                                    <p
+                                      role='alert'
+                                      className='text-warning text-xs'
+                                    >
+                                      {t(
+                                        'With this interval the active window must be at least {{minutes}} minutes (the interval plus its 10% jitter and the one-minute scheduler tick), otherwise some quiet periods get no keepalive. Saving a changed keepalive setting like this is rejected.',
+                                        {
+                                          minutes:
+                                            upstreamKeepaliveMinActiveWindowMinutes,
+                                        }
+                                      )}
+                                    </p>
+                                  )}
                                   <FormMessage />
                                 </FormItem>
                               )}
@@ -5110,6 +5180,23 @@ export function ChannelMutateDrawer({
         onOpenChange={setMissingModelsDialogOpen}
       />
 
+      {keyEnvironmentShortage && (
+        <ConfirmDialog
+          open
+          onOpenChange={(v) => {
+            if (!v) handleKeyEnvironmentShortage(false)
+          }}
+          title={t('Not enough captured versions')}
+          desc={(() => {
+            const message = keyEnvironmentRejectionMessage(
+              keyEnvironmentShortage
+            )
+            return t(message.key, message.params)
+          })()}
+          confirmText={t('Save anyway')}
+          handleConfirm={() => handleKeyEnvironmentShortage(true)}
+        />
+      )}
       <StatusCodeRiskDialog
         open={statusCodeRiskOpen}
         onOpenChange={(v) => {

@@ -24,8 +24,8 @@ import (
 //     reach upstream.
 //
 // Two properties matter and are covered by tests:
-//   - nothing here overwrites an already-set header, so an explicit header
-//     override still wins;
+//   - without a selected CLI version, explicit header overrides still win;
+//     a selected version owns its captured and identity headers;
 //   - unknown channel types get the generic set, never an empty map.
 
 // ClientHeaderProfile is the set of headers one client family sends.
@@ -135,12 +135,25 @@ func ClientHeaderProfileForAPIType(apiType int) ClientHeaderProfile {
 // An empty override value means "drop this built-in header" rather than "send an
 // empty one", which is the only way to remove something the profile adds.
 func EffectiveClientHeaders(family string, fingerprint ...string) ClientHeaderProfile {
+	return effectiveClientHeaders(family, false, fingerprint...)
+}
+
+// KeyEnvironmentClientHeaders is EffectiveClientHeaders for an independent key
+// environment channel: the admin's global overrides still apply, except to the
+// headers that make up a CLI version's shape, which stay as the key's version
+// sends them.
+func KeyEnvironmentClientHeaders(family string, fingerprint ...string) ClientHeaderProfile {
+	return effectiveClientHeaders(family, true, fingerprint...)
+}
+
+func effectiveClientHeaders(family string, protectVersion bool, fingerprint ...string) ClientHeaderProfile {
 	profile := ClientHeaderProfileForFamily(family)
 	var version *service.CLIVersionProfile
 	if len(fingerprint) > 1 {
 		version = service.LookupCLIVersionProfile(fingerprint[1])
 		if version != nil && version.Family == family {
 			profile = version.Headers
+			protectVersion = true
 		}
 	}
 	overrides := operation_setting.GetMonitorSetting().ChannelTestClientHeaders
@@ -161,7 +174,7 @@ func EffectiveClientHeaders(family string, fingerprint ...string) ClientHeaderPr
 	for _, scope := range []string{ClientHeaderFamilyAll, family} {
 		for name, value := range overrides[scope] {
 			normalizedName := strings.ToLower(strings.TrimSpace(name))
-			if normalizedName == "" {
+			if normalizedName == "" || (protectVersion && service.IsProtectedProfileHeader(family, normalizedName)) {
 				continue
 			}
 			if strings.TrimSpace(value) == "" {

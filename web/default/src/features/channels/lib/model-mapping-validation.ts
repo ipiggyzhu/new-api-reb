@@ -214,6 +214,110 @@ export function findExposedTargetModels(
 }
 
 /**
+ * Resolve the upstream model a request for `model` is sent as, following
+ * chained redirects exactly like the relay's ModelMappedHelper. Returns
+ * undefined when the model is not remapped (or the chain is a cycle, which the
+ * relay rejects).
+ */
+export function resolveMappedUpstreamModel(
+  model: string,
+  mapping: Record<string, string>
+): string | undefined {
+  let current = model
+  const visited = new Set([current])
+  let mapped = false
+  for (;;) {
+    const next = mapping[current]
+    if (!next) break
+    if (visited.has(next)) {
+      if (next !== current) return undefined
+      if (current === model) return undefined
+      break
+    }
+    visited.add(next)
+    current = next
+    mapped = true
+  }
+  return mapped ? current : undefined
+}
+
+export type ChannelTestModelEntry = {
+  // The name the test request is sent with (a Models entry or mapping alias)
+  model: string
+  // Where the relay forwards it, when model_mapping rewrites it
+  upstreamModel?: string
+  // False for a model_mapping alias that is missing from the Models list: it
+  // can be tested, but live traffic cannot reach it until it is added.
+  listed: boolean
+}
+
+/**
+ * Build the channel test list: every Models entry plus every model_mapping
+ * alias, each annotated with the upstream model it is forwarded to. Mapping
+ * targets are deliberately not Models entries (see the drawer guardrail), so
+ * without the annotation a mapped upstream model is invisible in the test
+ * dialog even though testing its alias is exactly what exercises it.
+ */
+export function buildChannelTestModelEntries(
+  models: string[],
+  modelMapping: string | null | undefined
+): ChannelTestModelEntry[] {
+  let mapping: Record<string, string> = {}
+  try {
+    const parsed = JSON.parse(modelMapping?.trim() || '{}')
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      mapping = Object.fromEntries(
+        Object.entries(parsed).filter(
+          (entry): entry is [string, string] => typeof entry[1] === 'string'
+        )
+      )
+    }
+  } catch {
+    // The relay refuses an unparsable mapping; list the models unannotated.
+  }
+
+  const listedModels = [
+    ...new Set(models.map((m) => normalizeModelName(m)).filter(Boolean)),
+  ]
+  const listedSet = new Set(listedModels)
+  const unlistedAliases = Object.keys(mapping).filter(
+    (alias) =>
+      alias.trim() !== '' &&
+      !listedSet.has(alias) &&
+      resolveMappedUpstreamModel(alias, mapping) !== undefined
+  )
+
+  return [
+    ...listedModels.map((model) => ({
+      model,
+      upstreamModel: resolveMappedUpstreamModel(model, mapping),
+      listed: true,
+    })),
+    ...unlistedAliases.map((model) => ({
+      model,
+      upstreamModel: resolveMappedUpstreamModel(model, mapping),
+      listed: false,
+    })),
+  ]
+}
+
+/**
+ * Case-insensitive search over both the tested name and its upstream target.
+ */
+export function filterChannelTestModelEntries(
+  entries: ChannelTestModelEntry[],
+  searchTerm: string
+): ChannelTestModelEntry[] {
+  const keyword = searchTerm.trim().toLowerCase()
+  if (!keyword) return entries
+  return entries.filter(
+    (entry) =>
+      entry.model.toLowerCase().includes(keyword) ||
+      Boolean(entry.upstreamModel?.toLowerCase().includes(keyword))
+  )
+}
+
+/**
  * Categorize models into different sets for UI display
  */
 export function categorizeModelsWithRedirect(

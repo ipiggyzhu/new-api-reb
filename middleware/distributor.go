@@ -118,7 +118,15 @@ func Distribute() func(c *gin.Context) {
 					}
 				}
 
-				if preferredChannelID, found := service.GetPreferredChannelByAffinity(c, modelRequest.Model, usingGroup); found {
+				preferredChannelID, found := service.GetPreferredChannelByAffinity(c, modelRequest.Model, usingGroup)
+				channel, selectGroup = selectBoundKeyEnvironmentChannel(c, modelRequest.Model, usingGroup)
+				if c.IsAborted() {
+					return
+				}
+				if channel != nil && found {
+					service.MarkChannelAffinityUsed(c, selectGroup, channel.Id)
+				}
+				if found && channel == nil {
 					affinityUsable := false
 					affinitySaturated := false
 					preferred, err := model.CacheGetChannel(preferredChannelID)
@@ -129,13 +137,18 @@ func Distribute() func(c *gin.Context) {
 						// consistent: the pin wins only while the channel has room, and
 						// the overflow falls through to ordinary tier selection below.
 						//
+						// A full channel is first waited on briefly (waitForAffinitySlot):
+						// the overflow would re-send the whole prompt to a cold cache.
+						//
 						// One cooling down after a 429/529 is passed over the same way, so
 						// the pin does not walk this request into a refusal and the
 						// conversation comes back to its warm upstream once the window ends.
-						// Selection still lands on it if nothing else is left.
+						// Selection still lands on it if nothing else is left. Waiting on
+						// it would not help: the refusal, not the slot, is the bottleneck.
 						if model.ChannelCoolingDown(preferred.Id, modelRequest.Model) {
 							affinitySaturated = true
-						} else if !model.AcquireChannelSlot(preferred.Id, preferred.GetMaxConcurrency()) {
+						} else if !model.AcquireChannelSlot(preferred.Id, preferred.GetMaxConcurrency()) &&
+							!waitForAffinitySlot(c, preferred, modelRequest.Model) {
 							affinitySaturated = true
 						} else if usingGroup == "auto" {
 							userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
@@ -172,6 +185,10 @@ func Distribute() func(c *gin.Context) {
 						service.SetChannelAffinityBypassed(c)
 					} else if !affinityUsable && !service.ShouldKeepChannelAffinityOnChannelDisabled() {
 						service.ClearCurrentChannelAffinityCache(c, preferredChannelID)
+					}
+					if c.IsAborted() {
+						// The client went away while waiting for the pinned channel.
+						return
 					}
 				}
 
@@ -221,7 +238,14 @@ func Distribute() func(c *gin.Context) {
 			abortWithOpenAiMessage(c, http.StatusServiceUnavailable, setupErr.Error(), setupErr.GetErrorCode())
 			return
 		}
+		served, bindErr := BindKeyEnvironment(c, channel, modelRequest.Model)
+		if bindErr != nil {
+			abortKeyEnvironment(c, bindErr)
+			return
+		}
+		channel = served
 		c.Next()
+		renewKeyEnvironmentBinding(c)
 		// The response status is not a verdict here: a stream that failed
 		// mid-flight already committed its 200, so RecordChannelAffinity reads the
 		// relay handler's own outcome instead.
@@ -566,7 +590,29 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelModelMapping, channel.GetModelMapping())
 	common.SetContextKey(c, constant.ContextKeyChannelStatusCodeMapping, channel.GetStatusCodeMapping())
 
-	key, index, newAPIError := channel.GetNextEnabledKey()
+	// An affinity conversation (or a caller-provided seed) sticks to one key;
+	// everything else uses the channel's own random/polling key mode.
+	seed := common.GetContextKeyString(c, constant.ContextKeyChannelKeySeed)
+	if seed == "" {
+		seed, _ = service.ChannelAffinityKeySeed(c)
+	}
+	// A conversation without an affinity seed still places on an independent
+	// key environment channel by its binding key, so two concurrent first
+	// requests pick the same key instead of racing for the binding.
+	if state := service.GetKeyEnvironmentBindingState(c); seed == "" && state != nil && channel.GetSetting().KeyEnvironments {
+		seed = state.Key
+	}
+	var key string
+	var index int
+	var newAPIError *types.NewAPIError
+	if boundKey, boundIndex, bound, boundErr := boundKeyEnvironmentKey(c, channel, modelName); bound {
+		// A bound conversation keeps its key; selection never re-rolls it.
+		key, index, newAPIError = boundKey, boundIndex, boundErr
+	} else if seed != "" {
+		key, index, newAPIError = channel.GetEnabledKeyForSeed(seed, modelName)
+	} else {
+		key, index, newAPIError = channel.GetNextEnabledKey(modelName)
+	}
 	if newAPIError != nil {
 		return newAPIError
 	}
@@ -576,7 +622,26 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	} else {
 		// 必须设置为 false，否则在重试到单个 key 的时候会导致日志显示错误
 		common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, false)
+		// A retry from a multi-key channel would otherwise leave its key index
+		// behind for this channel's logs and client identity.
+		common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, 0)
 	}
+	// An independent key environment channel wears the version assigned to the
+	// selected key. This is decided by the key, not by IsMultiKey, so a
+	// single-key copy of the channel (model sweep) wears its key's version too.
+	// Every reader of the client profile follows the setting in the context.
+	keyTag := ""
+	if setting := channel.GetSetting(); setting.KeyEnvironments {
+		profileId, assigned := channel.KeyEnvironmentProfile(key)
+		if !assigned {
+			return types.NewError(errors.New("channel key has no environment assigned"), types.ErrorCodeChannelNoAvailableKey)
+		}
+		setting.CLIVersionProfile = profileId
+		setting.TLSFingerprint = ""
+		common.SetContextKey(c, constant.ContextKeyChannelSetting, setting)
+		keyTag = model.ChannelKeyTag(key)
+	}
+	common.SetContextKey(c, constant.ContextKeyChannelKeyTag, keyTag)
 	// c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))
 	common.SetContextKey(c, constant.ContextKeyChannelKey, key)
 	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, channel.GetBaseURL())

@@ -229,6 +229,14 @@ func HandleStreamFinalResponse(c *gin.Context, info *relaycommon.RelayInfo, clau
 		if common.DebugEnabled {
 			common.SysLog("claude response usage is not complete, maybe upstream error")
 		}
+		// A stream that closed normally after answering but reported no usage
+		// at all is an upstream accounting fault, not a truncation: record it
+		// before the estimate below hides it. An unfinished stream is left to
+		// StreamStatus.
+		if claudeInfo.Done && claudeInfo.Usage.CompletionTokens == 0 &&
+			claudeInfo.Usage.PromptTokens+claudeInfo.Usage.PromptTokensDetails.CachedTokens+claudeInfo.Usage.PromptTokensDetails.CacheCreationTokensTotal() == 0 {
+			claudeInfo.Usage.UpstreamUsageAnomaly = dto.UsageAnomalyZeroUsage
+		}
 		// 只补缺失字段，不整份覆盖——保留 message_start 已拿到的 cache 字段
 		fallback := service.ResponseText2Usage(c, claudeInfo.ResponseText.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 		if claudeInfo.Usage.CompletionTokens == 0 ||

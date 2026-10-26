@@ -280,11 +280,15 @@ func processHeaderOverride(info *common.RelayInfo, c *gin.Context) (map[string]s
 		syntheticFamily = settings.SyntheticClientHeadersProfile
 	}
 	syntheticHeaders := syntheticFamily != ""
+	clientHeaders := EffectiveClientHeaders
+	if info.ChannelMeta != nil && info.ChannelSetting.KeyEnvironments {
+		clientHeaders = KeyEnvironmentClientHeaders
+	}
 	if syntheticHeaders {
 		// EffectiveClientHeaders rather than the raw profile: the built-in client
 		// versions go stale and the admin's override map is where they get
 		// corrected, so live traffic and channel tests wear the same headers.
-		for name, value := range EffectiveClientHeaders(syntheticFamily, info.ChannelSetting.TLSFingerprint, info.ChannelSetting.CLIVersionProfile) {
+		for name, value := range clientHeaders(syntheticFamily, info.ChannelSetting.TLSFingerprint, info.ChannelSetting.CLIVersionProfile) {
 			headerOverride[strings.ToLower(strings.TrimSpace(name))] = value
 		}
 		if info.IsStream && syntheticFamily != ClientHeaderFamilyClaude {
@@ -295,7 +299,7 @@ func processHeaderOverride(info *common.RelayInfo, c *gin.Context) (map[string]s
 	}
 
 	if info.IsChannelTest && info.ChannelSetting.CLIVersionProfile != "" {
-		for name, value := range EffectiveClientHeaders(info.ChannelSetting.SyntheticClientHeadersProfile, info.ChannelSetting.TLSFingerprint, info.ChannelSetting.CLIVersionProfile) {
+		for name, value := range clientHeaders(info.ChannelSetting.SyntheticClientHeadersProfile, info.ChannelSetting.TLSFingerprint, info.ChannelSetting.CLIVersionProfile) {
 			headerOverride[name] = value
 		}
 	}
@@ -373,12 +377,28 @@ func processHeaderOverride(info *common.RelayInfo, c *gin.Context) (map[string]s
 		}
 	}
 
+	// A selected version owns its captured and derived identity headers. This
+	// applies to static overrides and to affinity/param overrides alike, whether
+	// the version is selected for the channel or for an independent key.
+	protectedProfileFamily := ""
+	if syntheticHeaders && info.ChannelSetting.KeyEnvironments {
+		protectedProfileFamily = syntheticFamily
+	}
+	if syntheticHeaders || info.IsChannelTest {
+		if version := service.LookupCLIVersionProfile(info.ChannelSetting.CLIVersionProfile); version != nil &&
+			version.Family == info.ChannelSetting.SyntheticClientHeadersProfile {
+			protectedProfileFamily = version.Family
+		}
+	}
 	for k, v := range headerOverrideSource {
 		if isHeaderPassthroughRuleKey(k) {
 			continue
 		}
 		key := strings.TrimSpace(strings.ToLower(k))
 		if key == "" {
+			continue
+		}
+		if protectedProfileFamily != "" && service.IsProtectedProfileHeader(protectedProfileFamily, key) {
 			continue
 		}
 
@@ -522,10 +542,23 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if err != nil {
 		return nil, fmt.Errorf("get request url failed: %w", err)
 	}
+	var cliHeaders http.Header
+	if info.ChannelSetting.KeyEnvironments {
+		fullRequestURL, _, cliHeaders, err = prepareCLIRequest(c, info, fullRequestURL, nil)
+		if err != nil {
+			return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+		if !strings.HasPrefix(fullRequestURL, "wss://") {
+			return nil, types.NewError(fmt.Errorf("key CLI profiles require WSS"), types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+	}
 	targetHeader := http.Header{}
 	err = a.SetupRequestHeader(c, &targetHeader, info)
 	if err != nil {
 		return nil, fmt.Errorf("setup request header failed: %w", err)
+	}
+	for name, values := range cliHeaders {
+		targetHeader[name] = values
 	}
 	// 在 SetupRequestHeader 之后应用 Header Override，确保用户设置优先级最高
 	// 这样可以覆盖默认的 Authorization header 设置
@@ -540,13 +573,25 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if targetURL, parseErr := url.Parse(fullRequestURL); parseErr == nil {
 		common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, targetURL.Scheme+"://"+targetURL.Host)
 	}
-	targetConn, _, err := websocket.DefaultDialer.Dial(fullRequestURL, targetHeader)
+	dialer := websocket.DefaultDialer
+	if info.ChannelSetting.KeyEnvironments {
+		dialer, err = newResponsesWebsocketDialer(info)
+		if err != nil {
+			return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+	}
+	targetConn, handshakeResp, err := dialer.DialContext(c.Request.Context(), fullRequestURL, targetHeader)
 	if err != nil {
+		if info.ChannelSetting.KeyEnvironments && handshakeResp != nil {
+			return nil, service.RelayErrorHandler(c, handshakeResp, false)
+		}
+		closeHandshakeBody(handshakeResp)
 		return nil, fmt.Errorf("dial failed to %s: %w", common.SanitizeURLForLog(fullRequestURL), err)
 	}
-	// send request body
-	//all, err := io.ReadAll(requestBody)
-	//err = service.WssString(c, targetConn, string(all))
+	closeHandshakeBody(handshakeResp)
+	if info.ChannelSetting.KeyEnvironments {
+		common2.SetContextKey(c, appconstant.ContextKeyUpstreamWebsocketEstablished, true)
+	}
 	return targetConn, nil
 }
 
@@ -633,7 +678,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	var err error
 	settings := info.ChannelSetting
 	settings.Normalize(info.ApiType)
-	version, err := service.ResolveCLIVersionProfile(settings.CLIVersionProfile, settings.SyntheticClientHeadersProfile, settings.TLSFingerprint, settings.WebsocketTransport)
+	version, err := service.ResolveCLIVersionProfile(settings.CLIVersionProfile, settings.SyntheticClientHeadersProfile, settings.TLSFingerprint, settings.WebsocketTransport, settings.KeyEnvironments)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
 	}

@@ -28,6 +28,10 @@ const (
 	// SystemTaskTypeChannelKeepalive sends the per-channel upstream keepalives
 	// that are due. A row exists only for a run that had at least one to send.
 	SystemTaskTypeChannelKeepalive = "channel_keepalive"
+	// SystemTaskTypeCacheShareAlert aggregates recent consume logs into a
+	// per-channel cache share and notifies the root user of channels below
+	// their threshold. Its result carries the per-channel alert cooldown.
+	SystemTaskTypeCacheShareAlert = "cache_share_alert"
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")
@@ -468,4 +472,20 @@ func decodeSystemTaskJSONValue(data string) any {
 		return data
 	}
 	return value
+}
+
+// GetPreviousSucceededSystemTask returns the most recent succeeded task of the
+// type created before beforeId, so a run can carry forward state its
+// predecessor recorded in Result. Returns (nil, nil) when there is none.
+func GetPreviousSucceededSystemTask(taskType string, beforeId int64) (*SystemTask, error) {
+	var task SystemTask
+	err := DB.Where("type = ? AND status = ? AND id < ?", taskType, SystemTaskStatusSucceeded, beforeId).
+		Order("id desc").First(&task).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &task, nil
 }

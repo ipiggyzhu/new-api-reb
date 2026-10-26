@@ -38,6 +38,7 @@ type channelCacheSnapshot struct {
 	group2model2channels         map[string]map[string][]int
 	channelsIDM                  map[int]*Channel
 	channel2advancedCustomConfig map[int]*dto.AdvancedCustomConfig
+	keyEnvironments              map[int]map[string]string
 }
 
 // Entries handed to readers must never be mutated in place, so every cache
@@ -99,6 +100,22 @@ func buildChannelCacheSnapshot() (*channelCacheSnapshot, bool) {
 		}
 	}
 
+	// The table is read only once a channel uses it, so a gateway without
+	// independent key environments scans exactly what it did before.
+	var keyEnvironments map[int]map[string]string
+	for _, channel := range channels {
+		if !channel.GetSetting().KeyEnvironments {
+			continue
+		}
+		projection, err := loadChannelKeyEnvironments(DB)
+		if err != nil {
+			common.SysError(fmt.Sprintf("failed to load channel key environments for cache sync: %v", err))
+			return nil, false
+		}
+		keyEnvironments = projection
+		break
+	}
+
 	newGroup2model2channels := make(map[string]map[string][]int)
 	for _, ability := range abilities {
 		if _, ok := newGroup2model2channels[ability.Group]; !ok {
@@ -149,6 +166,7 @@ func buildChannelCacheSnapshot() (*channelCacheSnapshot, bool) {
 		group2model2channels:         newGroup2model2channels,
 		channelsIDM:                  newChannelId2channel,
 		channel2advancedCustomConfig: newChannel2advancedCustomConfig,
+		keyEnvironments:              keyEnvironments,
 	}, true
 }
 
@@ -156,6 +174,7 @@ func installChannelCacheSnapshot(snapshot *channelCacheSnapshot) {
 	group2model2channels = snapshot.group2model2channels
 	channelsIDM = snapshot.channelsIDM
 	channel2advancedCustomConfig = snapshot.channel2advancedCustomConfig
+	installChannelKeyEnvironments(snapshot.keyEnvironments)
 	channelCacheGeneration++
 }
 

@@ -70,19 +70,22 @@ var (
 )
 
 type channelAffinityMeta struct {
-	CacheKey       string
-	TTLSeconds     int
-	RuleName       string
-	SkipRetry      bool
-	ParamTemplate  map[string]interface{}
-	KeySourceType  string
-	KeySourceKey   string
-	KeySourcePath  string
-	KeyHint        string
-	KeyFingerprint string
-	UsingGroup     string
-	ModelName      string
-	RequestPath    string
+	CacheKey string
+	// ConversationKey is CacheKey without the model name: the conversation an
+	// independent key environment binding follows across model switches.
+	ConversationKey string
+	TTLSeconds      int
+	RuleName        string
+	SkipRetry       bool
+	ParamTemplate   map[string]interface{}
+	KeySourceType   string
+	KeySourceKey    string
+	KeySourcePath   string
+	KeyHint         string
+	KeyFingerprint  string
+	UsingGroup      string
+	ModelName       string
+	RequestPath     string
 }
 
 type ChannelAffinityStatsContext struct {
@@ -536,6 +539,18 @@ func ApplyChannelAffinityOverrideTemplate(c *gin.Context, paramOverride map[stri
 	return mergedParam, true
 }
 
+// ChannelAffinityKeySeed returns the conversation identity that pins the key
+// of a multi-key channel when an affinity rule matched this request and
+// sticky_multi_key is on.
+func ChannelAffinityKeySeed(c *gin.Context) (string, bool) {
+	setting := operation_setting.GetChannelAffinitySetting()
+	if setting == nil || !setting.Enabled || !setting.StickyMultiKey || c == nil {
+		return "", false
+	}
+	cacheKey, _, ok := getChannelAffinityContext(c)
+	return cacheKey, ok
+}
+
 func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup string) (int, bool) {
 	setting := operation_setting.GetChannelAffinitySetting()
 	if setting == nil || !setting.Enabled {
@@ -598,19 +613,20 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 		cacheKeySuffix := buildChannelAffinityCacheKeySuffix(rule, modelName, usingGroup, affinityValue)
 		cacheKeyFull := channelAffinityCacheNamespace + ":" + cacheKeySuffix
 		meta := channelAffinityMeta{
-			CacheKey:       cacheKeyFull,
-			TTLSeconds:     ttlSeconds,
-			RuleName:       strings.TrimSpace(rule.Name),
-			SkipRetry:      rule.SkipRetryOnFailure,
-			ParamTemplate:  cloneStringAnyMap(rule.ParamOverrideTemplate),
-			KeySourceType:  strings.TrimSpace(usedSource.Type),
-			KeySourceKey:   strings.TrimSpace(usedSource.Key),
-			KeySourcePath:  strings.TrimSpace(usedSource.Path),
-			KeyHint:        buildChannelAffinityKeyHint(affinityValue),
-			KeyFingerprint: affinityFingerprint(affinityValue),
-			UsingGroup:     usingGroup,
-			ModelName:      modelName,
-			RequestPath:    path,
+			CacheKey:        cacheKeyFull,
+			ConversationKey: channelAffinityCacheNamespace + ":" + buildChannelAffinityCacheKeySuffix(rule, "", usingGroup, affinityValue),
+			TTLSeconds:      ttlSeconds,
+			RuleName:        strings.TrimSpace(rule.Name),
+			SkipRetry:       rule.SkipRetryOnFailure,
+			ParamTemplate:   cloneStringAnyMap(rule.ParamOverrideTemplate),
+			KeySourceType:   strings.TrimSpace(usedSource.Type),
+			KeySourceKey:    strings.TrimSpace(usedSource.Key),
+			KeySourcePath:   strings.TrimSpace(usedSource.Path),
+			KeyHint:         buildChannelAffinityKeyHint(affinityValue),
+			KeyFingerprint:  affinityFingerprint(affinityValue),
+			UsingGroup:      usingGroup,
+			ModelName:       modelName,
+			RequestPath:     path,
 		}
 		setChannelAffinityContext(c, meta)
 
@@ -1155,12 +1171,15 @@ func observeChannelAffinityUsageCache(statsCtx ChannelAffinityStatsContext, usag
 		if !found {
 			next = ChannelAffinityUsageCacheCounters{}
 		}
+		// Token counts of two shapes cannot be summed into one rate, so a shape
+		// change (an upgrade, or a rolling deploy sharing Redis) restarts the
+		// counters in the new shape. Marking the bucket mixed instead would stick:
+		// every write renews its TTL, so an active key would never show a rate again.
+		if currentMode != "" && next.CachedTokenRateMode != "" && next.CachedTokenRateMode != currentMode {
+			next = ChannelAffinityUsageCacheCounters{}
+		}
 		if currentMode != "" {
-			if next.CachedTokenRateMode == "" {
-				next.CachedTokenRateMode = currentMode
-			} else if next.CachedTokenRateMode != currentMode && next.CachedTokenRateMode != cacheTokenRateModeMixed {
-				next.CachedTokenRateMode = cacheTokenRateModeMixed
-			}
+			next.CachedTokenRateMode = currentMode
 		}
 		next.Total++
 		if hit {

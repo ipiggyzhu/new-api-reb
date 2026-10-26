@@ -71,6 +71,41 @@ func normalizeChannelTestEndpoint(channel *model.Channel, modelName, endpointTyp
 	return normalized
 }
 
+// channelTestModelPath is the endpoint a model's name selects when no endpoint
+// type is given. The upstream keepalive reads it too, to pass over the models
+// that do not take a chat request.
+func channelTestModelPath(channel *model.Channel, modelName string) string {
+	requestPath := "/v1/chat/completions"
+	if strings.Contains(strings.ToLower(modelName), "rerank") {
+		requestPath = "/v1/rerank"
+	}
+
+	// 先判断是否为 Embedding 模型
+	if strings.Contains(strings.ToLower(modelName), "embedding") ||
+		strings.HasPrefix(modelName, "m3e") || // m3e 系列模型
+		strings.Contains(modelName, "bge-") || // bge 系列模型
+		strings.Contains(modelName, "embed") ||
+		channel.Type == constant.ChannelTypeMokaAI { // 其他 embedding 模型
+		requestPath = "/v1/embeddings" // 修改请求路径
+	}
+
+	// VolcEngine 图像生成模型
+	if channel.Type == constant.ChannelTypeVolcEngine && strings.Contains(modelName, "seedream") {
+		requestPath = "/v1/images/generations"
+	}
+
+	// responses-only models
+	if strings.Contains(strings.ToLower(modelName), "codex") {
+		requestPath = "/v1/responses"
+	}
+
+	// responses compaction models (must use /v1/responses/compact)
+	if strings.HasSuffix(modelName, ratio_setting.CompactModelSuffix) {
+		requestPath = "/v1/responses/compact"
+	}
+	return requestPath
+}
+
 func resolveChannelTestUserID(c *gin.Context) (int, error) {
 	if c != nil {
 		if userID := c.GetInt("id"); userID > 0 {
@@ -129,34 +164,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		}
 	} else {
 		// 如果没有指定端点类型，使用原有的自动检测逻辑
-
-		if strings.Contains(strings.ToLower(testModel), "rerank") {
-			requestPath = "/v1/rerank"
-		}
-
-		// 先判断是否为 Embedding 模型
-		if strings.Contains(strings.ToLower(testModel), "embedding") ||
-			strings.HasPrefix(testModel, "m3e") || // m3e 系列模型
-			strings.Contains(testModel, "bge-") || // bge 系列模型
-			strings.Contains(testModel, "embed") ||
-			channel.Type == constant.ChannelTypeMokaAI { // 其他 embedding 模型
-			requestPath = "/v1/embeddings" // 修改请求路径
-		}
-
-		// VolcEngine 图像生成模型
-		if channel.Type == constant.ChannelTypeVolcEngine && strings.Contains(testModel, "seedream") {
-			requestPath = "/v1/images/generations"
-		}
-
-		// responses-only models
-		if strings.Contains(strings.ToLower(testModel), "codex") {
-			requestPath = "/v1/responses"
-		}
-
-		// responses compaction models (must use /v1/responses/compact)
-		if strings.HasSuffix(testModel, ratio_setting.CompactModelSuffix) {
-			requestPath = "/v1/responses/compact"
-		}
+		requestPath = channelTestModelPath(channel, testModel)
 		// OpenAI-compatible channels can be configured as Codex CLI upstreams.
 		// Their text models may exist only on Responses: probing Chat Completions
 		// can return a misleading "model not supported" and delete working models.

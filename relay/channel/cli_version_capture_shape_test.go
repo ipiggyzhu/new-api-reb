@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -17,12 +18,34 @@ import (
 )
 
 // Claude Code 2.1.306's main call (/tmp/capture/002.json, 005.json): the
-// leading billing block, thinking, effort and output limit it sends.
+// leading billing block, thinking, effort and output limit it sends. The
+// billing suffix hashes the first prompt: 813 is the capture's "Say ok.",
+// dcf is the same client's suffix for "hi". The Linux 2.1.288 and 2.1.282
+// captures of the same prompt sent 3f2 and 006.
 const (
-	claudeCode2306Billing  = `{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.306.813; cc_entrypoint=sdk-cli;"}`
-	claudeCode2306Thinking = `{"type":"adaptive","display":"omitted"}`
-	claudeCode2306Effort   = `{"effort":"medium"}`
+	claudeCode2306Billing   = `{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.306.813; cc_entrypoint=sdk-cli;"}`
+	claudeCode2288Billing   = `{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.288.3f2; cc_entrypoint=sdk-cli;"}`
+	claudeCode2282Billing   = `{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.282.006; cc_entrypoint=sdk-cli;"}`
+	claudeCode2306BillingHi = `{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.306.dcf; cc_entrypoint=sdk-cli;"}`
+	claudeCode2306Thinking  = `{"type":"adaptive","display":"omitted"}`
+	claudeCode2306Effort    = `{"effort":"medium"}`
 )
+
+// assertProfileBillingLeads checks a real Claude Code client's system under a
+// profile whose client sends a billing block: the profile's block leads, bare,
+// and everything the client sent follows unchanged, its breakpoints included.
+func assertProfileBillingLeads(t *testing.T, version string, sent string, shaped []byte) {
+	t.Helper()
+	system := gjson.GetBytes(shaped, "system").Array()
+	require.NotEmpty(t, system)
+	assert.False(t, system[0].Get("cache_control").Exists(), "the billing block carries no breakpoint")
+	assert.True(t, strings.HasPrefix(system[0].Get("text").String(), "x-anthropic-billing-header: cc_version="+version+"."), system[0].Raw)
+	rest := make([]string, 0, len(system)-1)
+	for _, block := range system[1:] {
+		rest = append(rest, block.Raw)
+	}
+	assert.JSONEq(t, gjson.Get(sent, "system").Raw, "["+strings.Join(rest, ",")+"]")
+}
 
 // withOriginalRequest stores the caller's own request the way the relay does,
 // so shaping can tell which fields the caller actually sent.
@@ -53,23 +76,29 @@ func shapeVersionedClaudeRequest(t *testing.T, version string, format types.Rela
 	return shapeClaudeMessagesBody(t, c, info, body), c, info
 }
 
-// An OpenAI client's request under a 2.1.306 profile leaves as the captured
-// main call: billing block first and bare, breakpoints on the caller's last two
-// system blocks and last message block, the captured thinking in place of
-// conversion's, the caller's effort as output_config.effort, the captured
-// output limit since the caller set none, and the capture's top-level fields
-// in its order. Only the TTL mode differs.
+// An OpenAI client's request under each pooled Claude profile leaves as that
+// version's captured main call: its billing block first and bare, breakpoints
+// on the caller's last two system blocks and last message block, the captured
+// thinking in place of conversion's, the caller's effort as
+// output_config.effort, the captured output limit since the caller set none,
+// the capture's top-level fields in its order, and the capture's identifying
+// headers. Within a version only the TTL mode differs.
 func TestClaudeVersionProfileSynthesizesCapturedMainCall(t *testing.T) {
 	server, captures := cliTLSUpstream(t)
 	request := `{"model":"claude-opus-5-5","temperature":0.3,"top_p":0.9,"reasoning_effort":"low",
 		"tools":[{"type":"function","function":{"name":"Bash","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}}],
 		"messages":[{"role":"system","content":[{"type":"text","text":"stable instructions"},{"type":"text","text":"dynamic instructions"}]},
 			{"role":"user","content":"Say ok."}]}`
+	const hour, fiveMinutes = `{"type":"ephemeral","ttl":"1h"}`, `{"type":"ephemeral"}`
 	cases := []struct {
-		profile, cacheControl, beta string
+		profile, cacheControl, beta, billing, userAgent, packageVersion string
 	}{
-		{"claude-2.1.306-linux-x64", `{"type":"ephemeral"}`, claudeCode2306Beta},
-		{"claude-2.1.306-linux-x64-1h", `{"type":"ephemeral","ttl":"1h"}`, claudeCode2306Beta + ",extended-cache-ttl-2025-04-11"},
+		{"claude-2.1.306-linux-x64", fiveMinutes, claudeCode2306Beta, claudeCode2306Billing, "claude-cli/2.1.306 (external, sdk-cli)", "0.128.0"},
+		{"claude-2.1.306-linux-x64-1h", hour, claudeCode2306Beta + ",extended-cache-ttl-2025-04-11", claudeCode2306Billing, "claude-cli/2.1.306 (external, sdk-cli)", "0.128.0"},
+		{"claude-2.1.288-linux-x64", fiveMinutes, claudeCode2288Beta, claudeCode2288Billing, "claude-cli/2.1.288 (external, sdk-cli)", "0.128.0"},
+		{"claude-2.1.288-linux-x64-1h", hour, claudeCode2288Beta + ",extended-cache-ttl-2025-04-11", claudeCode2288Billing, "claude-cli/2.1.288 (external, sdk-cli)", "0.128.0"},
+		{"claude-2.1.282-linux-x64", fiveMinutes, claudeCode2282Beta, claudeCode2282Billing, "claude-cli/2.1.282 (external, sdk-cli)", "0.112.1"},
+		{"claude-2.1.282-linux-x64-1h", hour, claudeCode2282Beta + ",extended-cache-ttl-2025-04-11", claudeCode2282Billing, "claude-cli/2.1.282 (external, sdk-cli)", "0.112.1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.profile, func(t *testing.T) {
@@ -89,7 +118,7 @@ func TestClaudeVersionProfileSynthesizesCapturedMainCall(t *testing.T) {
 			})
 			assert.Equal(t, []string{"model", "messages", "system", "tools", "metadata", "max_tokens", "thinking",
 				"context_management", "output_config", "stream"}, keys)
-			assert.Equal(t, claudeCode2306Billing, gjson.GetBytes(got.body, "system.0").Raw)
+			assert.Equal(t, tc.billing, gjson.GetBytes(got.body, "system.0").Raw)
 			assert.Equal(t, "stable instructions", gjson.GetBytes(got.body, "system.1.text").String())
 			assert.Equal(t, map[string]string{
 				"system.1.cache_control":             strings.TrimSpace("ephemeral " + gjson.Get(tc.cacheControl, "ttl").String()),
@@ -101,6 +130,9 @@ func TestClaudeVersionProfileSynthesizesCapturedMainCall(t *testing.T) {
 			assert.Equal(t, `{"effort":"low"}`, gjson.GetBytes(got.body, "output_config").Raw)
 			assert.Equal(t, "128000", gjson.GetBytes(got.body, "max_tokens").Raw)
 			assert.Equal(t, tc.beta, got.header.Get("anthropic-beta"))
+			assert.Equal(t, tc.userAgent, got.header.Get("User-Agent"))
+			assert.Equal(t, tc.packageVersion, got.header.Get("X-Stainless-Package-Version"))
+			assert.Equal(t, "Linux", got.header.Get("X-Stainless-OS"))
 		})
 	}
 }
@@ -146,7 +178,7 @@ func TestClaudeVersionProfileKeepsCallerLimitAndContract(t *testing.T) {
 		assert.Equal(t, gjson.GetBytes(converted, "max_tokens").Raw, gjson.GetBytes(shaped, "max_tokens").Raw)
 		assert.False(t, gjson.GetBytes(shaped, "thinking").Exists())
 		assert.False(t, gjson.GetBytes(shaped, "output_config").Exists())
-		assert.Equal(t, claudeCode2306Billing, gjson.GetBytes(shaped, "system.0").Raw, "the billing block is client identity, not model-dependent")
+		assert.Equal(t, claudeCode2306BillingHi, gjson.GetBytes(shaped, "system.0").Raw, "the billing block is client identity, not model-dependent")
 	})
 }
 
@@ -179,6 +211,8 @@ func TestClaudeVersionProfileKeepsCallerEffort(t *testing.T) {
 	}{
 		{"xhigh", "xhigh"},
 		{"minimal", "low"},
+		// The least reasoning a caller can ask for never reasons more than "minimal".
+		{"none", "low"},
 	}
 	for _, tc := range openAI {
 		t.Run("OpenAI reasoning_effort "+tc.effort, func(t *testing.T) {
@@ -234,7 +268,7 @@ func TestClaudeVersionProfileBillingBlockLeadsSystem(t *testing.T) {
 			shaped, c, info := shapeVersionedClaudeRequest(t, profile, types.RelayFormatClaude, request)
 			system := gjson.GetBytes(shaped, "system").Array()
 			require.Len(t, system, len(tc.texts)+1)
-			assert.Equal(t, claudeCode2306Billing, system[0].Raw)
+			assert.Equal(t, claudeCode2306BillingHi, system[0].Raw)
 			for i, text := range tc.texts {
 				assert.Equal(t, text, system[i+1].Get("text").String())
 			}
@@ -242,6 +276,126 @@ func TestClaudeVersionProfileBillingBlockLeadsSystem(t *testing.T) {
 			assert.JSONEq(t, string(shaped), string(shapeClaudeMessagesBody(t, c, info, shaped)), "a retry must not add a block or move breakpoints")
 		})
 	}
+}
+
+// The billing suffix follows the conversation's first prompt the way the
+// client computes it: the first user message's text past the client's
+// <system-reminder> blocks (the cap1 capture's prompt gives its 645), and it
+// stays the same as the conversation grows, so it never moves the cache prefix.
+func TestClaudeVersionProfileBillingSuffixFollowsFirstPrompt(t *testing.T) {
+	const profile = "claude-2.1.306-linux-x64"
+	firstTurn := `{"role":"user","content":[{"type":"text","text":"<system-reminder>\ncontext\n</system-reminder>"},
+		{"type":"text","text":"<system-reminder>\nmore\n</system-reminder>"},{"type":"text","text":"Run the echo commands you need and then say done."}]}`
+	cases := []struct {
+		name, messages, suffix string
+	}{
+		{"first turn", firstTurn, "645"},
+		{"later turn", firstTurn + `,{"role":"assistant","content":"done"},{"role":"user","content":"Say ok."}`, "645"},
+		{"string prompt", `{"role":"user","content":"Say ok."},{"role":"assistant","content":"ok"},{"role":"user","content":"hi"}`, "813"},
+		{"image before text", `{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}},{"type":"text","text":"Say ok."}]}`, "813"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := `{"model":"claude-opus-5-5","max_tokens":512,"messages":[` + tc.messages + `]}`
+			shaped, _, _ := shapeVersionedClaudeRequest(t, profile, types.RelayFormatClaude, request)
+			assert.Equal(t, "x-anthropic-billing-header: cc_version=2.1.306."+tc.suffix+"; cc_entrypoint=sdk-cli;",
+				gjson.GetBytes(shaped, "system.0.text").String())
+		})
+	}
+}
+
+// A selected profile decides the billing block for every sender, the real
+// Claude Code client included: 2.1.306's captured block replaces the caller's,
+// while a profile without billing (2.1.211) keeps the caller's blocks in place,
+// including their cache settings. A retry changes neither branch. Without a
+// profile the existing shaping behavior stays unchanged.
+func TestClaudeVersionProfileDecidesBillingBlock(t *testing.T) {
+	const callerBilling = `{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.282.abc; cc_entrypoint=cli;"}`
+	const cachedBilling = `{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.288.caller; cc_entrypoint=cli;","cache_control":{"type":"ephemeral","ttl":"1h"}}`
+	bodies := map[string]string{
+		"leading":             `[` + callerBilling + `,{"type":"text","text":"You are Claude Code.","cache_control":{"type":"ephemeral"}}]`,
+		"not leading":         `[{"type":"text","text":"You are Claude Code."},` + callerBilling + `]`,
+		"whole system string": `"x-anthropic-billing-header: cc_version=2.1.282.abc; cc_entrypoint=cli;"`,
+		"multiple":            `[{"type":"text","text":"before"},` + cachedBilling + `,{"type":"text","text":"between","cache_control":{"type":"ephemeral"}},` + callerBilling + `,{"type":"text","text":"after"}]`,
+	}
+	callerText := gjson.Get(callerBilling, "text").String()
+	cases := []struct {
+		profile, body string
+		want          []string
+	}{
+		{"claude-2.1.306-linux-x64", "leading", []string{gjson.Get(claudeCode2306Billing, "text").String(), "You are Claude Code."}},
+		{"claude-2.1.306-linux-x64", "not leading", []string{gjson.Get(claudeCode2306Billing, "text").String(), "You are Claude Code."}},
+		{"claude-2.1.306-linux-x64", "whole system string", []string{gjson.Get(claudeCode2306Billing, "text").String()}},
+		{"claude-2.1.306-linux-x64", "multiple", []string{gjson.Get(claudeCode2306Billing, "text").String(), "before", "between", "after"}},
+		{"claude-2.1.211-windows-x64", "leading", []string{callerText, "You are Claude Code."}},
+		{"claude-2.1.211-windows-x64", "not leading", []string{"You are Claude Code.", callerText}},
+		{"claude-2.1.211-windows-x64", "whole system string", []string{callerText}},
+		{"claude-2.1.211-windows-x64", "multiple", []string{"before", gjson.Get(cachedBilling, "text").String(), "between", callerText, "after"}},
+	}
+	for _, tc := range cases {
+		for _, native := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/%s/native=%t", tc.profile, tc.body, native), func(t *testing.T) {
+				request := `{"model":"claude-sonnet-4-5","max_tokens":512,"system":` + bodies[tc.body] + `,"messages":[{"role":"user","content":"Say ok."}]}`
+				c, info := nativeClaudeCodeRequest()
+				if !native {
+					c.Request.Header.Set("User-Agent", "Anthropic/Python 0.60.0")
+				}
+				info.ChannelSetting.CLIVersionProfile = tc.profile
+				withOriginalRequest(t, c, request)
+				shaped := shapeClaudeMessagesBody(t, c, info, []byte(request))
+
+				system := gjson.GetBytes(shaped, "system")
+				var texts []string
+				if system.Type == gjson.String {
+					texts = []string{system.String()}
+				} else {
+					for _, block := range system.Array() {
+						texts = append(texts, block.Get("text").String())
+					}
+				}
+				assert.Equal(t, tc.want, texts)
+				if tc.profile == "claude-2.1.306-linux-x64" {
+					assert.Equal(t, claudeCode2306Billing, system.Get("0").Raw, "the captured block, bare")
+				} else {
+					original := gjson.Parse(bodies[tc.body])
+					if original.Type == gjson.String {
+						assert.Equal(t, original.Raw, system.Raw, "a billing-only string stays a string")
+					} else {
+						require.Len(t, system.Array(), len(original.Array()))
+						for i, block := range original.Array() {
+							if strings.HasPrefix(block.Get("text").String(), "x-anthropic-billing-header:") {
+								assert.JSONEq(t, block.Raw, system.Array()[i].Raw, "billing content and attributes stay at the same position")
+							}
+						}
+						if tc.body == "multiple" {
+							wantCache := map[string]string{"system.1.cache_control": "ephemeral 1h"}
+							if native {
+								wantCache["system.2.cache_control"] = "ephemeral"
+							}
+							assert.Equal(t, wantCache, claudeCacheBreakpoints(t, shaped),
+								"a preserved billing breakpoint counts toward the caller's cache layout")
+						}
+					}
+				}
+				assert.Equal(t, strings.Count(strings.Join(tc.want, "\n"), "x-anthropic-billing-header:"),
+					strings.Count(string(shaped), "x-anthropic-billing-header:"), "no other billing block anywhere")
+				assert.Equal(t, string(shaped), string(shapeClaudeMessagesBody(t, c, info, shaped)), "a retry must not add, drop or change a block")
+			})
+		}
+	}
+
+	t.Run("no profile keeps the caller's block", func(t *testing.T) {
+		request := `{"model":"claude-sonnet-4-5","max_tokens":512,"system":` + bodies["leading"] + `,"messages":[{"role":"user","content":"Say ok."}]}`
+		c, info := nativeClaudeCodeRequest()
+		withOriginalRequest(t, c, request)
+		assert.JSONEq(t, bodies["leading"], gjson.GetBytes(shapeClaudeMessagesBody(t, c, info, []byte(request)), "system").Raw)
+
+		c, info = nativeClaudeCodeRequest()
+		c.Request.Header.Set("User-Agent", "Anthropic/Python 0.60.0")
+		withOriginalRequest(t, c, request)
+		assert.Equal(t, gjson.Get(callerBilling, "text").String(),
+			gjson.GetBytes(shapeClaudeMessagesBody(t, c, info, []byte(request)), "system.0.text").String())
+	})
 }
 
 // The outgoing beta set agrees with the final body even where the real
@@ -256,6 +410,8 @@ func TestClaudeVersionProfileBetaFollowsFinalBodyTTL(t *testing.T) {
 		Replace(strings.Replace(claudeCodeCachedRequest, "@extra", "", 1))
 	uncached := `{"model":"claude-sonnet-4-5","max_tokens":32000,"system":[{"type":"text","text":"a"},{"type":"text","text":"b"}],"messages":[{"role":"user","content":"hi"}]}`
 	sdkHour := `{"model":"claude-sonnet-4-5","max_tokens":1024,"system":[{"type":"text","text":"a","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":"hi"}]}`
+	// The real client's only breakpoint sits in a custom-content document.
+	documentHour := `{"model":"claude-sonnet-4-5","max_tokens":1024,"system":[{"type":"text","text":"a"}],"messages":[{"role":"user","content":[{"type":"document","source":{"type":"content","content":[{"type":"text","text":"chapter","cache_control":{"type":"ephemeral","ttl":"1h"}}]}},{"type":"text","text":"summarize"}]}]}`
 	cases := []struct {
 		name, profile, body, adminBeta string
 		sdk, hourTTL                   bool
@@ -268,6 +424,7 @@ func TestClaudeVersionProfileBetaFollowsFinalBodyTTL(t *testing.T) {
 		{"shaped SDK under 1h profile", "claude-2.1.306-linux-x64-1h", sdkHour, "", true, true},
 		{"admin beta with 1h token, 5m body", "claude-2.1.306-linux-x64", onlyDefault, claudeCode2306Beta + ",extended-cache-ttl-2025-04-11", false, false},
 		{"admin beta without 1h token, 1h body", "claude-2.1.306-linux-x64-1h", withHour, claudeCode2306Beta, false, true},
+		{"default profile, client's 1h inside a document", "claude-2.1.306-linux-x64", documentHour, "", false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -291,7 +448,7 @@ func TestClaudeVersionProfileBetaFollowsFinalBodyTTL(t *testing.T) {
 			assert.Equal(t, beta, got.header.Get("anthropic-beta"))
 			assert.Equal(t, tc.hourTTL, claudeBodyHasHourTTL(got.body), "the beta must describe the body that was sent")
 			if !tc.sdk && tc.body != uncached {
-				assert.JSONEq(t, gjson.Get(tc.body, "system").Raw, gjson.GetBytes(got.body, "system").Raw)
+				assertProfileBillingLeads(t, "2.1.306", tc.body, got.body)
 				assert.JSONEq(t, gjson.Get(tc.body, "messages").Raw, gjson.GetBytes(got.body, "messages").Raw)
 			}
 		})
@@ -299,18 +456,19 @@ func TestClaudeVersionProfileBetaFollowsFinalBodyTTL(t *testing.T) {
 }
 
 // A tool schema property or tool input named cache_control is caller data,
-// not a breakpoint: the native client sent none, so the profile places them.
+// not a breakpoint: the native client sent none, so the profile places them
+// over the client's own system blocks, behind the profile's billing block.
 func TestClaudeVersionProfileIgnoresCacheControlNamedData(t *testing.T) {
 	c, info := nativeClaudeCodeRequest()
 	info.ChannelSetting.CLIVersionProfile = "claude-2.1.306-linux-x64"
 	shaped := shapeClaudeMessagesBody(t, c, info, []byte(withoutClientCache.Replace(strings.Replace(claudeCodeCachedRequest, "@extra", "", 1))))
 	assert.Equal(t, map[string]string{
-		"system.0.cache_control":             "ephemeral",
 		"system.1.cache_control":             "ephemeral",
+		"system.2.cache_control":             "ephemeral",
 		"messages.4.content.0.cache_control": "ephemeral",
 	}, claudeCacheBreakpoints(t, shaped))
 	assert.Equal(t, "string", gjson.GetBytes(shaped, "tools.#(name==\"Write\").input_schema.properties.cache_control.type").String())
-	assert.Equal(t, "You are Claude Code.", gjson.GetBytes(shaped, "system.0.text").String(), "native requests get no billing block")
+	assert.Equal(t, "You are Claude Code.", gjson.GetBytes(shaped, "system.1.text").String())
 
 	c, info = nativeClaudeCodeRequest()
 	info.ChannelSetting.CLIVersionProfile = "claude-2.1.306-linux-x64"

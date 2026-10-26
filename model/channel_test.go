@@ -38,7 +38,7 @@ func TestGetNextEnabledKeyPollingPreservesConcurrentKeyDisable(t *testing.T) {
 	require.Equal(t, common.ChannelStatusAutoDisabled, disabler.ChannelInfo.MultiKeyStatusList[2])
 	require.NoError(t, disabler.SaveWithoutKey())
 
-	_, _, apiErr := stale.GetNextEnabledKey()
+	_, _, apiErr := stale.GetNextEnabledKey("")
 	require.Nil(t, apiErr)
 
 	reloaded, err := GetChannelById(channel.Id, true)

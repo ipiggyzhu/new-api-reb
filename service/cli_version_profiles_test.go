@@ -75,29 +75,66 @@ func TestCLIVersionProfilesAreFamilyBoundAndOptIn(t *testing.T) {
 	counts := map[string]int{}
 	for _, option := range SupportedCLIVersionProfiles() {
 		counts[option.Family]++
-		p, err := ResolveCLIVersionProfile(option.ID, option.Family, "", false)
+		p, err := ResolveCLIVersionProfile(option.ID, option.Family, "", false, false)
 		require.NoError(t, err)
 		require.NotNil(t, p)
-		_, err = ResolveCLIVersionProfile(option.ID, "openai", "", false)
+		_, err = ResolveCLIVersionProfile(option.ID, "openai", "", false, false)
 		require.Error(t, err)
-		_, err = ResolveCLIVersionProfile(option.ID, option.Family, "chrome", false)
+		_, err = ResolveCLIVersionProfile(option.ID, option.Family, "chrome", false, false)
 		require.Error(t, err)
-		_, err = ResolveCLIVersionProfile(option.ID, option.Family, "", true)
+		_, err = ResolveCLIVersionProfile(option.ID, option.Family, "", true, false)
 		require.Error(t, err)
-		p, err = ResolveCLIVersionProfile(option.ID, "", "", false)
+		p, err = ResolveCLIVersionProfile(option.ID, option.Family, "chrome", true, true)
+		require.NoError(t, err, "independent mode keeps the channel override saved but uses the key profile for both transports")
+		assert.Equal(t, option.ID, p.ID)
+		p, err = ResolveCLIVersionProfile(option.ID, "", "", false, false)
 		require.NoError(t, err)
 		assert.Nil(t, p)
 	}
-	assert.Equal(t, map[string]int{"claude": 7, "codex": 6}, counts)
-	p, err := ResolveCLIVersionProfile("", "codex", "chrome", true)
+	assert.Equal(t, map[string]int{"claude": 11, "codex": 6}, counts)
+	p, err := ResolveCLIVersionProfile("", "codex", "chrome", true, false)
 	require.NoError(t, err)
 	assert.Nil(t, p, "legacy configuration remains unchanged")
-	_, err = ResolveCLIVersionProfile("codex-made-up", "codex", "", false)
+	_, err = ResolveCLIVersionProfile("codex-made-up", "codex", "", false, false)
 	require.Error(t, err)
 }
 
 // A profile is one client build in one cache mode: the breakpoint TTL and the
 // beta flag that enables it were captured together and must not drift apart.
+// The billing block's cc_version suffix is the client's own prompt hash. The
+// first three rows are real captures of the same prompt (/tmp/capture/002.json
+// under 2.1.306, /tmp/t20/cap/<version>-5m-net under Linux 2.1.288 and
+// 2.1.282); the rest are the client's algorithm run on the prompt, covering
+// UTF-16 indexing (a split surrogate pair, CJK text) and indexes past the end.
+// A header without the version marker is kept.
+func TestCLIVersionProfileBillingHeaderHashesFirstPrompt(t *testing.T) {
+	v2306 := LookupCLIVersionProfile("claude-2.1.306-linux-x64")
+	v2288 := LookupCLIVersionProfile("claude-2.1.288-linux-x64")
+	v2282 := LookupCLIVersionProfile("claude-2.1.282-linux-x64")
+	require.NotNil(t, v2306)
+	require.NotNil(t, v2288)
+	require.NotNil(t, v2282)
+	cases := []struct {
+		profile *CLIVersionProfile
+		prompt  string
+		header  string
+	}{
+		{v2306, "Say ok.", "x-anthropic-billing-header: cc_version=2.1.306.813; cc_entrypoint=sdk-cli;"},
+		{v2288, "Say ok.", "x-anthropic-billing-header: cc_version=2.1.288.3f2; cc_entrypoint=sdk-cli;"},
+		{v2282, "Say ok.", "x-anthropic-billing-header: cc_version=2.1.282.006; cc_entrypoint=sdk-cli;"},
+		{v2306, "Run the echo commands you need and then say done.", "x-anthropic-billing-header: cc_version=2.1.306.645; cc_entrypoint=sdk-cli;"},
+		{v2306, "hi", "x-anthropic-billing-header: cc_version=2.1.306.dcf; cc_entrypoint=sdk-cli;"},
+		{v2306, "", "x-anthropic-billing-header: cc_version=2.1.306.dcf; cc_entrypoint=sdk-cli;"},
+		{v2306, "😀😀😀ab😀cdefghijklmnopqrstu", "x-anthropic-billing-header: cc_version=2.1.306.21e; cc_entrypoint=sdk-cli;"},
+		{v2306, "修复登录页面的报错并补上单元测试，谢谢你们", "x-anthropic-billing-header: cc_version=2.1.306.7e6; cc_entrypoint=sdk-cli;"},
+		{&CLIVersionProfile{Version: "2.1.306", BillingHeader: "x-anthropic-billing-header: cc_version=2.1.305.813;"}, "hi",
+			"x-anthropic-billing-header: cc_version=2.1.305.813;"},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.header, tc.profile.BillingHeaderFor(tc.prompt), tc.prompt)
+	}
+}
+
 func TestCLIVersionProfileCacheTTLMatchesCapturedBetaSet(t *testing.T) {
 	const extendedTTLBeta = "extended-cache-ttl-2025-04-11"
 	for _, p := range cliVersionProfiles {
@@ -116,6 +153,27 @@ func TestCLIVersionProfileCacheTTLMatchesCapturedBetaSet(t *testing.T) {
 	}
 	var unversioned *CLIVersionProfile
 	assert.JSONEq(t, `{"type":"ephemeral"}`, string(unversioned.CacheControl()))
+}
+
+// The anthropic-beta sent upstream agrees with the body even when an admin's
+// override writes the list with spaces or repeats a flag: the 1h flag appears
+// once, last, exactly when the body has a 1h breakpoint.
+func TestCoherentAnthropicBetaNormalizesAdminLists(t *testing.T) {
+	const hour = "extended-cache-ttl-2025-04-11"
+	cases := []struct {
+		list    string
+		hourTTL bool
+		want    string
+	}{
+		{"a, " + hour + ", b", false, "a,b"},
+		{"a, " + hour + ", b", true, "a,b," + hour},
+		{" a , b ,a,, " + hour + "," + hour, true, "a,b," + hour},
+		{"", true, hour},
+		{" , ", false, ""},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, CoherentAnthropicBeta(tc.list, tc.hourTTL), "%q hourTTL=%v", tc.list, tc.hourTTL)
+	}
 }
 
 func TestCLIVersionProfilesActualTLSAndHTTPWire(t *testing.T) {

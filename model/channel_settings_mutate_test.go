@@ -204,6 +204,48 @@ func TestApplyChannelModelSweepToleratesKeepaliveStamp(t *testing.T) {
 	}
 }
 
+// The edit form saves back the keepalive send time it loaded. The keepalive
+// task's stamp written while the form was open is kept, so the next keepalive
+// is not sent ahead of its interval, while the admin's own edits still apply.
+func TestChannelUpdateKeepsKeepaliveStamp(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		stamped  int64
+		formTime int64
+		want     int64
+	}{
+		{name: "stamp after the form was loaded", stamped: 200, formTime: 100, want: 200},
+		{name: "form without a stamp", stamped: 200, formTime: 0, want: 200},
+		{name: "form stamp the task never wrote", stamped: 0, formTime: 300, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			channel := openChannelSettingsTestDB(t)
+			require.NoError(t, DB.AutoMigrate(&Ability{}))
+			channel.SetOtherSettings(dto.ChannelOtherSettings{UpstreamKeepaliveEnabled: true})
+			require.NoError(t, DB.Save(channel).Error)
+			if tc.stamped > 0 {
+				require.NoError(t, MutateChannelSettings(channel.Id, func(settings *dto.ChannelOtherSettings) bool {
+					settings.UpstreamKeepaliveLastTime = tc.stamped
+					return true
+				}))
+			}
+
+			form := &Channel{Id: channel.Id, Name: "edited", Key: channel.Key, Models: channel.Models, Group: channel.Group}
+			form.SetOtherSettings(dto.ChannelOtherSettings{
+				UpstreamKeepaliveEnabled: true, UpstreamKeepaliveIntervalMinutes: 60, UpstreamKeepaliveLastTime: tc.formTime,
+			})
+			require.NoError(t, form.Update())
+
+			stored, err := GetChannelById(channel.Id, true)
+			require.NoError(t, err)
+			settings := stored.GetOtherSettings()
+			assert.Equal(t, "edited", stored.Name)
+			assert.Equal(t, 60, settings.UpstreamKeepaliveIntervalMinutes, "the admin's settings edit applies")
+			assert.Equal(t, tc.want, settings.UpstreamKeepaliveLastTime)
+		})
+	}
+}
+
 func TestApplyChannelModelSweepClearsLegacyStateWithoutCatalogueChange(t *testing.T) {
 	channel := openChannelSettingsTestDB(t)
 	require.NoError(t, DB.AutoMigrate(&Ability{}))

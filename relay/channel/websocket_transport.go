@@ -18,6 +18,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -141,7 +142,7 @@ func stripHTTPOnlyHandshakeHeaders(header http.Header) {
 // behind a proxy behaves the same on either transport; an unusable proxy value
 // degrades to a direct dial rather than failing the request, since the HTTP path
 // would have surfaced that misconfiguration already.
-func newResponsesWebsocketDialer(info *common.RelayInfo) *websocket.Dialer {
+func newResponsesWebsocketDialer(info *common.RelayInfo) (*websocket.Dialer, error) {
 	dialer := &websocket.Dialer{
 		Proxy:            http.ProxyFromEnvironment,
 		HandshakeTimeout: websocketHandshakeTimeout,
@@ -158,14 +159,34 @@ func newResponsesWebsocketDialer(info *common.RelayInfo) *websocket.Dialer {
 	if info != nil {
 		proxyURL = strings.TrimSpace(info.ChannelSetting.Proxy)
 	}
+	if info != nil && info.ChannelSetting.KeyEnvironments {
+		settings := info.ChannelSetting
+		settings.Normalize(info.ApiType)
+		version, err := service.ResolveCLIVersionProfile(settings.CLIVersionProfile, settings.SyntheticClientHeadersProfile, settings.TLSFingerprint, settings.WebsocketTransport, true)
+		if err != nil {
+			return nil, err
+		}
+		if version == nil {
+			return nil, fmt.Errorf("independent WebSocket connection has no key CLI profile")
+		}
+		dialTLS, err := service.NewFingerprintTLSDialer(proxyURL, version.ID)
+		if err != nil {
+			return nil, err
+		}
+		// The TLS callback handles CONNECT/SOCKS and environment proxies itself.
+		// Gorilla must not wrap it in a second proxy dial.
+		dialer.Proxy = nil
+		dialer.NetDialTLSContext = dialTLS
+		return dialer, nil
+	}
 	if proxyURL == "" {
-		return dialer
+		return dialer, nil
 	}
 
 	parsed, err := url.Parse(proxyURL)
 	if err != nil {
 		logger.LogError(nil, "websocket transport: unusable channel proxy, dialing direct: "+err.Error())
-		return dialer
+		return dialer, nil
 	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "http", "https":
@@ -181,7 +202,7 @@ func newResponsesWebsocketDialer(info *common.RelayInfo) *websocket.Dialer {
 		socksDialer, errSocks := proxy.SOCKS5("tcp", parsed.Host, auth, proxy.Direct)
 		if errSocks != nil {
 			logger.LogError(nil, "websocket transport: socks5 dialer failed, dialing direct: "+errSocks.Error())
-			return dialer
+			return dialer, nil
 		}
 		dialer.Proxy = nil
 		dialer.NetDialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
@@ -190,7 +211,7 @@ func newResponsesWebsocketDialer(info *common.RelayInfo) *websocket.Dialer {
 	default:
 		logger.LogError(nil, fmt.Sprintf("websocket transport: unsupported proxy scheme %q, dialing direct", parsed.Scheme))
 	}
-	return dialer
+	return dialer, nil
 }
 
 // isDefinitiveUpgradeRefusal reports whether a handshake status proves the
@@ -548,6 +569,9 @@ func TryResponsesWebsocket(a Adaptor, c *gin.Context, info *common.RelayInfo, re
 		logger.LogError(c, "websocket transport: unusable url, falling back to HTTP: "+err.Error())
 		return fallback(), nil
 	}
+	if info.ChannelSetting.KeyEnvironments && !strings.HasPrefix(wsURL, "wss://") {
+		return nil, types.NewError(fmt.Errorf("key CLI profiles require WSS"), types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+	}
 
 	header := make(http.Header)
 	if err := a.SetupRequestHeader(c, &header, info); err != nil {
@@ -570,15 +594,25 @@ func TryResponsesWebsocket(a Adaptor, c *gin.Context, info *common.RelayInfo, re
 
 	// Bound to the caller's context so a client disconnect mid-handshake tears the
 	// dial down instead of holding it to the handshake timeout.
-	dialer := newResponsesWebsocketDialer(info)
+	dialer, err := newResponsesWebsocketDialer(info)
+	if err != nil {
+		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+	}
 	conn, handshakeResp, errDial := dialer.DialContext(c.Request.Context(), wsURL, header)
 	if errDial != nil {
 		status := 0
 		if handshakeResp != nil {
 			status = handshakeResp.StatusCode
 		}
+		// Bound refusals and timeouts retain their HTTP status and Retry-After.
+		// Only a definitive capability refusal can take the same-key HTTP path.
+		if info.ChannelSetting.KeyEnvironments && !isDefinitiveUpgradeRefusal(status) {
+			if handshakeResp != nil {
+				return nil, service.RelayErrorHandler(c, handshakeResp, false)
+			}
+			return nil, fmt.Errorf("websocket handshake failed: %w", errDial)
+		}
 		closeHandshakeBody(handshakeResp)
-
 		if isDefinitiveUpgradeRefusal(status) {
 			service.MarkChannelWebsocketUnsupported(
 				info.ChannelId,
@@ -592,6 +626,9 @@ func TryResponsesWebsocket(a Adaptor, c *gin.Context, info *common.RelayInfo, re
 		return fallback(), nil
 	}
 	closeHandshakeBody(handshakeResp)
+	if info.ChannelSetting.KeyEnvironments {
+		appcommon.SetContextKey(c, appconstant.ContextKeyUpstreamWebsocketEstablished, true)
+	}
 
 	// Past this point the upstream has proven it speaks WebSocket, so no later
 	// failure may set the unsupported flag or fall back: the request has been sent,

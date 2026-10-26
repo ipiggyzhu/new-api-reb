@@ -350,3 +350,30 @@ func TestSystemTaskUpdatesRequireUnexpiredLock(t *testing.T) {
 	assert.Equal(t, SystemTaskStatusRunning, reloaded.Status)
 	assert.Empty(t, reloaded.State)
 }
+
+// The cache share alert reads its cooldown from the run before it. The current
+// run is already a row when that lookup happens, and a failed run carries no
+// usable result, so neither may be returned in place of the last success.
+func TestGetPreviousSucceededSystemTaskSkipsTheCurrentAndFailedRuns(t *testing.T) {
+	truncateTables(t)
+
+	newTask := func(status SystemTaskStatus, result string) *SystemTask {
+		taskID, err := GenerateSystemTaskID()
+		require.NoError(t, err)
+		task := &SystemTask{TaskID: taskID, Type: SystemTaskTypeCacheShareAlert, Status: status, Result: result}
+		require.NoError(t, DB.Create(task).Error)
+		return task
+	}
+	none, err := GetPreviousSucceededSystemTask(SystemTaskTypeCacheShareAlert, 1<<40)
+	require.NoError(t, err)
+	assert.Nil(t, none)
+
+	succeeded := newTask(SystemTaskStatusSucceeded, `{"last_alerted":{"30":1}}`)
+	newTask(SystemTaskStatusFailed, "")
+	current := newTask(SystemTaskStatusSucceeded, `{"last_alerted":{}}`)
+
+	previous, err := GetPreviousSucceededSystemTask(SystemTaskTypeCacheShareAlert, current.ID)
+	require.NoError(t, err)
+	require.NotNil(t, previous)
+	assert.Equal(t, succeeded.ID, previous.ID)
+}

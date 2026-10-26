@@ -37,6 +37,16 @@ const (
 	ContextKeyChannelIsMultiKey        ContextKey = "channel_is_multi_key"
 	ContextKeyChannelMultiKeyIndex     ContextKey = "channel_multi_key_index"
 	ContextKeyChannelKey               ContextKey = "channel_key"
+	// ContextKeyChannelKeyTag is the selected key's tag on an independent key
+	// environment channel, "" otherwise. It scopes the key's client identity.
+	ContextKeyChannelKeyTag ContextKey = "channel_key_tag"
+	// ContextKeyChannelKeySeed, when set, picks a multi-key channel's key by
+	// rendezvous hash of the seed instead of the channel's random/polling mode.
+	ContextKeyChannelKeySeed ContextKey = "channel_key_seed"
+	// ContextKeyAffinityWaitPings counts the keepalive ping frames written while
+	// the request waited for a slot on its pinned channel, before the relay
+	// handler wrapped the response writer.
+	ContextKeyAffinityWaitPings ContextKey = "affinity_wait_pings"
 
 	// ContextKeyUpstreamRequestOrigin is the scheme and host of the last upstream
 	// request, which differs from the base URL for absolute Advanced Custom routes
@@ -60,6 +70,12 @@ const (
 	ContextKeyLocalCountTokens ContextKey = "local_count_tokens"
 
 	ContextKeySystemPromptOverride ContextKey = "system_prompt_override"
+
+	// ContextKeyCLIProfileAudit records the CLI version profile the last attempt
+	// shaped the request with, for the consume log's admin_info.
+	ContextKeyCLIProfileAudit ContextKey = "cli_profile_audit"
+	// A connected WebSocket must never be replayed, even before its first frame.
+	ContextKeyUpstreamWebsocketEstablished ContextKey = "upstream_websocket_established"
 
 	// ContextKeyFileSourcesToCleanup stores file sources that need cleanup when request ends
 	ContextKeyFileSourcesToCleanup ContextKey = "file_sources_to_cleanup"

@@ -1,6 +1,7 @@
 package operation_setting
 
 import (
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -66,6 +67,26 @@ type MonitorSetting struct {
 	// 内层键为请求头名，值为请求头值，空值表示删除该内置头。
 	// 优先级：渠道自身 header override > 本项族内配置 > 本项 "*" > 内置画像。
 	ChannelTestClientHeaders map[string]map[string]string `json:"channel_test_client_headers"`
+
+	// 缓存占比告警。默认关闭：开启后按 CacheShareAlertIntervalMinutes 周期聚合
+	// 最近 CacheShareAlertWindowMinutes 分钟内的 Claude 语义消费日志，按渠道算
+	// token 加权缓存占比 CR/(input+CR+CW)（不是请求命中率），低于阈值且样本足够
+	// 时通知超级管理员。依赖消费日志（LogConsumeEnabled）。
+	CacheShareAlertEnabled         bool `json:"cache_share_alert_enabled"`
+	CacheShareAlertIntervalMinutes int  `json:"cache_share_alert_interval_minutes"`
+	CacheShareAlertWindowMinutes   int  `json:"cache_share_alert_window_minutes"`
+	// 全局阈值（0~1）。
+	CacheShareAlertThreshold float64 `json:"cache_share_alert_threshold"`
+	// 按渠道覆盖阈值，键为渠道 ID 字符串。值 <= 0 表示该渠道不告警。
+	// 例如上游特性就只有约 61% 缓存占比的渠道，可以单独压低阈值而不是整个排除。
+	CacheShareAlertChannelThresholds map[string]float64 `json:"cache_share_alert_channel_thresholds"`
+	// 不参与告警的渠道 ID。
+	CacheShareAlertExcludedChannelIDs []int `json:"cache_share_alert_excluded_channel_ids"`
+	// 样本门槛：窗口内请求数与 prompt 侧 token 数（input+CR+CW）都达到才判定。
+	CacheShareAlertMinRequests     int `json:"cache_share_alert_min_requests"`
+	CacheShareAlertMinPromptTokens int `json:"cache_share_alert_min_prompt_tokens"`
+	// 同一渠道两次告警的最小间隔（分钟）。
+	CacheShareAlertCooldownMinutes int `json:"cache_share_alert_cooldown_minutes"`
 }
 
 const (
@@ -93,6 +114,16 @@ var monitorSetting = MonitorSetting{
 	UpstreamModelUpdateRotationSampleSize:      5,
 	UpstreamModelUpdateMaxValidationsPerRun:    200,
 	UpstreamModelUpdateStripVendorPrefix:       true,
+
+	CacheShareAlertEnabled:            false,
+	CacheShareAlertIntervalMinutes:    defaultCacheShareAlertIntervalMinutes,
+	CacheShareAlertWindowMinutes:      defaultCacheShareAlertWindowMinutes,
+	CacheShareAlertThreshold:          defaultCacheShareAlertThreshold,
+	CacheShareAlertChannelThresholds:  map[string]float64{},
+	CacheShareAlertExcludedChannelIDs: []int{},
+	CacheShareAlertMinRequests:        defaultCacheShareAlertMinRequests,
+	CacheShareAlertMinPromptTokens:    defaultCacheShareAlertMinPromptTokens,
+	CacheShareAlertCooldownMinutes:    defaultCacheShareAlertCooldownMinutes,
 }
 
 // builtinChannelTestPrompts 是渠道测试与模型验证的默认提示词池：100 道 Java
@@ -355,4 +386,76 @@ func (s *MonitorSetting) GetUpstreamModelUpdateMaxValidationsPerRun() int {
 		return defaultUpstreamModelUpdateMaxValidationsPerRun
 	}
 	return s.UpstreamModelUpdateMaxValidationsPerRun
+}
+
+// 缓存占比告警各数值项的兜底值，读取处统一兜底，理由同上游模型巡检。
+const (
+	defaultCacheShareAlertIntervalMinutes = 10
+	defaultCacheShareAlertWindowMinutes   = 60
+	defaultCacheShareAlertThreshold       = 0.5
+	defaultCacheShareAlertMinRequests     = 20
+	defaultCacheShareAlertMinPromptTokens = 200000
+	defaultCacheShareAlertCooldownMinutes = 360
+)
+
+// GetCacheShareAlertIntervalMinutes 返回告警巡检周期，非正值回落 10 分钟。
+func (s *MonitorSetting) GetCacheShareAlertIntervalMinutes() int {
+	if s.CacheShareAlertIntervalMinutes <= 0 {
+		return defaultCacheShareAlertIntervalMinutes
+	}
+	return s.CacheShareAlertIntervalMinutes
+}
+
+// GetCacheShareAlertWindowMinutes 返回统计窗口，非正值回落 60 分钟。
+func (s *MonitorSetting) GetCacheShareAlertWindowMinutes() int {
+	if s.CacheShareAlertWindowMinutes <= 0 {
+		return defaultCacheShareAlertWindowMinutes
+	}
+	return s.CacheShareAlertWindowMinutes
+}
+
+// GetCacheShareAlertMinRequests 返回请求数门槛，非正值回落 20：样本门槛是
+// 防刷屏的前提，不允许被清空成"一条请求就判定"。
+func (s *MonitorSetting) GetCacheShareAlertMinRequests() int {
+	if s.CacheShareAlertMinRequests <= 0 {
+		return defaultCacheShareAlertMinRequests
+	}
+	return s.CacheShareAlertMinRequests
+}
+
+// GetCacheShareAlertMinPromptTokens 返回 prompt 侧 token 门槛，非正值回落 200000。
+func (s *MonitorSetting) GetCacheShareAlertMinPromptTokens() int {
+	if s.CacheShareAlertMinPromptTokens <= 0 {
+		return defaultCacheShareAlertMinPromptTokens
+	}
+	return s.CacheShareAlertMinPromptTokens
+}
+
+// GetCacheShareAlertCooldownMinutes 返回同渠道告警间隔，非正值回落 360 分钟。
+func (s *MonitorSetting) GetCacheShareAlertCooldownMinutes() int {
+	if s.CacheShareAlertCooldownMinutes <= 0 {
+		return defaultCacheShareAlertCooldownMinutes
+	}
+	return s.CacheShareAlertCooldownMinutes
+}
+
+// CacheShareAlertThresholdFor 返回渠道生效的缓存占比阈值，0 表示该渠道不告警：
+// 在排除列表里，或按渠道阈值配置为 <= 0。全局阈值不在 (0,1] 内时回落 0.5，
+// 按渠道阈值大于 1 时按 1 处理。
+func (s *MonitorSetting) CacheShareAlertThresholdFor(channelId int) float64 {
+	for _, excluded := range s.CacheShareAlertExcludedChannelIDs {
+		if excluded == channelId {
+			return 0
+		}
+	}
+	if threshold, ok := s.CacheShareAlertChannelThresholds[strconv.Itoa(channelId)]; ok {
+		if threshold <= 0 {
+			return 0
+		}
+		return math.Min(threshold, 1)
+	}
+	if s.CacheShareAlertThreshold <= 0 || s.CacheShareAlertThreshold > 1 {
+		return defaultCacheShareAlertThreshold
+	}
+	return s.CacheShareAlertThreshold
 }

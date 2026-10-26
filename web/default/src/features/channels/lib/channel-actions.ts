@@ -372,6 +372,13 @@ export async function handleCopyChannel(
     const response = await copyChannel(id, params)
     if (response.success) {
       toast.success(i18next.t(SUCCESS_MESSAGES.COPIED))
+      if (response.data?.key_environments) {
+        toast.warning(
+          i18next.t(
+            "The copy was created disabled. Independent environments require each key to belong to one channel; replace the copy's keys before enabling it."
+          )
+        )
+      }
       queryClient?.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
       onSuccess?.(response.data?.id ?? 0)
     } else {

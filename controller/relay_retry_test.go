@@ -92,6 +92,29 @@ func TestShouldRetrySurvivesKeepalivePingFrames(t *testing.T) {
 		"keepalive frames alone must not consume the request's retries")
 }
 
+// The distributor pings a streaming request that waits for its saturated
+// pinned channel before the relay handler wraps the writer, so those frames
+// must be counted in; otherwise every such request loses its retries.
+func TestShouldRetrySurvivesPingsWrittenWhileWaitingForThePinnedChannel(t *testing.T) {
+	upstreamErr := types.WithClaudeError(
+		types.ClaudeError{Type: "overloaded_error", Message: "Overloaded"},
+		http.StatusInternalServerError,
+	)
+
+	waited := newRetryTestContext(t)
+	require.NoError(t, helper.PingData(waited))
+	common.SetContextKey(waited, constant.ContextKeyAffinityWaitPings, 1)
+	waited.Writer = newPingAwareWriter(waited)
+	require.NoError(t, helper.PingData(waited))
+	assert.True(t, shouldRetry(waited, upstreamErr, 3),
+		"pings from the affinity wait must not consume the request's retries")
+
+	_, err := waited.Writer.Write([]byte("data: {\"choices\":[]}\n\n"))
+	require.NoError(t, err)
+	assert.False(t, shouldRetry(waited, upstreamErr, 3),
+		"payload after the wait pings still means a partial response")
+}
+
 func TestShouldRetryStopsOncePayloadFollowsPings(t *testing.T) {
 	upstreamErr := types.WithClaudeError(
 		types.ClaudeError{Type: "overloaded_error", Message: "Overloaded"},

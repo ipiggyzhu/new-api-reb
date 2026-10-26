@@ -106,6 +106,13 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	}
 
 	AppendChannelAffinityAdminInfo(ctx, adminInfo)
+	if audit, ok := ctx.Get(string(constant.ContextKeyCLIProfileAudit)); ok {
+		if fields, ok := audit.(map[string]any); ok {
+			for name, value := range fields {
+				adminInfo[name] = value
+			}
+		}
+	}
 
 	other["admin_info"] = adminInfo
 	appendRequestPath(ctx, relayInfo, other)

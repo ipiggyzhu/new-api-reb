@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/gin-gonic/gin"
 	"github.com/samber/hot"
 	"github.com/tidwall/gjson"
@@ -86,7 +87,7 @@ func doResponsesReasoningFallback(c *gin.Context, info *relaycommon.RelayInfo, a
 	}
 	info.UpstreamRequestBodySize = int64(len(requestBytes))
 	resp, err := adaptor.DoRequest(c, info, bytes.NewReader(requestBytes))
-	if err != nil || len(pending) == 0 || c.Writer.Written() || c.Request.Context().Err() != nil {
+	if err != nil || len(pending) == 0 || helper.ClientResponseStarted(c) || c.Request.Context().Err() != nil {
 		return resp, nil, err
 	}
 	httpResp, ok := resp.(*http.Response)

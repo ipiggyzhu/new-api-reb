@@ -58,3 +58,23 @@ func TestClaudeThinkingForwardsUnmodeledFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, `{"future_field":1}`, string(encoded))
 }
+
+// Claude Code auto mode sends a top-level safeguards object. A native request
+// that is decoded and re-encoded (every non-passthrough /v1/messages request)
+// must still carry it, and a request without it must not grow the key.
+func TestClaudeRequestForwardsSafeguards(t *testing.T) {
+	const withSafeguards = `{"model":"claude-opus-5-5","messages":[],"tools":[],"safeguards":{"mode":"auto","rules":[{"id":"r1"}]}}`
+	var request ClaudeRequest
+	require.NoError(t, common.Unmarshal([]byte(withSafeguards), &request))
+	copied, err := common.DeepCopy(&request)
+	require.NoError(t, err)
+	encoded, err := common.Marshal(copied)
+	require.NoError(t, err)
+	assert.Equal(t, `{"mode":"auto","rules":[{"id":"r1"}]}`, gjson.GetBytes(encoded, "safeguards").Raw)
+
+	var plain ClaudeRequest
+	require.NoError(t, common.Unmarshal([]byte(`{"model":"claude-opus-5-5","messages":[]}`), &plain))
+	encoded, err = common.Marshal(&plain)
+	require.NoError(t, err)
+	assert.False(t, gjson.GetBytes(encoded, "safeguards").Exists())
+}

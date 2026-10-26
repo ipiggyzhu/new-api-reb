@@ -358,6 +358,136 @@ func (c *HybridCache[V]) DeleteIfEquals(key string, expected V) (bool, error) {
 	return mem.DeleteMany([]string{full})[full], nil
 }
 
+// compareAndSwapScript replaces a key's value, with a new TTL, only while it
+// still holds the expected encoded value.
+var compareAndSwapScript = redis.NewScript(`
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+return 1
+`)
+
+// expireIfEqualsScript renews a key's TTL only while it still holds the
+// expected encoded value.
+var expireIfEqualsScript = redis.NewScript(`
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+  return 0
+end
+return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+`)
+
+// SetIfAbsent stores v under key only if the key holds no value, and reports
+// whether it did. Concurrent first writers race on one atomic step, so exactly
+// one of them wins and the others can read the winner.
+func (c *HybridCache[V]) SetIfAbsent(key string, v V, ttl time.Duration) (bool, error) {
+	full := c.ns.FullKey(key)
+	if full == "" {
+		return false, nil
+	}
+
+	if c.redisOn() {
+		raw, err := c.redisCodec.Encode(v)
+		if err != nil {
+			return false, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), defaultRedisOpTimeout)
+		defer cancel()
+		return c.redis.SetNX(ctx, full, raw, ttl).Result()
+	}
+
+	mem := c.memCache()
+	c.memMu.Lock()
+	defer c.memMu.Unlock()
+	if _, found, err := mem.Get(full); err != nil || found {
+		return false, err
+	}
+	mem.SetWithTTL(full, v, ttl)
+	return true, nil
+}
+
+// CompareAndSwap replaces key's value with next, under a new TTL, only if it
+// currently equals expected, and reports whether it did. An absent key or a
+// different value is left alone.
+func (c *HybridCache[V]) CompareAndSwap(key string, expected V, next V, ttl time.Duration) (bool, error) {
+	full := c.ns.FullKey(key)
+	if full == "" {
+		return false, nil
+	}
+
+	if c.redisOn() {
+		expectedRaw, err := c.redisCodec.Encode(expected)
+		if err != nil {
+			return false, err
+		}
+		nextRaw, err := c.redisCodec.Encode(next)
+		if err != nil {
+			return false, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), defaultRedisOpTimeout)
+		defer cancel()
+		swapped, err := compareAndSwapScript.Run(ctx, c.redis, []string{full}, expectedRaw, nextRaw, ttl.Milliseconds()).Int()
+		return swapped > 0, err
+	}
+
+	mem := c.memCache()
+	c.memMu.Lock()
+	defer c.memMu.Unlock()
+	if equal, err := c.memHolds(mem, full, expected); err != nil || !equal {
+		return false, err
+	}
+	mem.SetWithTTL(full, next, ttl)
+	return true, nil
+}
+
+// ExpireIfEquals renews key's TTL only if it currently equals expected, and
+// reports whether it did, so a request cannot extend a value another request
+// has since replaced.
+func (c *HybridCache[V]) ExpireIfEquals(key string, expected V, ttl time.Duration) (bool, error) {
+	full := c.ns.FullKey(key)
+	if full == "" {
+		return false, nil
+	}
+
+	if c.redisOn() {
+		raw, err := c.redisCodec.Encode(expected)
+		if err != nil {
+			return false, err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), defaultRedisOpTimeout)
+		defer cancel()
+		renewed, err := expireIfEqualsScript.Run(ctx, c.redis, []string{full}, raw, ttl.Milliseconds()).Int()
+		return renewed > 0, err
+	}
+
+	mem := c.memCache()
+	c.memMu.Lock()
+	defer c.memMu.Unlock()
+	if equal, err := c.memHolds(mem, full, expected); err != nil || !equal {
+		return false, err
+	}
+	mem.SetWithTTL(full, expected, ttl)
+	return true, nil
+}
+
+// memHolds reports whether the in-memory key currently holds expected. The
+// caller holds memMu.
+func (c *HybridCache[V]) memHolds(mem *hot.HotCache[string, V], full string, expected V) (bool, error) {
+	current, found, err := mem.Get(full)
+	if err != nil || !found {
+		return false, err
+	}
+	currentRaw, err := c.encodeForCompare(current)
+	if err != nil {
+		return false, err
+	}
+	expectedRaw, err := c.encodeForCompare(expected)
+	if err != nil {
+		return false, err
+	}
+	return currentRaw == expectedRaw, nil
+}
+
 // encodeForCompare renders a value as a comparable string. The codec is the
 // authority when one is configured; without it (memory-only caches may leave it
 // nil) fmt is enough for the scalar value types these caches hold.

@@ -2,8 +2,11 @@ package middleware
 
 import (
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/gin-gonic/gin"
 )
 
@@ -43,6 +46,17 @@ func SetUpLogger(server *gin.Engine) {
 			if tag == "" {
 				tag = "web"
 			}
+			// gin's Path carries the raw query, and callers put credentials there:
+			// Gemini clients send ?key=sk-..., OAuth callbacks send one-time code and
+			// state. Only the logged copy is redacted; handlers read the original.
+			path, rawQuery, hasQuery := strings.Cut(param.Path, "?")
+			if hasQuery && !strings.HasPrefix(path, "/api/oauth/") && !strings.HasPrefix(path, "/oauth/") {
+				// A query that does not parse cleanly is dropped rather than logged
+				// half-masked: a malformed pair could still hide a credential.
+				if query, err := url.ParseQuery(rawQuery); err == nil {
+					path += relaycommon.SanitizeURLForLog("?" + query.Encode())
+				}
+			}
 			return fmt.Sprintf("[GIN] %s | %s | %s | %3d | %13v | %15s | %7s %s\n",
 				param.TimeStamp.Format("2006/01/02 - 15:04:05"),
 				tag,
@@ -51,7 +65,7 @@ func SetUpLogger(server *gin.Engine) {
 				param.Latency,
 				param.ClientIP,
 				param.Method,
-				param.Path,
+				path,
 			)
 		},
 	}))

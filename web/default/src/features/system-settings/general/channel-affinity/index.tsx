@@ -135,6 +135,9 @@ export function ChannelAffinitySection(props: Props) {
   const [keepOnChannelDisabled, setKeepOnChannelDisabled] = useState(
     props.defaultValues['channel_affinity_setting.keep_on_channel_disabled']
   )
+  const [stickyMultiKey, setStickyMultiKey] = useState(
+    props.defaultValues['channel_affinity_setting.sticky_multi_key']
+  )
   const [maxEntries, setMaxEntries] = useState(
     props.defaultValues['channel_affinity_setting.max_entries']
   )
@@ -173,6 +176,9 @@ export function ChannelAffinitySection(props: Props) {
     )
     setKeepOnChannelDisabled(
       props.defaultValues['channel_affinity_setting.keep_on_channel_disabled']
+    )
+    setStickyMultiKey(
+      props.defaultValues['channel_affinity_setting.sticky_multi_key']
     )
     setMaxEntries(props.defaultValues['channel_affinity_setting.max_entries'])
     setDefaultTtl(
@@ -278,6 +284,15 @@ export function ChannelAffinitySection(props: Props) {
         updates.push({
           key: 'channel_affinity_setting.keep_on_channel_disabled',
           value: String(keepOnChannelDisabled),
+        })
+      }
+      if (
+        stickyMultiKey !==
+        props.defaultValues['channel_affinity_setting.sticky_multi_key']
+      ) {
+        updates.push({
+          key: 'channel_affinity_setting.sticky_multi_key',
+          value: String(stickyMultiKey),
         })
       }
       if (
@@ -454,6 +469,14 @@ export function ChannelAffinitySection(props: Props) {
           label={t('Keep affinity when channel is disabled')}
           description={t(
             'When enabled, keep the affinity entry even if the affinity channel is disabled or no longer usable for the current group/model. Leave it off to delete the entry and select another channel.'
+          )}
+        />
+        <SettingsSwitchField
+          checked={stickyMultiKey}
+          onCheckedChange={setStickyMultiKey}
+          label={t('Keep affinity on the same key')}
+          description={t(
+            'On a multi-key channel, keep each affinity-matched conversation on one key, so it keeps reading the prompt cache of that upstream account. Turn it off to let the channel key mode (random/polling) pick a key for every request.'
           )}
         />
 

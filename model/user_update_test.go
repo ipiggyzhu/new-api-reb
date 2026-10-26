@@ -218,3 +218,76 @@ func TestResetUserPasswordByEmailRequiresSingleActiveMatch(t *testing.T) {
 	err = ResetUserPasswordByEmail("missing@example.com", "NewPassword123")
 	require.True(t, errors.Is(err, ErrEmailNotFound))
 }
+
+func TestStaleUserUpdateDoesNotOverwriteAffAndAccessTokenFields(t *testing.T) {
+	setupUserUpdateTestState(t)
+	oldQuotaForInviter := common.QuotaForInviter
+	common.QuotaForInviter = 100
+	t.Cleanup(func() { common.QuotaForInviter = oldQuotaForInviter })
+
+	transferQuota := int(common.QuotaPerUnit)
+	user := User{
+		Id:              3,
+		Username:        "aff-race-user",
+		Password:        "password",
+		DisplayName:     "before",
+		Status:          common.UserStatusEnabled,
+		AffCode:         "affr",
+		Quota:           1000,
+		AffCount:        1,
+		AffQuota:        transferQuota + 50,
+		AffHistoryQuota: transferQuota + 50,
+	}
+	require.NoError(t, DB.Create(&user).Error)
+
+	// Snapshot taken before the concurrent writers commit, as GenerateAccessToken
+	// and GetAffCode used to do.
+	staleUser, err := GetUserById(user.Id, true)
+	require.NoError(t, err)
+
+	transferUser := &User{Id: user.Id}
+	require.NoError(t, transferUser.TransferAffQuotaToQuota(transferQuota))
+	require.NoError(t, inviteUser(user.Id))
+	require.NoError(t, UpdateUserAccessToken(user.Id, "fresh-access-token"))
+
+	staleUser.DisplayName = "after"
+	staleUser.SetAccessToken("stale-access-token")
+	require.NoError(t, staleUser.Update(false))
+
+	var got User
+	require.NoError(t, DB.First(&got, user.Id).Error)
+	assert.Equal(t, "after", got.DisplayName)
+	assert.Equal(t, 1000+transferQuota, got.Quota)
+	assert.Equal(t, 2, got.AffCount)
+	assert.Equal(t, 50+100, got.AffQuota)
+	assert.Equal(t, transferQuota+50+100, got.AffHistoryQuota)
+	assert.Equal(t, "fresh-access-token", got.GetAccessToken())
+}
+
+func TestUpdateUserAccessTokenOnlyWritesAccessToken(t *testing.T) {
+	setupUserUpdateTestState(t)
+
+	user := User{
+		Id:          4,
+		Username:    "token-user",
+		Password:    "password",
+		DisplayName: "keep",
+		Status:      common.UserStatusEnabled,
+		AffCode:     "tokn",
+		Quota:       700,
+		AffQuota:    30,
+	}
+	require.NoError(t, DB.Create(&user).Error)
+
+	require.NoError(t, UpdateUserAccessToken(user.Id, "rotated-token"))
+
+	validated, err := ValidateAccessToken("rotated-token")
+	require.NoError(t, err)
+	require.NotNil(t, validated)
+	assert.Equal(t, user.Id, validated.Id)
+	assert.Equal(t, "keep", validated.DisplayName)
+	assert.Equal(t, 700, validated.Quota)
+	assert.Equal(t, 30, validated.AffQuota)
+
+	require.ErrorIs(t, UpdateUserAccessToken(9999, "missing-user-token"), gorm.ErrRecordNotFound)
+}

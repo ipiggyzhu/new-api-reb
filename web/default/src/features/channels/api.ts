@@ -30,6 +30,7 @@ import type {
   ChannelOpsResponse,
   ChannelTestResponse,
   ChannelTLSFingerprintsResponse,
+  KeyEnvironmentAssignment,
   CopyChannelParams,
   CopyChannelResponse,
   FetchModelsResponse,
@@ -176,7 +177,7 @@ export async function createChannel(
  */
 export async function updateChannel(
   id: number,
-  data: Partial<Channel>
+  data: Partial<Channel> & { allow_unassigned?: boolean }
 ): Promise<{ success: boolean; message?: string; data?: Channel }> {
   const res = await api.put(
     '/api/channel/',
@@ -424,7 +425,8 @@ export async function getMultiKeyStatus(
   channelId: number,
   page = 1,
   pageSize = 50,
-  status?: number
+  status?: number,
+  unassigned?: boolean
 ): Promise<MultiKeyStatusResponse> {
   return manageMultiKeys({
     channel_id: channelId,
@@ -432,7 +434,34 @@ export async function getMultiKeyStatus(
     page,
     page_size: pageSize,
     status,
+    unassigned: unassigned || undefined,
   }) as Promise<MultiKeyStatusResponse>
+}
+
+/**
+ * Preview or apply a reassignment of independent key environment versions.
+ * Rejections (shortage) come back as a non-2xx body, not a thrown toast.
+ */
+export async function reassignKeyEnvironments(
+  channelId: number,
+  apply: boolean,
+  allowUnassigned = false
+): Promise<{
+  success: boolean
+  message?: string
+  code?: string
+  data?: KeyEnvironmentAssignment[]
+}> {
+  const res = await api.post(
+    '/api/channel/multi_key/manage',
+    {
+      channel_id: channelId,
+      action: apply ? 'reassign_key_environments' : 'preview_key_environments',
+      allow_unassigned: allowUnassigned || undefined,
+    },
+    channelActionConfig({ validateStatus: () => true })
+  )
+  return res.data
 }
 
 /**

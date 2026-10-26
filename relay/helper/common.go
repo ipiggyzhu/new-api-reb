@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/types"
@@ -129,6 +130,23 @@ func StringData(c *gin.Context, str string) error {
 	return FlushWriter(c)
 }
 
+// PingFrame is the SSE comment PingData writes, in a single Write call.
+const PingFrame = ": PING\n\n"
+
+// ClientResponseStarted reports whether anything other than the keepalive pings
+// the distributor wrote while the request waited for its pinned channel
+// (constant.ContextKeyAffinityWaitPings) has reached the client. Without such
+// pings it is exactly c.Writer.Written(). Those pings are SSE comments every
+// client discards, so a same-channel re-attempt after them still delivers a
+// well-formed response.
+func ClientResponseStarted(c *gin.Context) bool {
+	waitPings := common.GetContextKeyInt(c, constant.ContextKeyAffinityWaitPings)
+	if waitPings <= 0 {
+		return c.Writer.Written()
+	}
+	return c.Writer.Size() != waitPings*len(PingFrame)
+}
+
 func PingData(c *gin.Context) error {
 	if c == nil || c.Writer == nil {
 		return errors.New("context or writer is nil")
@@ -138,7 +156,7 @@ func PingData(c *gin.Context) error {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
 
-	if _, err := c.Writer.Write([]byte(": PING\n\n")); err != nil {
+	if _, err := c.Writer.Write([]byte(PingFrame)); err != nil {
 		return fmt.Errorf("write ping data failed: %w", err)
 	}
 	return FlushWriter(c)

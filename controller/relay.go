@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,15 +88,21 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	// behind, and flip it only where the relay actually succeeded.
 	service.SetChannelAffinityRelayOutcome(c, false)
 
-	if relayFormat == types.RelayFormatOpenAIRealtime {
+	channelSetting, _ := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
+	delayedRealtime := relayFormat == types.RelayFormatOpenAIRealtime && channelSetting.KeyEnvironments
+	if relayFormat == types.RelayFormatOpenAIRealtime && !delayedRealtime {
 		var err error
 		ws, err = upgrader.Upgrade(c.Writer, c.Request, nil)
 		if err != nil {
 			helper.WssError(c, ws, types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry()).ToOpenAIError())
 			return
 		}
-		defer ws.Close()
 	}
+	defer func() {
+		if ws != nil {
+			_ = ws.Close()
+		}
+	}()
 
 	defer func() {
 		if newAPIError != nil {
@@ -138,7 +145,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			isEventStream := c.Writer.Header().Get("Content-Type") == "text/event-stream"
 
 			switch {
-			case relayFormat == types.RelayFormatOpenAIRealtime:
+			case relayFormat == types.RelayFormatOpenAIRealtime && ws != nil:
 				helper.WssError(c, ws, newAPIError.ToOpenAIError(upstreamURLs...))
 			case isEventStream && c.Writer.Written() && relayFormat == types.RelayFormatClaude:
 				// Anthropic SDKs dispatch on the SSE event name and drop frames without
@@ -214,6 +221,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = types.NewError(err, types.ErrorCodeGenRelayInfoFailed)
 		return
 	}
+	if delayedRealtime {
+		relayInfo.UpgradeClientWs = func() (*websocket.Conn, error) {
+			var upgradeErr error
+			ws, upgradeErr = upgrader.Upgrade(c.Writer, c.Request, nil)
+			return ws, upgradeErr
+		}
+	}
 
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
 	needCountToken := constant.CountToken
@@ -287,7 +301,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	// With PingIntervalEnabled the keepalive pinger usually writes before a
 	// slow upstream fails; shouldRetry needs to tell those frames apart from
 	// relayed payload.
-	c.Writer = &pingAwareWriter{ResponseWriter: c.Writer}
+	c.Writer = newPingAwareWriter(c)
 
 	retryParam := &service.RetryParam{
 		Ctx:         c,
@@ -298,8 +312,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
+	// A bound conversation gets one retry on its own key, whatever the budget.
+	boundRetried := false
 
-	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
+	// A negative retry configuration still permits the initial relay attempt.
+	retryBudget := max(0, common.RetryTimes)
+	for ; retryParam.GetRetry() <= retryBudget; retryParam.IncreaseRetry() {
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		// Clear the previous attempt's timing, received count and stream verdict. StreamScannerHandler
 		// installs a fresh StreamStatus, but a retry can succeed through a path
@@ -409,14 +427,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		if c.Request.Context().Err() != nil {
 			break
 		}
-		// A 429/529 says how the channel will answer the next requests for this
-		// model too, so selection passes it over until the window ends. Not for a
-		// multi-key channel: the refusal came from one key, and cooling the
-		// channel would also hide the keys that still have quota.
-		if cooldown := service.ChannelCooldownFor(newAPIError); cooldown > 0 && !relayInfo.IsChannelTest && !channel.ChannelInfo.IsMultiKey {
-			model.MarkChannelCooldown(channel.Id, relayInfo.OriginModelName, time.Now().Add(cooldown))
-			logger.LogWarn(c, fmt.Sprintf("channel #%d cooling down for model %s for %s after status %d",
-				channel.Id, relayInfo.OriginModelName, cooldown, newAPIError.StatusCode))
+		if !relayInfo.IsChannelTest {
+			applyRefusalCooldown(c, channel, relayInfo.OriginModelName, newAPIError)
 		}
 		// Report this attempt, not just the request's final outcome. The
 		// distributor's post-c.Next() hook only ever sees the last channel, so
@@ -444,7 +456,23 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			}
 		}
 
-		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
+		if _, bound := service.KeyEnvironmentBoundTo(c, channel.Id); bound {
+			if !boundRetried && shouldRetryBoundKeyEnvironment(c, newAPIError, retryBudget-retryParam.GetRetry()) {
+				boundRetried = true
+				continue
+			}
+			// The account asked to be left alone; say for how long, as the
+			// upstream would, so the real CLI backs off instead of hopping keys.
+			if (newAPIError.StatusCode == http.StatusTooManyRequests || newAPIError.StatusCode == 529) && !c.Writer.Written() {
+				retryAfter := newAPIError.RetryAfter
+				if retryAfter <= 0 {
+					retryAfter = keyEnvironmentCoolingFor(c, channel.Id, relayInfo.OriginModelName, newAPIError)
+				}
+				c.Header("Retry-After", strconv.Itoa(service.KeyEnvironmentRetryAfter(time.Now().Add(retryAfter))))
+			}
+			break
+		}
+		if !shouldRetry(c, newAPIError, retryBudget-retryParam.GetRetry()) {
 			break
 		}
 	}
@@ -528,6 +556,20 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 			},
 		}, nil
 	}
+	// A bound conversation is retried on its own channel and key only: the
+	// distributor's slot is still held, and moving would show the account a
+	// second device.
+	if state := service.GetKeyEnvironmentBindingState(c); state != nil && state.Bound != nil {
+		channel, err := model.CacheGetChannel(state.Bound.ChannelId)
+		if err != nil || channel == nil || channel.Status != common.ChannelStatusEnabled {
+			return nil, types.NewError(fmt.Errorf("the conversation's channel #%d is no longer available (retry)", state.Bound.ChannelId), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		}
+		if setupErr := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName); setupErr != nil {
+			// Re-coded so the retry loop keeps the upstream's error as the answer.
+			return nil, types.NewError(errors.New(setupErr.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		}
+		return channel, nil
+	}
 	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
 
 	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
@@ -552,16 +594,58 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 	if newAPIError != nil {
 		return nil, newAPIError
 	}
+	served, bindErr := middleware.BindKeyEnvironment(c, channel, info.OriginModelName)
+	if bindErr != nil {
+		return nil, bindErr
+	}
+	if served.Id != channel.Id {
+		// The conversation was bound to another channel meanwhile and this
+		// attempt follows it, possibly into another auto group.
+		info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
+	}
 	// use_channel is log-only, so the selector never learned which channels this
 	// request already burned; feed the attempt back so a retry skips it.
-	retryParam.ExcludeChannel(channel.Id)
-	return channel, nil
+	retryParam.ExcludeChannel(served.Id)
+	return served, nil
 }
 
-// pingFrame must stay byte-identical to what helper.PingData writes in a
-// single Write call; a mismatch degrades safely (pings count as payload and
-// block the retry).
-var pingFrame = []byte(": PING\n\n")
+// applyRefusalCooldown records what a 429/529 says about the next requests for
+// modelName. On a single-key channel the whole channel sits out of selection
+// until the window ends. Not on a multi-key channel: there the refusal came
+// from one key, and cooling the channel would also hide the keys that still
+// have quota, so a rate limit cools only the key that was refused, and the
+// channel cools only once every enabled key is cooling. An overload (529) is
+// not key-scoped and leaves a multi-key channel alone, as before.
+func applyRefusalCooldown(c *gin.Context, channel *model.Channel, modelName string, apiErr *types.NewAPIError) {
+	if !channel.ChannelInfo.IsMultiKey {
+		cooldown := service.ChannelCooldownFor(apiErr)
+		if cooldown <= 0 {
+			return
+		}
+		model.MarkChannelCooldown(channel.Id, modelName, time.Now().Add(cooldown))
+		logger.LogWarn(c, fmt.Sprintf("channel #%d cooling down for model %s for %s after status %d",
+			channel.Id, modelName, cooldown, apiErr.StatusCode))
+		return
+	}
+	hint, keyScoped := service.KeyRateLimitCooldownHint(apiErr)
+	if !keyScoped {
+		return
+	}
+	// The first attempt's channel is a stub rebuilt from the context, so the key
+	// list and statuses come from the cache.
+	fullChannel, err := model.CacheGetChannel(channel.Id)
+	if err != nil {
+		return
+	}
+	keyIndex := common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+	until, channelCooled := model.MarkChannelKeyCooldownAndChannel(fullChannel, modelName, keyIndex,
+		common.GetContextKeyString(c, constant.ContextKeyChannelKey), hint)
+	logger.LogWarn(c, fmt.Sprintf("channel #%d key #%d cooling down for model %s for %s after status %d (all keys cooling: %t)",
+		channel.Id, keyIndex, modelName, time.Until(until).Round(time.Second), apiErr.StatusCode, channelCooled))
+}
+
+// pingFrame is what helper.PingData writes in a single Write call.
+var pingFrame = []byte(helper.PingFrame)
 
 // pingAwareWriter tells keepalive ping frames apart from real response data.
 // With PingIntervalEnabled the ping goroutines (relay/channel/api_request.go,
@@ -572,6 +656,16 @@ type pingAwareWriter struct {
 	gin.ResponseWriter
 	pingFrames  int
 	dataWritten bool
+}
+
+// newPingAwareWriter wraps the request's writer. Pings the distributor wrote
+// while the request waited for its pinned channel went out before the wrapper
+// existed, so they are counted in from the start.
+func newPingAwareWriter(c *gin.Context) *pingAwareWriter {
+	return &pingAwareWriter{
+		ResponseWriter: c.Writer,
+		pingFrames:     common.GetContextKeyInt(c, constant.ContextKeyAffinityWaitPings),
+	}
 }
 
 func (w *pingAwareWriter) Write(data []byte) (int, error) {
@@ -672,6 +766,55 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 		return true
 	}
 	return operation_setting.ShouldRetryByStatusCode(code)
+}
+
+// shouldRetryBoundKeyEnvironment is the retry rule of a conversation bound to
+// one key of an independent key environment channel (task19 §5.6). It retries
+// on the same key only what a real CLI would retry on its own account: the
+// request never reached the upstream, or the upstream answered 500/502/503
+// before the caller received anything. A refusal (429/529), a key the channel
+// rejected, a gateway timeout (504/524) or a response already on the wire is
+// returned as it stands; a disabled key moves the next request, not this one.
+func shouldRetryBoundKeyEnvironment(c *gin.Context, apiErr *types.NewAPIError, retryTimes int) bool {
+	if apiErr == nil || retryTimes <= 0 || types.IsSkipRetryError(apiErr) {
+		return false
+	}
+	if common.GetContextKeyBool(c, constant.ContextKeyUpstreamWebsocketEstablished) {
+		return false
+	}
+	if c.Writer.Written() {
+		pw, ok := c.Writer.(*pingAwareWriter)
+		if !ok || !pw.onlyPingsWritten() {
+			return false
+		}
+	}
+	if operation_setting.IsAlwaysSkipRetryCode(apiErr.GetErrorCode()) {
+		return false
+	}
+	if apiErr.GetErrorCode() == types.ErrorCodeDoRequestFailed {
+		return true
+	}
+	if types.IsChannelError(apiErr) {
+		return false
+	}
+	switch apiErr.StatusCode {
+	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable:
+		return operation_setting.ShouldRetryByStatusCode(apiErr.StatusCode)
+	}
+	return false
+}
+
+// keyEnvironmentCoolingFor is how long the bound key stays out after the
+// refusal applyRefusalCooldown just recorded: the key's own window on a
+// multi-key channel, the channel's otherwise.
+func keyEnvironmentCoolingFor(c *gin.Context, channelId int, modelName string, apiErr *types.NewAPIError) time.Duration {
+	tag, _ := service.KeyEnvironmentBoundTo(c, channelId)
+	if channel, err := model.CacheGetChannel(channelId); err == nil && channel != nil {
+		if _, _, coolingUntil := channel.KeyEnvironmentKey(tag, modelName); !coolingUntil.IsZero() {
+			return time.Until(coolingUntil)
+		}
+	}
+	return service.ChannelCooldownFor(apiErr)
 }
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, info *relaycommon.RelayInfo) {

@@ -78,6 +78,8 @@ type ChannelMeta struct {
 	UpstreamModelName    string
 	IsModelMapped        bool
 	SupportStreamOptions bool // 是否支持流式选项
+	// ParamOverrideWrites is what this attempt's param override wrote.
+	ParamOverrideWrites *ParamOverrideWrites
 }
 
 type TokenCountMeta struct {
@@ -108,13 +110,15 @@ type RelayInfo struct {
 	ShouldIncludeUsage     bool
 	DisablePing            bool // 是否禁止向下游发送自定义 Ping
 	ClientWs               *websocket.Conn
-	TargetWs               *websocket.Conn
-	InputAudioFormat       string
-	OutputAudioFormat      string
-	RealtimeTools          []dto.RealTimeTool
-	IsFirstRequest         bool
-	AudioUsage             bool
-	ReasoningEffort        string
+	// Independent Realtime channels upgrade downstream only after upstream connects.
+	UpgradeClientWs   func() (*websocket.Conn, error)
+	TargetWs          *websocket.Conn
+	InputAudioFormat  string
+	OutputAudioFormat string
+	RealtimeTools     []dto.RealTimeTool
+	IsFirstRequest    bool
+	AudioUsage        bool
+	ReasoningEffort   string
 
 	// Reported by the upstream response, never inferred from the request.
 	UpstreamReasoningEffort string

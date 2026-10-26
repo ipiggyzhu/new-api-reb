@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/types"
@@ -63,11 +64,11 @@ func TestObserveChannelAffinityUsageCacheByRelayFormat_ClaudeMode(t *testing.T) 
 	require.Equal(t, cacheTokenRateModeCachedOverPromptPlusCached, stats.CachedTokenRateMode)
 }
 
-func TestObserveChannelAffinityUsageCacheByRelayFormat_MixedMode(t *testing.T) {
-	ruleName, keyFP := uniqueChannelAffinityTestKeys()
+// Counts of two token shapes are never summed: a shape change restarts the
+// counters in the new shape, so the admin view keeps showing a rate. A bucket
+// left "mixed" by an older build recovers on its next write the same way.
+func TestObserveChannelAffinityUsageCacheShapeChangeRestartsCounters(t *testing.T) {
 	usingGroup := "default"
-	ctx := buildChannelAffinityStatsContextForTest(ruleName, usingGroup, keyFP)
-
 	openAIUsage := &dto.Usage{
 		PromptTokens: 100,
 		PromptTokensDetails: dto.InputTokenDetails{
@@ -81,15 +82,27 @@ func TestObserveChannelAffinityUsageCacheByRelayFormat_MixedMode(t *testing.T) {
 		},
 	}
 
-	ObserveChannelAffinityUsageCacheByRelayFormat(ctx, openAIUsage, types.RelayFormatOpenAI)
+	ruleName, keyFP := uniqueChannelAffinityTestKeys()
+	ctx := buildChannelAffinityStatsContextForTest(ruleName, usingGroup, keyFP)
 	ObserveChannelAffinityUsageCacheByRelayFormat(ctx, claudeUsage, types.RelayFormatClaude)
+	ObserveChannelAffinityUsageCacheByRelayFormat(ctx, openAIUsage, types.RelayFormatOpenAI)
+	ObserveChannelAffinityUsageCacheByRelayFormat(ctx, openAIUsage, types.RelayFormatOpenAI)
 	stats := GetChannelAffinityUsageCacheStats(ruleName, usingGroup, keyFP)
-
+	require.Equal(t, cacheTokenRateModeCachedOverPrompt, stats.CachedTokenRateMode)
 	require.EqualValues(t, 2, stats.Total)
-	require.EqualValues(t, 2, stats.Hit)
-	require.EqualValues(t, 180, stats.PromptTokens)
-	require.EqualValues(t, 30, stats.CachedTokens)
-	require.Equal(t, cacheTokenRateModeMixed, stats.CachedTokenRateMode)
+	require.EqualValues(t, 200, stats.PromptTokens)
+	require.EqualValues(t, 20, stats.CachedTokens)
+
+	ruleName, keyFP = uniqueChannelAffinityTestKeys()
+	ctx = buildChannelAffinityStatsContextForTest(ruleName, usingGroup, keyFP)
+	legacy := ChannelAffinityUsageCacheCounters{CachedTokenRateMode: cacheTokenRateModeMixed, Total: 6, Hit: 6, PromptTokens: 5050, CachedTokens: 5400}
+	require.NoError(t, getChannelAffinityUsageCacheStatsCache().SetWithTTL(channelAffinityUsageCacheEntryKey(ruleName, usingGroup, keyFP), legacy, time.Minute))
+	ObserveChannelAffinityUsageCacheByRelayFormat(ctx, openAIUsage, types.RelayFormatOpenAI)
+	stats = GetChannelAffinityUsageCacheStats(ruleName, usingGroup, keyFP)
+	require.Equal(t, cacheTokenRateModeCachedOverPrompt, stats.CachedTokenRateMode)
+	require.EqualValues(t, 1, stats.Total)
+	require.EqualValues(t, 100, stats.PromptTokens)
+	require.EqualValues(t, 10, stats.CachedTokens)
 }
 
 func TestObserveChannelAffinityUsageCacheByRelayFormat_UnsupportedModeKeepsEmpty(t *testing.T) {

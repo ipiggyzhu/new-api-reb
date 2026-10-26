@@ -35,6 +35,12 @@ func WssHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.
 		info.TargetWs = resp.(*websocket.Conn)
 		defer info.TargetWs.Close()
 	}
+	if info.ClientWs == nil && info.UpgradeClientWs != nil {
+		info.ClientWs, err = info.UpgradeClientWs()
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+	}
 
 	usage, newAPIError := adaptor.DoResponse(c, nil, info)
 	if newAPIError != nil {

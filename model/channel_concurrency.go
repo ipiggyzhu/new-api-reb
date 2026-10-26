@@ -94,3 +94,50 @@ func ChannelInFlightSnapshot() map[int]int {
 	})
 	return snapshot
 }
+
+// channelSlotWaiters counts the requests currently parked waiting for a slot on
+// each channel (see middleware waitForAffinitySlot), keyed by channel id. Like
+// the in-flight gauge it is per process.
+var channelSlotWaiters sync.Map // map[int]*atomic.Int64
+
+// EnterChannelSlotWait registers one more waiter on the channel unless maxWaiters
+// are already waiting. Every true return must be paired with
+// LeaveChannelSlotWait.
+func EnterChannelSlotWait(channelId int, maxWaiters int) bool {
+	if maxWaiters <= 0 {
+		return false
+	}
+	value, _ := channelSlotWaiters.LoadOrStore(channelId, new(atomic.Int64))
+	counter := value.(*atomic.Int64)
+	for {
+		current := counter.Load()
+		if current >= int64(maxWaiters) {
+			return false
+		}
+		if counter.CompareAndSwap(current, current+1) {
+			return true
+		}
+	}
+}
+
+// LeaveChannelSlotWait unregisters a waiter added by EnterChannelSlotWait.
+func LeaveChannelSlotWait(channelId int) {
+	value, ok := channelSlotWaiters.Load(channelId)
+	if !ok {
+		return
+	}
+	if remaining := value.(*atomic.Int64).Add(-1); remaining < 0 {
+		value.(*atomic.Int64).Store(0)
+		common.SysError(fmt.Sprintf("channel slot waiter released more times than registered: channel=%d", channelId))
+	}
+}
+
+// ChannelSlotWaiters reports how many requests are waiting for a slot on the
+// channel.
+func ChannelSlotWaiters(channelId int) int {
+	value, ok := channelSlotWaiters.Load(channelId)
+	if !ok {
+		return 0
+	}
+	return int(value.(*atomic.Int64).Load())
+}

@@ -9,9 +9,11 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -166,6 +168,57 @@ func TestOaiChatToResponsesStreamHandlerConvertsSSEOrderAndUsage(t *testing.T) {
 		`event: response.function_call_arguments.done`,
 		`event: response.completed`,
 	)
+}
+
+// Chat and Claude clients served by a Responses upstream go through these
+// handlers; the effort the upstream reports must reach the log exactly as it
+// does on the native Responses path, and nothing may be invented without it.
+func TestResponsesToChatReportsUpstreamReasoningEffort(t *testing.T) {
+	oldMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	t.Cleanup(func() { gin.SetMode(oldMode) })
+
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+
+	completed := func(field string) string {
+		return `{"id":"resp_effort","model":"gpt-test","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}],"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}` + field + `}`
+	}
+	events := func(field string) string {
+		return `data: {"type":"response.output_text.delta","delta":"OK"}` + "\n\n" +
+			`data: {"type":"response.completed","response":` + completed(field) + "}\n\n" +
+			"data: [DONE]\n\n"
+	}
+
+	for _, handler := range []struct {
+		name   string
+		stream bool
+		body   func(field string) string
+		run    func(*gin.Context, *relaycommon.RelayInfo, *http.Response) (*dto.Usage, *types.NewAPIError)
+	}{
+		{"non-stream", false, completed, OaiResponsesToChatHandler},
+		{"buffered stream", false, events, OaiResponsesToChatBufferedStreamHandler},
+		{"stream", true, events, OaiResponsesToChatStreamHandler},
+	} {
+		for _, tc := range []struct {
+			name, field, want string
+		}{
+			{"reported", `,"reasoning":{"effort":"high"}`, "high"},
+			{"not reported", "", ""},
+		} {
+			t.Run(handler.name+"/"+tc.name, func(t *testing.T) {
+				c, _, resp, info := newResponsesChatTestContext(t, handler.body(tc.field), handler.stream)
+				info.ReasoningEffort = "xhigh"
+
+				usage, apiErr := handler.run(c, info, resp)
+				require.Nil(t, apiErr)
+				require.NotNil(t, usage)
+				assert.Equal(t, tc.want, info.UpstreamReasoningEffort)
+				assert.Equal(t, "xhigh", info.ReasoningEffort, "the request-side effort is recorded separately")
+			})
+		}
+	}
 }
 
 func requireOrderedSubstrings(t *testing.T, s string, parts ...string) {

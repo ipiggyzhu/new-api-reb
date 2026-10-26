@@ -11,6 +11,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -21,13 +22,14 @@ import (
 // after its replayed thinking was rejected (isClaudeThinkingHistoryRejected),
 // first with the thinking rewritten as text, then with the tool blocks as well.
 // Switching channels would not help: every channel behind another account
-// rejects the same blocks. It only runs while nothing has reached the client,
-// which holds in practice because these 400s return long before the first
-// keepalive ping. Anything other than such a rejection is returned untouched.
+// rejects the same blocks. It only runs while nothing has reached the client
+// (pings written while waiting for the pinned channel aside), which holds in
+// practice because these 400s return long before the first relay keepalive
+// ping. Anything other than such a rejection is returned untouched.
 func rectifyClaudeThinkingHistory(c *gin.Context, info *relaycommon.RelayInfo, adaptor channel.Adaptor, jsonData []byte, usage any, newAPIError *types.NewAPIError) (any, *types.NewAPIError) {
 	lastSent := jsonData
 	for _, withTools := range []bool{false, true} {
-		if !isClaudeThinkingHistoryRejected(newAPIError) || c.Writer.Written() || c.Request.Context().Err() != nil {
+		if !isClaudeThinkingHistoryRejected(newAPIError) || helper.ClientResponseStarted(c) || c.Request.Context().Err() != nil {
 			break
 		}
 		downgraded := downgradeClaudeThinkingHistory(jsonData, withTools)

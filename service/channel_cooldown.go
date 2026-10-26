@@ -65,6 +65,29 @@ func UpstreamRetryAfter(header http.Header, now time.Time) time.Duration {
 	return min(wait, maxChannelCooldown)
 }
 
+// KeyRateLimitCooldownHint reports whether err is a rate limit that belongs to
+// the key that sent the request (429 or rate_limit_error) and the upstream's
+// own retry-after for it, zero when it gave none (the caller then backs off on
+// its own). An overload (529, overloaded_error) is not key-scoped: it is the
+// upstream shedding load for every key, so a multi-key channel does not cool a
+// key for it.
+func KeyRateLimitCooldownHint(err *types.NewAPIError) (time.Duration, bool) {
+	if err == nil {
+		return 0, false
+	}
+	errorType := ""
+	switch relayError := err.RelayError.(type) {
+	case types.OpenAIError:
+		errorType = relayError.Type
+	case types.ClaudeError:
+		errorType = relayError.Type
+	}
+	if err.StatusCode != http.StatusTooManyRequests && errorType != "rate_limit_error" {
+		return 0, false
+	}
+	return max(err.RetryAfter, 0), true
+}
+
 // ChannelCooldownFor is how long a channel should sit out of selection for the
 // model after err: the upstream's own hint when it gave one, else a default
 // for a rate limit (429, rate_limit_error) or an overload (529,

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -64,6 +65,14 @@ func isolatedCLIUUID(key, scope string, version byte, timestampMillis int64) str
 
 func requestCLIIdentity(c *gin.Context, info *relaycommon.RelayInfo, family string, body cliObject) cliIdentity {
 	scope := fmt.Sprintf("cli:%s:%d:%d:%d:%d", family, info.ChannelId, info.ChannelMultiKeyIndex, info.UserId, info.TokenId)
+	deviceScope := scope
+	// An independent key environment is one device per key: the device and
+	// installation follow the key, not its position in the list or the caller,
+	// while sessions and turns stay apart per user and token.
+	if keyTag := common.GetContextKeyString(c, constant.ContextKeyChannelKeyTag); keyTag != "" && info.ChannelSetting.KeyEnvironments {
+		deviceScope = fmt.Sprintf("cli:%s:%d:k%s", family, info.ChannelId, keyTag)
+		scope = fmt.Sprintf("%s:%d:%d", deviceScope, info.UserId, info.TokenId)
+	}
 	deviceSeed := strings.TrimSpace(info.ChannelSetting.ClientDeviceSeed)
 	sessionSeed := strings.TrimSpace(info.ChannelSetting.ClientSessionSeed)
 	cacheKey := scope + ":" + deviceSeed + ":" + sessionSeed
@@ -93,6 +102,18 @@ func requestCLIIdentity(c *gin.Context, info *relaycommon.RelayInfo, family stri
 		userID := gjson.GetBytes(body["metadata"], "user_id").String()
 		seed = gjson.Get(userID, "session_id").String()
 	}
+	// Without a session hint, a Codex conversation's opening (instructions and
+	// first input item) is the same on every turn, so it keeps one session and
+	// one prompt_cache_key per conversation instead of one per request.
+	if seed == "" && family == constant.ClientHeaderFamilyCodex {
+		input := gjson.ParseBytes(body["input"])
+		if first := input.Get("0"); input.IsArray() && first.Exists() {
+			input = first
+		}
+		if input.Raw != "" {
+			seed = "opening:" + string(body["instructions"]) + ":" + input.Raw
+		}
+	}
 	requestID := info.RequestId
 	if requestID == "" {
 		requestID = uuid.NewString()
@@ -116,8 +137,8 @@ func requestCLIIdentity(c *gin.Context, info *relaycommon.RelayInfo, family stri
 		}
 	}
 	identity := cliIdentity{
-		device:        common.GenerateHMACWithKey([]byte(deviceKey), scope+":device"),
-		installation:  isolatedCLIUUID(deviceKey, scope+":installation", 4, 0),
+		device:        common.GenerateHMACWithKey([]byte(deviceKey), deviceScope+":device"),
+		installation:  isolatedCLIUUID(deviceKey, deviceScope+":installation", 4, 0),
 		session:       isolatedCLIUUID(sessionKey, scope+":session:"+seed, sessionVersion, sessionTime),
 		turn:          isolatedCLIUUID(sessionKey, scope+":turn:"+requestID, sessionVersion, startedAt.UnixMilli()),
 		contextWindow: isolatedCLIUUID(sessionKey, scope+":context-window:"+seed, sessionVersion, sessionTime),
@@ -134,18 +155,39 @@ func requestCLIIdentity(c *gin.Context, info *relaycommon.RelayInfo, family stri
 // change the upstream wire protocol: a Claude profile on /chat/completions still
 // only changes headers. Custom routes use the resolved final relay format.
 func prepareCLIRequest(c *gin.Context, info *relaycommon.RelayInfo, requestURL string, reader io.Reader) (string, io.Reader, http.Header, error) {
-	if info == nil || info.ChannelMeta == nil || reader == nil {
+	if info == nil || info.ChannelMeta == nil {
 		return requestURL, reader, nil, nil
 	}
 	settings := info.ChannelSetting
 	settings.Normalize(info.ApiType)
 	family := settings.SyntheticClientHeadersProfile
-	version, err := service.ResolveCLIVersionProfile(settings.CLIVersionProfile, family, settings.TLSFingerprint, settings.WebsocketTransport)
+	version, err := service.ResolveCLIVersionProfile(settings.CLIVersionProfile, family, settings.TLSFingerprint, settings.WebsocketTransport, settings.KeyEnvironments)
 	if err != nil {
 		return requestURL, reader, nil, err
 	}
+	// Every attempt records its own profile, so a retry onto a channel without
+	// one does not keep the previous attempt's.
+	c.Set(string(constant.ContextKeyCLIProfileAudit), nil)
+	if version != nil {
+		c.Set(string(constant.ContextKeyCLIProfileAudit), newCLIProfileAudit(c, info, version))
+	}
 	if family != constant.ClientHeaderFamilyClaude && family != constant.ClientHeaderFamilyCodex {
 		return requestURL, reader, nil, nil
+	}
+	if reader == nil {
+		if info.RelayFormat != types.RelayFormatOpenAIRealtime || !settings.KeyEnvironments {
+			return requestURL, reader, nil, nil
+		}
+		identity := requestCLIIdentity(c, info, family, nil)
+		headers := make(http.Header)
+		headers.Set("session-id", identity.session)
+		headers.Set("thread-id", identity.session)
+		headers.Set("x-client-request-id", identity.turn)
+		headers.Set("x-codex-window-id", identity.window)
+		if version != nil && version.RequestIDIsSession {
+			headers.Set("x-client-request-id", identity.session)
+		}
+		return requestURL, reader, headers, nil
 	}
 	u, err := url.Parse(requestURL)
 	if err != nil {
@@ -200,21 +242,28 @@ func prepareCLIRequest(c *gin.Context, info *relaycommon.RelayInfo, requestURL s
 		for _, path := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens", "generationConfig.maxOutputTokens", "generationConfig.max_output_tokens"} {
 			callerMaxTokens = callerMaxTokens || gjson.GetBytes(reference, path).Int() > 0
 		}
+		// A channel's param override is the administrator's explicit choice.
+		callerMaxTokens = callerMaxTokens || info.ParamOverrideWrites.Wrote("max_tokens")
 		// Conversion turns an OpenAI caller's effort into a thinking budget that
 		// the profile's thinking replaces; keep the effort itself as the caller's
 		// output_config.effort. Levels Claude has no equivalent for are not sent.
+		// "none" asks for the least reasoning, which the profile's always-on
+		// thinking can only honor as the lowest effort, the same as "minimal".
 		callerEffort := ""
 		if info.RelayFormat == types.RelayFormatOpenAI || info.RelayFormat == types.RelayFormatOpenAIResponses {
 			effort := gjson.GetBytes(reference, "reasoning_effort").String()
 			if effort == "" {
 				effort = gjson.GetBytes(reference, "reasoning.effort").String()
 			}
+			if effort == "none" {
+				effort = "low"
+			}
 			effort = reasoning.ClaudeSuffixEffort(gjson.GetBytes(data, "model").String(), effort)
 			if slices.Contains([]string{"low", "medium", "high", "xhigh", "max"}, effort) {
 				callerEffort = effort
 			}
 		}
-		err = shapeClaudeCodeBody(body, identity, isNativeClaudeCodeRequest(c, info, body), callerMaxTokens, callerEffort, version)
+		err = shapeClaudeCodeBody(body, identity, isNativeClaudeCodeRequest(c, info, body), callerMaxTokens, callerEffort, info.ParamOverrideWrites, version)
 		query := u.Query()
 		query.Set("beta", "true")
 		u.RawQuery = query.Encode()
@@ -230,7 +279,7 @@ func prepareCLIRequest(c *gin.Context, info *relaycommon.RelayInfo, requestURL s
 			}
 		}
 	} else {
-		err = shapeCodexBody(body, identity, version)
+		err = shapeCodexBody(body, identity, info.ParamOverrideWrites, version)
 		headers.Set("x-codex-beta-features", "remote_compaction_v2")
 		headers.Set("x-openai-internal-codex-responses-lite", "true")
 		headers.Set("session-id", identity.session)
@@ -310,6 +359,29 @@ func cliContentBlocks(raw json.RawMessage, textType string) ([]cliObject, error)
 	return blocks, nil
 }
 
+func isClaudeBillingBlock(block cliObject) bool {
+	return gjson.ParseBytes(block["type"]).String() == "text" &&
+		strings.HasPrefix(gjson.ParseBytes(block["text"]).String(), "x-anthropic-billing-header:")
+}
+
+// callerCLIVersion matches the version in a Claude Code or Codex client's
+// User-Agent: claude-cli/2.1.306, codex_cli_rs/0.163.0, codex_exec/0.163.0.
+var callerCLIVersion = regexp.MustCompile(`^(?:claude-cli|codex_[a-z_]+)/([0-9]+(?:\.[0-9]+)+)`)
+
+// newCLIProfileAudit describes the profile a request wears for the consume
+// log. A caller that is itself a CLI of another version keeps its own body
+// fields, so the upstream sees two versions; that is recorded, not rewritten.
+func newCLIProfileAudit(c *gin.Context, info *relaycommon.RelayInfo, version *service.CLIVersionProfile) map[string]any {
+	audit := map[string]any{"cli_profile": version.ID}
+	if info.ChannelSetting.KeyEnvironments {
+		_, audit["key_env_bound"] = service.KeyEnvironmentBoundTo(c, info.ChannelId)
+	}
+	if match := callerCLIVersion.FindStringSubmatch(c.Request.Header.Get("User-Agent")); match != nil && match[1] != version.Version {
+		audit["cli_version_mismatch"] = map[string]string{"client": match[1], "profile": version.Version}
+	}
+	return audit
+}
+
 // isNativeClaudeCodeRequest reports whether the Claude body is the real Claude
 // Code client's own request: Claude format end to end, never converted, from a
 // client identifying as Claude Code. Only such a request already carries the
@@ -334,27 +406,44 @@ func isNativeClaudeCodeRequest(c *gin.Context, info *relaycommon.RelayInfo, body
 }
 
 // stripCacheBreakpoints removes prompt-cache breakpoints from content blocks,
-// including blocks nested in tool_result content, so that only the selected
-// profile's cache policy reaches upstream.
-func stripCacheBreakpoints(blocks []cliObject) {
+// including blocks nested in tool_result content and in a custom-content
+// document's source, so that only the selected profile's cache policy reaches
+// upstream. Breakpoints the channel's param override wrote are the
+// administrator's policy and stay.
+func stripCacheBreakpoints(blocks []cliObject, writes *relaycommon.ParamOverrideWrites) {
 	for _, block := range blocks {
-		delete(block, "cache_control")
-		if common.GetJsonType(block["content"]) != "array" {
+		if _, ok := block["cache_control"]; ok && !writes.WroteBreakpoint(cliField(block)) {
+			delete(block, "cache_control")
+		}
+		if common.GetJsonType(block["content"]) == "array" {
+			var nested []cliObject
+			if err := common.Unmarshal(block["content"], &nested); err == nil {
+				stripCacheBreakpoints(nested, writes)
+				block["content"] = cliField(nested)
+			}
+		}
+		if common.GetJsonType(block["source"]) != "object" {
+			continue
+		}
+		var source cliObject
+		if err := common.Unmarshal(block["source"], &source); err != nil || common.GetJsonType(source["content"]) != "array" {
 			continue
 		}
 		var nested []cliObject
-		if err := common.Unmarshal(block["content"], &nested); err != nil {
+		if err := common.Unmarshal(source["content"], &nested); err != nil {
 			continue
 		}
-		stripCacheBreakpoints(nested)
-		block["content"] = cliField(nested)
+		stripCacheBreakpoints(nested, writes)
+		source["content"] = cliField(nested)
+		block["source"] = cliField(source)
 	}
 }
 
 // claudePromptBreakpoints appends every cache_control Anthropic reads as a
 // breakpoint in a system, tools or messages array: on its blocks, including
-// content nested in tool results. Tool schemas and tool_use inputs are caller
-// data, so a property named cache_control there is not a breakpoint.
+// content nested in tool results and in a custom-content document's source.
+// Tool schemas and tool_use inputs are caller data, so a property named
+// cache_control there is not a breakpoint.
 func claudePromptBreakpoints(blocks gjson.Result, found []gjson.Result) []gjson.Result {
 	for _, block := range blocks.Array() {
 		if !block.IsObject() {
@@ -364,6 +453,9 @@ func claudePromptBreakpoints(blocks gjson.Result, found []gjson.Result) []gjson.
 			found = append(found, breakpoint)
 		}
 		if content := block.Get("content"); content.IsArray() {
+			found = claudePromptBreakpoints(content, found)
+		}
+		if content := block.Get("source.content"); content.IsArray() {
 			found = claudePromptBreakpoints(content, found)
 		}
 	}
@@ -387,7 +479,9 @@ func claudeBodyHasHourTTL(data []byte) bool {
 	return false
 }
 
-func shapeClaudeCodeBody(body cliObject, identity cliIdentity, nativeCLI bool, callerMaxTokens bool, callerEffort string, versions ...*service.CLIVersionProfile) error {
+// Fields and breakpoints the channel's param override wrote (writes) are kept
+// as written: the profile only decides what the administrator left open.
+func shapeClaudeCodeBody(body cliObject, identity cliIdentity, nativeCLI bool, callerMaxTokens bool, callerEffort string, writes *relaycommon.ParamOverrideWrites, versions ...*service.CLIVersionProfile) error {
 	var version *service.CLIVersionProfile
 	if len(versions) > 0 {
 		version = versions[0]
@@ -396,11 +490,20 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity, nativeCLI bool, c
 	if err != nil {
 		return err
 	}
+	billing := version != nil && version.BillingHeader != ""
+	preserveCallerBilling := version != nil && !billing
 	// The real Claude Code client already sends the profile's cache layout:
 	// keep its breakpoints and only add ours when it sent none. Every other
 	// sender's cache_control (converted from another format, or another SDK's
 	// own TTLs and positions) is replaced by the profile's placement below.
 	hasCache := false
+	if preserveCallerBilling {
+		for _, block := range system {
+			if isClaudeBillingBlock(block) && len(block["cache_control"]) > 0 {
+				hasCache = true
+			}
+		}
+	}
 	if nativeCLI {
 		for _, key := range []string{"system", "tools", "messages", "cache_control"} {
 			if key == "cache_control" {
@@ -412,30 +515,67 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity, nativeCLI bool, c
 			}
 		}
 	} else {
-		delete(body, "cache_control")
-		stripCacheBreakpoints(system)
+		if !writes.Wrote("cache_control") {
+			delete(body, "cache_control")
+		}
+		for _, block := range system {
+			if preserveCallerBilling && isClaudeBillingBlock(block) {
+				continue
+			}
+			stripCacheBreakpoints([]cliObject{block}, writes)
+		}
 	}
-	// The profile client's leading billing block is never cached; breakpoints
-	// are placed over the caller's own blocks, then the captured one leads.
-	billing := version != nil && !nativeCLI && version.BillingHeader != ""
-	if billing && len(system) > 0 && gjson.ParseBytes(system[0]["type"]).String() == "text" &&
-		strings.HasPrefix(gjson.ParseBytes(system[0]["text"]).String(), "x-anthropic-billing-header:") {
-		system = system[1:]
+	// The override's breakpoints are the cache layout; adding the profile's on
+	// top could exceed Anthropic's limit or break its TTL order.
+	if writes != nil && len(writes.Breakpoints) > 0 || writes.Wrote("cache_control") && len(body["cache_control"]) > 0 {
+		hasCache = true
+	}
+	// A captured billing block replaces every caller billing block and leads
+	// without a cache breakpoint. A profile without billing preserves the
+	// caller's blocks, including their attributes and positions.
+	if billing {
+		kept := system[:0]
+		for _, block := range system {
+			if !isClaudeBillingBlock(block) {
+				kept = append(kept, block)
+			}
+		}
+		if len(kept) == 0 && len(system) > 0 {
+			delete(body, "system")
+		}
+		system = kept
 	}
 	// Breakpoints we place carry the profile's TTL mode; its headers carry the
 	// matching beta flag (see prepareCLIRequest).
 	cacheControl := version.CacheControl()
 	if !hasCache {
 		for i := len(system) - 1; i >= 0 && i >= len(system)-2; i-- {
-			if gjson.ParseBytes(system[i]["type"]).String() == "text" {
+			if gjson.ParseBytes(system[i]["type"]).String() == "text" &&
+				!(preserveCallerBilling && isClaudeBillingBlock(system[i])) {
 				system[i]["cache_control"] = cacheControl
 			}
 		}
 	}
 	if billing {
-		system = append([]cliObject{{"type": cliField("text"), "text": cliField(version.BillingHeader)}}, system...)
+		// The client's billing suffix hashes the conversation's first prompt:
+		// the first user message's text, skipping the <system-reminder> blocks
+		// the client merges in front of it.
+		prompt := ""
+		content := gjson.GetBytes(body["messages"], `#(role=="user").content`)
+		if content.Type == gjson.String {
+			prompt = content.String()
+		} else {
+			content.ForEach(func(_, block gjson.Result) bool {
+				if block.Get("type").String() != "text" || strings.HasPrefix(block.Get("text").String(), "<system-reminder>") {
+					return true
+				}
+				prompt = block.Get("text").String()
+				return false
+			})
+		}
+		system = append([]cliObject{{"type": cliField("text"), "text": cliField(version.BillingHeaderFor(prompt))}}, system...)
 	}
-	if len(system) > 0 {
+	if len(system) > 0 && !(preserveCallerBilling && common.GetJsonType(body["system"]) == "string" && isClaudeBillingBlock(system[0])) {
 		body["system"] = cliField(system)
 	}
 	var messages []cliObject
@@ -451,7 +591,7 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity, nativeCLI bool, c
 			return err
 		}
 		if !nativeCLI {
-			stripCacheBreakpoints(blocks)
+			stripCacheBreakpoints(blocks, writes)
 		}
 		if !hasCache && i == len(messages)-1 && len(blocks) > 0 {
 			last := blocks[len(blocks)-1]
@@ -474,7 +614,7 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity, nativeCLI bool, c
 			if tool == nil {
 				return fmt.Errorf("Claude CLI tools must be objects")
 			}
-			if !nativeCLI {
+			if _, ok := tool["cache_control"]; ok && !nativeCLI && !writes.WroteBreakpoint(cliField(tool)) {
 				delete(tool, "cache_control")
 			}
 			// The sample's deferred placeholder has only type/properties. It is
@@ -537,13 +677,13 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity, nativeCLI bool, c
 		// Anthropic rejects thinking with a forced tool choice or changed
 		// sampling; the captured client sends neither.
 		toolChoice := gjson.GetBytes(body["tool_choice"], "type").String()
-		if len(version.Thinking) > 0 && toolChoice != "any" && toolChoice != "tool" {
+		if len(version.Thinking) > 0 && toolChoice != "any" && toolChoice != "tool" && !writesThinkingOrSampling(writes) {
 			body["thinking"] = version.Thinking
 			delete(body, "temperature")
 			delete(body, "top_p")
 			delete(body, "top_k")
 		}
-		if len(version.OutputConfig) > 0 {
+		if len(version.OutputConfig) > 0 && !writes.Wrote("output_config") {
 			// Output settings are caller intent (effort, format): the captured
 			// values only fill keys the caller did not set.
 			var outputConfig, captured cliObject
@@ -568,15 +708,15 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity, nativeCLI bool, c
 	// Adaptive thinking is model-dependent. Do not impose an Opus 5.5-only
 	// setting on older models simply because they share the Claude wire format.
 	if version == nil && strings.HasPrefix(gjson.ParseBytes(body["model"]).String(), "claude-opus-5-5") {
-		if _, ok := body["thinking"]; !ok {
+		if _, ok := body["thinking"]; !ok && !writesThinkingOrSampling(writes) {
 			body["thinking"] = json.RawMessage(`{"type":"adaptive","display":"omitted"}`)
 		}
-		if _, ok := body["output_config"]; !ok {
+		if _, ok := body["output_config"]; !ok && !writes.Wrote("output_config") {
 			body["output_config"] = json.RawMessage(`{"effort":"medium"}`)
 		}
 	}
 	thinkingType := gjson.GetBytes(body["thinking"], "type").String()
-	if _, ok := body["context_management"]; !ok && (version == nil || version.ContextManagement) && (thinkingType == "enabled" || thinkingType == "adaptive") {
+	if _, ok := body["context_management"]; !ok && !writes.Wrote("context_management") && (version == nil || version.ContextManagement) && (thinkingType == "enabled" || thinkingType == "adaptive") {
 		body["context_management"] = json.RawMessage(`{"edits":[{"type":"clear_thinking_20251015","keep":"all"}]}`)
 	}
 	var metadata cliObject
@@ -600,7 +740,14 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity, nativeCLI bool, c
 	return nil
 }
 
-func shapeCodexBody(body cliObject, identity cliIdentity, versions ...*service.CLIVersionProfile) error {
+// writesThinkingOrSampling reports whether the param override set thinking or
+// a sampling parameter; Anthropic rejects thinking with changed sampling, so
+// the profile's thinking is imposed on neither.
+func writesThinkingOrSampling(writes *relaycommon.ParamOverrideWrites) bool {
+	return writes.Wrote("thinking") || writes.Wrote("temperature") || writes.Wrote("top_p") || writes.Wrote("top_k")
+}
+
+func shapeCodexBody(body cliObject, identity cliIdentity, writes *relaycommon.ParamOverrideWrites, versions ...*service.CLIVersionProfile) error {
 	var version *service.CLIVersionProfile
 	if len(versions) > 0 {
 		version = versions[0]
@@ -646,7 +793,9 @@ func shapeCodexBody(body cliObject, identity cliIdentity, versions ...*service.C
 			return fmt.Errorf("Codex CLI input items must be objects")
 		}
 		// Codex has no cache breakpoints; its cache identity is prompt_cache_key.
-		delete(item, "cache_control")
+		if _, ok := item["cache_control"]; ok && !writes.WroteBreakpoint(cliField(item)) {
+			delete(item, "cache_control")
+		}
 		role := gjson.ParseBytes(item["role"]).String()
 		kind := gjson.ParseBytes(item["type"]).String()
 		if kind == "additional_tools" {
@@ -662,7 +811,7 @@ func shapeCodexBody(body cliObject, identity cliIdentity, versions ...*service.C
 		if common.GetJsonType(item["output"]) == "array" {
 			var output []cliObject
 			if err := common.Unmarshal(item["output"], &output); err == nil {
-				stripCacheBreakpoints(output)
+				stripCacheBreakpoints(output, writes)
 				item["output"] = cliField(output)
 			}
 		}
@@ -683,7 +832,7 @@ func shapeCodexBody(body cliObject, identity cliIdentity, versions ...*service.C
 		if err != nil {
 			return err
 		}
-		stripCacheBreakpoints(blocks)
+		stripCacheBreakpoints(blocks, writes)
 		if blocks != nil {
 			item["content"] = cliField(blocks)
 		}
@@ -734,7 +883,7 @@ func shapeCodexBody(body cliObject, identity cliIdentity, versions ...*service.C
 		}
 	}
 	for key, value := range defaults {
-		if _, ok := body[key]; !ok {
+		if _, ok := body[key]; !ok && !writes.Wrote(key) {
 			body[key] = value
 		}
 	}
@@ -742,10 +891,15 @@ func shapeCodexBody(body cliObject, identity cliIdentity, versions ...*service.C
 	// Keep explicit tier, max_output_tokens, and reasoning settings unchanged.
 	// Cache policy belongs to the profile: Codex sends only the session's
 	// prompt_cache_key, never a caller's retention, options or breakpoints.
-	body["prompt_cache_key"] = cliField(identity.session)
-	delete(body, "prompt_cache_retention")
-	delete(body, "prompt_cache_options")
-	delete(body, "cache_control")
+	// Values the channel's param override wrote are the administrator's policy.
+	if !writes.Wrote("prompt_cache_key") {
+		body["prompt_cache_key"] = cliField(identity.session)
+	}
+	for _, key := range []string{"prompt_cache_retention", "prompt_cache_options", "cache_control"} {
+		if !writes.Wrote(key) {
+			delete(body, key)
+		}
+	}
 	// Preserve the capture's field set and JSON scalar types, including the
 	// nested JSON string. These are client metadata, not gateway permissions.
 	// Identifiers and the turn timestamp always come from this isolated request.

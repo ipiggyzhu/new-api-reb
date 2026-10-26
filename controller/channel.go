@@ -556,8 +556,8 @@ func validateTwoFactorAuth(twoFA *model.TwoFA, code string) bool {
 	return false
 }
 
-// validateChannel 通用的渠道校验函数
-func validateChannel(channel *model.Channel, isAdd bool) error {
+// validateChannel 通用的渠道校验函数。previous 是更新前已保存的渠道，新增时为 nil。
+func validateChannel(channel *model.Channel, isAdd bool, previous *model.Channel) error {
 	// nil 必须在任何解引用之前挡掉：请求体结构不符时 ShouldBindJSON 会让内嵌的
 	// Channel 指针保持 nil，此时调用 ValidateSettings 会直接 panic。
 	if channel == nil {
@@ -565,7 +565,7 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 	}
 
 	// 校验 channel settings
-	if err := channel.ValidateSettings(); err != nil {
+	if err := channel.ValidateSettings(previous); err != nil {
 		return fmt.Errorf("渠道额外设置[channel setting] 格式错误：%s", err.Error())
 	}
 	// 未知指纹要到请求时才报错，且该错误不重试、不禁用，渠道会留在轮转里每次都失败，
@@ -574,7 +574,14 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 		return fmt.Errorf("不支持的 TLS 指纹：%s", fingerprint)
 	}
 	setting := channel.GetSetting()
-	if _, err := service.ResolveCLIVersionProfile(setting.CLIVersionProfile, setting.SyntheticClientHeadersProfile, setting.TLSFingerprint, setting.WebsocketTransport); err != nil {
+	if _, err := service.ResolveCLIVersionProfile(setting.CLIVersionProfile, setting.SyntheticClientHeadersProfile, setting.TLSFingerprint, setting.WebsocketTransport, setting.KeyEnvironments); err != nil {
+		return err
+	}
+	isMultiKey := channel.ChannelInfo.IsMultiKey
+	if previous != nil {
+		isMultiKey = previous.ChannelInfo.IsMultiKey
+	}
+	if err := validateKeyEnvironmentSettings(channel, isMultiKey, previous); err != nil {
 		return err
 	}
 
@@ -668,6 +675,9 @@ type AddChannelRequest struct {
 	MultiKeyMode              constant.MultiKeyMode `json:"multi_key_mode"`
 	BatchAddSetKeyPrefix2Name bool                  `json:"batch_add_set_key_prefix_2_name"`
 	Channel                   *model.Channel        `json:"channel"`
+	// AllowUnassigned confirms saving an independent key environment channel
+	// with more keys than captured versions; the extra keys stay unused.
+	AllowUnassigned bool `json:"allow_unassigned"`
 }
 
 func getVertexArrayKeys(keys string) ([]string, error) {
@@ -710,12 +720,21 @@ func AddChannel(c *gin.Context) {
 		return
 	}
 
+	// The mode decides whether the channel is multi-key, which the key
+	// environment check needs before the switch below applies it.
+	if addChannelRequest.Channel != nil && addChannelRequest.Mode == "multi_to_single" {
+		addChannelRequest.Channel.ChannelInfo.IsMultiKey = true
+	}
 	// 使用统一的校验函数
-	if err := validateChannel(addChannelRequest.Channel, true); err != nil {
+	if err := validateChannel(addChannelRequest.Channel, true, nil); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": err.Error(),
 		})
+		return
+	}
+	if err := ensureKeyEnvironmentSeeds(addChannelRequest.Channel, nil); err != nil {
+		common.ApiError(c, err)
 		return
 	}
 
@@ -789,8 +808,11 @@ func AddChannel(c *gin.Context) {
 		}
 		channels = append(channels, *localChannel)
 	}
-	err = model.BatchInsertChannels(channels)
+	err = model.BatchInsertChannelsWith(channels, keyEnvironmentSaveHook(addChannelRequest.AllowUnassigned, false))
 	if err != nil {
+		if respondKeyEnvironmentError(c, err) {
+			return
+		}
 		common.ApiError(c, err)
 		return
 	}
@@ -1011,6 +1033,8 @@ type PatchChannel struct {
 	model.Channel
 	MultiKeyMode *string `json:"multi_key_mode"`
 	KeyMode      *string `json:"key_mode"` // 多key模式下密钥覆盖或者追加
+	// AllowUnassigned confirms leaving keys without a version; see AddChannelRequest.
+	AllowUnassigned bool `json:"allow_unassigned"`
 }
 
 type ChannelStatusRequest struct {
@@ -1044,17 +1068,17 @@ func UpdateChannel(c *gin.Context) {
 	}
 	clearChannelReadOnlyFields(&channel, requestData)
 
-	// 使用统一的校验函数
-	if err := validateChannel(&channel.Channel, false); err != nil {
+	// Preserve existing ChannelInfo to ensure multi-key channels keep correct state even if the client does not send ChannelInfo in the request.
+	originChannel, err := model.GetChannelById(channel.Id, true)
+	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": err.Error(),
 		})
 		return
 	}
-	// Preserve existing ChannelInfo to ensure multi-key channels keep correct state even if the client does not send ChannelInfo in the request.
-	originChannel, err := model.GetChannelById(channel.Id, true)
-	if err != nil {
+	// 使用统一的校验函数
+	if err := validateChannel(&channel.Channel, false, originChannel); err != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": err.Error(),
@@ -1156,8 +1180,16 @@ func UpdateChannel(c *gin.Context) {
 			// 覆盖模式：直接使用新密钥（默认行为，不需要特殊处理）
 		}
 	}
-	err = channel.Update()
+	if err := ensureKeyEnvironmentSeeds(&channel.Channel, originChannel); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	keysChanged := channel.Key != "" && channel.Key != originChannel.Key
+	err = channel.UpdateWith(keyEnvironmentSaveHook(channel.AllowUnassigned, keysChanged))
 	if err != nil {
+		if respondKeyEnvironmentError(c, err) {
+			return
+		}
 		common.ApiError(c, err)
 		return
 	}
@@ -1498,6 +1530,21 @@ func CopyChannel(c *gin.Context) {
 		clone.Balance = 0
 		clone.UsedQuota = 0
 	}
+	// A key belongs to one independent environment, so the copy cannot share
+	// the origin's: it starts disabled with its own seeds and no assignments,
+	// and its keys must be replaced before it can serve.
+	keyEnvironments := origin.GetSetting().KeyEnvironments
+	if keyEnvironments {
+		setting := origin.GetSetting()
+		setting.ClientDeviceSeed = ""
+		setting.ClientSessionSeed = ""
+		clone.SetSetting(setting)
+		if err := ensureKeyEnvironmentSeeds(&clone, nil); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+		clone.Status = common.ChannelStatusManuallyDisabled
+	}
 
 	// insert
 	if err := clone.Insert(); err != nil {
@@ -1512,7 +1559,7 @@ func CopyChannel(c *gin.Context) {
 		"name":     clone.Name,
 	})
 	// success
-	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": gin.H{"id": clone.Id}})
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": gin.H{"id": clone.Id, "key_environments": keyEnvironments}})
 }
 
 // MultiKeyManageRequest represents the request for multi-key management operations
@@ -1523,6 +1570,10 @@ type MultiKeyManageRequest struct {
 	Page      int    `json:"page,omitempty"`      // for get_key_status pagination
 	PageSize  int    `json:"page_size,omitempty"` // for get_key_status pagination
 	Status    *int   `json:"status,omitempty"`    // for get_key_status filtering: 1=enabled, 2=manual_disabled, 3=auto_disabled, nil=all
+	// Unassigned narrows get_key_status to keys without a key environment version.
+	Unassigned bool `json:"unassigned,omitempty"`
+	// AllowUnassigned confirms a reassign_key_environments that leaves keys unassigned.
+	AllowUnassigned bool `json:"allow_unassigned,omitempty"`
 }
 
 // MultiKeyStatusResponse represents the response for key status query
@@ -1536,6 +1587,9 @@ type MultiKeyStatusResponse struct {
 	EnabledCount        int `json:"enabled_count"`
 	ManualDisabledCount int `json:"manual_disabled_count"`
 	AutoDisabledCount   int `json:"auto_disabled_count"`
+	// Independent key environments only.
+	KeyEnvironments bool `json:"key_environments"`
+	UnassignedCount int  `json:"unassigned_count"`
 }
 
 type KeyStatus struct {
@@ -1544,6 +1598,10 @@ type KeyStatus struct {
 	DisabledTime int64  `json:"disabled_time,omitempty"`
 	Reason       string `json:"reason,omitempty"`
 	KeyPreview   string `json:"key_preview"` // first 10 chars of key for identification
+	// CLIProfile is the version the key's environment wears; KeyEnvAssigned is
+	// false for a key the pool could not cover, which serves no traffic.
+	CLIProfile     string `json:"cli_profile,omitempty"`
+	KeyEnvAssigned bool   `json:"key_env_assigned"`
 }
 
 // ManageMultiKeys handles multi-key management operations
@@ -1607,6 +1665,16 @@ func ManageMultiKeys(c *gin.Context) {
 
 		// Statistics for all keys (unchanged by filtering)
 		var enabledCount, manualDisabledCount, autoDisabledCount int
+		keyEnvironments := channel.GetSetting().KeyEnvironments
+		var keyProfiles map[int]string
+		unassignedCount := 0
+		if keyEnvironments {
+			keyProfiles, err = keyEnvironmentStatus(channel, keys)
+			if err != nil {
+				common.ApiError(c, err)
+				return
+			}
+		}
 
 		// Build all key status data first
 		var allKeyStatusList []KeyStatus
@@ -1646,22 +1714,34 @@ func ManageMultiKeys(c *gin.Context) {
 				keyPreview = key[:10] + "..."
 			}
 
-			allKeyStatusList = append(allKeyStatusList, KeyStatus{
+			keyStatus := KeyStatus{
 				Index:        i,
 				Status:       status,
 				DisabledTime: disabledTime,
 				Reason:       reason,
 				KeyPreview:   keyPreview,
-			})
+			}
+			if keyEnvironments {
+				keyStatus.CLIProfile = keyProfiles[i]
+				keyStatus.KeyEnvAssigned = keyStatus.CLIProfile != ""
+				if !keyStatus.KeyEnvAssigned {
+					unassignedCount++
+				}
+			}
+			allKeyStatusList = append(allKeyStatusList, keyStatus)
 		}
 
 		// Apply status filter if specified
 		var filteredKeyStatusList []KeyStatus
-		if request.Status != nil {
+		if request.Status != nil || request.Unassigned {
 			for _, keyStatus := range allKeyStatusList {
-				if keyStatus.Status == *request.Status {
-					filteredKeyStatusList = append(filteredKeyStatusList, keyStatus)
+				if request.Status != nil && keyStatus.Status != *request.Status {
+					continue
 				}
+				if request.Unassigned && (!keyEnvironments || keyStatus.KeyEnvAssigned) {
+					continue
+				}
+				filteredKeyStatusList = append(filteredKeyStatusList, keyStatus)
 			}
 		} else {
 			filteredKeyStatusList = allKeyStatusList
@@ -1702,6 +1782,8 @@ func ManageMultiKeys(c *gin.Context) {
 				EnabledCount:        enabledCount,        // Overall statistics
 				ManualDisabledCount: manualDisabledCount, // Overall statistics
 				AutoDisabledCount:   autoDisabledCount,   // Overall statistics
+				KeyEnvironments:     keyEnvironments,
+				UnassignedCount:     unassignedCount,
 			},
 		})
 		return
@@ -1929,7 +2011,9 @@ func ManageMultiKeys(c *gin.Context) {
 		channel.ChannelInfo.MultiKeyDisabledTime = newDisabledTime
 		channel.ChannelInfo.MultiKeyDisabledReason = newDisabledReason
 
-		err = channel.Update()
+		// Deleting a key only frees its version, so keys already unassigned
+		// must not block the delete.
+		err = channel.UpdateWith(keyEnvironmentSaveHook(true, true))
 		if err != nil {
 			common.ApiError(c, err)
 			return
@@ -1997,7 +2081,7 @@ func ManageMultiKeys(c *gin.Context) {
 		channel.ChannelInfo.MultiKeyDisabledTime = newDisabledTime
 		channel.ChannelInfo.MultiKeyDisabledReason = newDisabledReason
 
-		err = channel.Update()
+		err = channel.UpdateWith(keyEnvironmentSaveHook(true, true))
 		if err != nil {
 			common.ApiError(c, err)
 			return
@@ -2011,6 +2095,40 @@ func ManageMultiKeys(c *gin.Context) {
 		})
 		return
 
+	case "preview_key_environments", "reassign_key_environments":
+		if !channel.GetSetting().KeyEnvironments {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "该渠道未开启独立 key 环境",
+			})
+			return
+		}
+		if request.Action == "preview_key_environments" {
+			plan, err := service.PreviewKeyEnvironmentReassignment(model.DB, channel)
+			if err != nil {
+				if respondKeyEnvironmentError(c, err) {
+					return
+				}
+				common.ApiError(c, err)
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": plan})
+			return
+		}
+		plan, err := model.ReassignChannelKeyEnvironments(channel.Id, func(tx *gorm.DB) (any, error) {
+			return service.ReassignKeyEnvironments(tx, channel, request.AllowUnassigned)
+		})
+		if err != nil {
+			if respondKeyEnvironmentError(c, err) {
+				return
+			}
+			common.ApiError(c, err)
+			return
+		}
+		model.InitChannelCache()
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": plan})
+		return
+
 	default:
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
@@ -2021,7 +2139,7 @@ func ManageMultiKeys(c *gin.Context) {
 }
 
 func multiKeyActionRequiresSensitiveWrite(action string) bool {
-	return action == "delete_key" || action == "delete_disabled_keys"
+	return action == "delete_key" || action == "delete_disabled_keys" || action == "reassign_key_environments"
 }
 
 // OllamaPullModel 拉取 Ollama 模型

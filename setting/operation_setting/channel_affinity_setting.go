@@ -2,6 +2,7 @@ package operation_setting
 
 import (
 	"sync/atomic"
+	"time"
 
 	"github.com/QuantumNous/new-api/setting/config"
 )
@@ -32,12 +33,54 @@ type ChannelAffinityRule struct {
 }
 
 type ChannelAffinitySetting struct {
-	Enabled               bool                  `json:"enabled"`
-	SwitchOnSuccess       bool                  `json:"switch_on_success"`
-	KeepOnChannelDisabled bool                  `json:"keep_on_channel_disabled"`
-	MaxEntries            int                   `json:"max_entries"`
-	DefaultTTLSeconds     int                   `json:"default_ttl_seconds"`
-	Rules                 []ChannelAffinityRule `json:"rules"`
+	Enabled               bool `json:"enabled"`
+	SwitchOnSuccess       bool `json:"switch_on_success"`
+	KeepOnChannelDisabled bool `json:"keep_on_channel_disabled"`
+	// StickyMultiKey pins an affinity-matched request to one key of a
+	// multi-key channel, not just to the channel: the upstream prompt cache is
+	// per account, so rotating keys within a conversation misses it.
+	StickyMultiKey bool `json:"sticky_multi_key"`
+	// SaturatedWaitSeconds is how long a request whose pinned channel is at its
+	// concurrency limit waits for a slot there before falling back to ordinary
+	// selection. Falling back re-sends the whole prompt to a cold upstream cache,
+	// so a short wait is usually the cheaper outcome. 0 disables waiting.
+	SaturatedWaitSeconds int `json:"saturated_wait_seconds"`
+	// SaturatedMaxWaiters caps how many requests may wait on one channel at
+	// once; the rest fall back immediately. 0 disables waiting.
+	SaturatedMaxWaiters int                   `json:"saturated_max_waiters"`
+	MaxEntries          int                   `json:"max_entries"`
+	DefaultTTLSeconds   int                   `json:"default_ttl_seconds"`
+	Rules               []ChannelAffinityRule `json:"rules"`
+	// KeyEnvironmentBindingTTLSeconds is how long a conversation stays bound to
+	// one key of an independent key environment channel after its last request.
+	// 0 or less uses the 24h default.
+	KeyEnvironmentBindingTTLSeconds int `json:"key_environment_binding_ttl_seconds"`
+}
+
+// KeyEnvironmentBindingTTL returns the binding lifetime, 24h unless configured.
+func (s *ChannelAffinitySetting) KeyEnvironmentBindingTTL() time.Duration {
+	if s.KeyEnvironmentBindingTTLSeconds <= 0 {
+		return 24 * time.Hour
+	}
+	return time.Duration(s.KeyEnvironmentBindingTTLSeconds) * time.Second
+}
+
+// MaxChannelAffinitySaturatedWait bounds SaturatedWaitSeconds. Cloudflare drops
+// an origin that sends nothing for ~100s, and a non-streaming request cannot
+// ping while it waits, so the wait must leave the upstream most of that window.
+const MaxChannelAffinitySaturatedWait = 60 * time.Second
+
+// SaturatedWait returns the configured wait, clamped to
+// [0, MaxChannelAffinitySaturatedWait].
+func (s *ChannelAffinitySetting) SaturatedWait() time.Duration {
+	if s.SaturatedWaitSeconds <= 0 {
+		return 0
+	}
+	wait := time.Duration(s.SaturatedWaitSeconds) * time.Second
+	if wait > MaxChannelAffinitySaturatedWait {
+		return MaxChannelAffinitySaturatedWait
+	}
+	return wait
 }
 
 // Keep Codex CLI passthrough aligned with upstream. Codex uses lower-case
@@ -114,11 +157,15 @@ func buildCodexPassHeaderTemplate() map[string]interface{} {
 }
 
 var channelAffinitySetting = ChannelAffinitySetting{
-	Enabled:               true,
-	SwitchOnSuccess:       true,
-	KeepOnChannelDisabled: false,
-	MaxEntries:            100_000,
-	DefaultTTLSeconds:     3600,
+	Enabled:                         true,
+	SwitchOnSuccess:                 true,
+	KeepOnChannelDisabled:           false,
+	StickyMultiKey:                  true,
+	SaturatedWaitSeconds:            20,
+	SaturatedMaxWaiters:             3,
+	MaxEntries:                      100_000,
+	DefaultTTLSeconds:               3600,
+	KeyEnvironmentBindingTTLSeconds: 86400,
 	Rules: []ChannelAffinityRule{
 		{
 			Name:       "codex cli trace",
@@ -130,10 +177,12 @@ var channelAffinitySetting = ChannelAffinitySetting{
 			ValueRegex:            "",
 			TTLSeconds:            0,
 			ParamOverrideTemplate: buildCodexPassHeaderTemplate(),
-			SkipRetryOnFailure:    true,
-			IncludeUsingGroup:     true,
-			IncludeRuleName:       true,
-			UserAgentInclude:      nil,
+			// Ordinary channels fail over after a pinned attempt fails. Independent
+			// key environments apply their own same-key retry matrix in the relay.
+			SkipRetryOnFailure: false,
+			IncludeUsingGroup:  true,
+			IncludeRuleName:    true,
+			UserAgentInclude:   nil,
 		},
 		{
 			Name:       "claude cli trace",

@@ -22,16 +22,16 @@ import (
 func TestValidateChannelRejectsNilWithoutPanic(t *testing.T) {
 	for _, isAdd := range []bool{true, false} {
 		require.NotPanics(t, func() {
-			err := validateChannel(nil, isAdd)
+			err := validateChannel(nil, isAdd, nil)
 			require.Error(t, err, "nil channel must be rejected, not accepted")
-		}, "validateChannel(nil, isAdd=%v) must not panic", isAdd)
+		}, "validateChannel(nil, isAdd=%v, nil) must not panic", isAdd)
 	}
 }
 
 // TestValidateChannelStillRejectsEmptyKeyOnAdd keeps the original add-path
 // contract intact after the nil check was hoisted above it.
 func TestValidateChannelStillRejectsEmptyKeyOnAdd(t *testing.T) {
-	err := validateChannel(&model.Channel{Type: 1, Key: ""}, true)
+	err := validateChannel(&model.Channel{Type: 1, Key: ""}, true, nil)
 	require.Error(t, err, "adding a channel with an empty key must still fail")
 }
 
@@ -50,7 +50,7 @@ func TestValidateChannelUpstreamKeepaliveInterval(t *testing.T) {
 		{"above upper bound", `{"upstream_keepalive_enabled":true,"upstream_keepalive_interval_minutes":10081}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateChannel(&model.Channel{Type: 1, OtherSettings: tc.settings}, false)
+			err := validateChannel(&model.Channel{Type: 1, OtherSettings: tc.settings}, false, nil)
 			if tc.valid {
 				require.NoError(t, err)
 			} else {
@@ -58,6 +58,16 @@ func TestValidateChannelUpstreamKeepaliveInterval(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An update is checked against the stored channel: a keepalive interval that
+// already outlasted its window before the cross-field rule keeps saving while
+// the admin edits other fields, and the same settings on a new channel fail.
+func TestValidateChannelKeepaliveWindowAgainstStoredChannel(t *testing.T) {
+	stored := `{"upstream_keepalive_enabled":true,"upstream_keepalive_interval_minutes":180}`
+	require.NoError(t, validateChannel(&model.Channel{Type: 1, OtherSettings: stored}, false, &model.Channel{Type: 1, OtherSettings: stored}))
+	require.ErrorContains(t, validateChannel(&model.Channel{Type: 1, Key: "sk-test", OtherSettings: stored}, true, nil),
+		"upstream_keepalive_active_window_minutes (120) must be at least 199")
 }
 
 func TestValidateChannelCLIVersionConfiguration(t *testing.T) {
@@ -74,7 +84,7 @@ func TestValidateChannelCLIVersionConfiguration(t *testing.T) {
 		{"unchanged legacy TLS", `{"synthetic_client_headers_profile":"codex","tls_fingerprint":"codex-cli"}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateChannel(&model.Channel{Type: 1, Setting: &tc.setting}, false)
+			err := validateChannel(&model.Channel{Type: 1, Setting: &tc.setting}, false, nil)
 			if tc.valid {
 				require.NoError(t, err)
 			} else {

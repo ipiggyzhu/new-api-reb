@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -14,8 +15,10 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -264,6 +267,62 @@ func TestSweepMultiKeyModelRemovalRequiresAllEnabledKeysToReject(t *testing.T) {
 			}
 		})
 	}
+}
+
+// On independent key environments an unassigned key serves no traffic, so the
+// per-key recheck of a rejected model skips it instead of letting it keep the
+// model alive.
+func TestSweepOnKeyEnvironmentsRechecksOnlyAssignedKeys(t *testing.T) {
+	f := newUpstreamValidationFixture(t)
+	t.Setenv("CHANNEL_MODEL_SWEEP_GROUP_DELAY_MS", "0")
+	require.NoError(t, f.db.AutoMigrate(&model.ChannelKeyEnvironment{}))
+	// The key's profile dials with its captured ClientHello, so the upstream
+	// speaks TLS; its certificate is this test's self-signed one.
+	insecure := common.TLSInsecureSkipVerify
+	common.TLSInsecureSkipVerify = true
+	service.InitHttpClient()
+	service.ResetProxyClientCache()
+	t.Cleanup(func() { common.TLSInsecureSkipVerify = insecure; service.ResetProxyClientCache() })
+	var mu sync.Mutex
+	probed := map[string][]string{}
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `{"data":[]}`)
+			return
+		}
+		mu.Lock()
+		key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		probed[key] = append(probed[key], r.Header.Get("User-Agent"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"error":{"code":"model_not_found","message":"model does not exist"}}`)
+	}))
+	t.Cleanup(upstream.Close)
+	channel := f.createChannel(t, dto.ChannelOtherSettings{})
+	channel.Models, channel.BaseURL, channel.Key = "gpt-4o", &upstream.URL, "sk-a\nsk-unassigned\nsk-b"
+	channel.ChannelInfo = model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModePolling}
+	channel.SetSetting(dto.ChannelSettings{SyntheticClientHeadersProfile: constant.ClientHeaderFamilyCodex, KeyEnvironments: true})
+	require.NoError(t, f.db.Save(channel).Error)
+	require.NoError(t, channel.AddAbilities(nil))
+	for key, profile := range map[string]string{"sk-a": "codex-0.163.0-linux-x64", "sk-b": "codex-0.160.0-windows-x64"} {
+		require.NoError(t, f.db.Create(&model.ChannelKeyEnvironment{ChannelId: channel.Id, KeyTag: model.ChannelKeyTag(key), ProfileId: common.GetPointer(profile)}).Error)
+	}
+	require.NoError(t, f.db.Create(&model.ChannelKeyEnvironment{ChannelId: channel.Id, KeyTag: model.ChannelKeyTag("sk-unassigned")}).Error)
+
+	budget := 10
+	result, err := sweepChannelModels(context.Background(), channel.Id, 1, &budget)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gpt-4o"}, result.removed, "every assigned key rejected the model")
+	assert.ElementsMatch(t, []string{"sk-a", "sk-b"}, lo.Keys(probed), "the unassigned key is never probed")
+	for key, version := range map[string]string{"sk-a": "codex_exec/0.163.0 ", "sk-b": "codex_exec/0.160.0 "} {
+		for _, userAgent := range probed[key] {
+			assert.True(t, strings.HasPrefix(userAgent, version), "%s probes as its own version, got %s", key, userAgent)
+		}
+	}
+	stored, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Empty(t, stored.Models)
 }
 
 func TestSweepFetchFailureStillTestsExistingAndReportsIncomplete(t *testing.T) {

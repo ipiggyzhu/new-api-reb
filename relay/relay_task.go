@@ -90,10 +90,32 @@ func ResolveOriginTask(c *gin.Context, info *relaycommon.RelayInfo) *dto.TaskErr
 	}
 	info.LockedChannel = ch
 
+	// The upstream task belongs to the account of the key that created it, so an
+	// independent key environment channel goes back to that key while it can
+	// still serve, as task polling does.
+	originKeyIndex := -1
+	if ch.GetSetting().KeyEnvironments {
+		originKeyIndex = ch.EnabledKeyIndex(originTask.PrivateData.Key)
+	}
+	if originKeyIndex >= 0 {
+		key := originTask.PrivateData.Key
+		common.SetContextKey(c, constant.ContextKeyChannelKey, key)
+		common.SetContextKey(c, constant.ContextKeyChannelKeyTag, model.ChannelKeyTag(key))
+		if ch.ChannelInfo.IsMultiKey {
+			common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, originKeyIndex)
+			info.ChannelMultiKeyIndex = originKeyIndex
+		}
+		info.ApiKey = key
+	}
+
 	if originTask.ChannelId != info.ChannelId {
-		key, _, newAPIError := ch.GetNextEnabledKey()
-		if newAPIError != nil {
-			return service.TaskErrorWrapper(newAPIError, "channel_no_available_key", newAPIError.StatusCode)
+		key := originTask.PrivateData.Key
+		if originKeyIndex < 0 {
+			var newAPIError *types.NewAPIError
+			key, _, newAPIError = ch.GetNextEnabledKey(info.OriginModelName)
+			if newAPIError != nil {
+				return service.TaskErrorWrapper(newAPIError, "channel_no_available_key", newAPIError.StatusCode)
+			}
 		}
 		common.SetContextKey(c, constant.ContextKeyChannelKey, key)
 		common.SetContextKey(c, constant.ContextKeyChannelType, ch.Type)

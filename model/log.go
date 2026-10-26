@@ -819,3 +819,56 @@ func DeleteOldLog(ctx context.Context, targetTimestamp int64, limit int) (int64,
 
 	return total, nil
 }
+
+// ConsumeLogUsageRow is the slice of a consume log the cache share alert reads.
+type ConsumeLogUsageRow struct {
+	Id           int
+	CreatedAt    int64
+	ChannelId    int
+	PromptTokens int
+	Other        string
+}
+
+// ScanRecentConsumeLogUsage walks the consume logs created at or after since,
+// newest first, a page at a time, and stops after maxRows rows. truncated
+// reports that the window held more rows than that, in which case the oldest
+// part of the window was not read.
+//
+// The window's smallest id is looked up first (a range read on the
+// created_at+id index) and bounds every page from below. Without it the last
+// page, ordered by id, could make the database walk the whole history older
+// than the window just to prove nothing else matches.
+func ScanRecentConsumeLogUsage(since int64, pageSize int, maxRows int, visit func(row ConsumeLogUsageRow)) (truncated bool, err error) {
+	var minId int
+	if err := LOG_DB.Model(&Log{}).Where("created_at >= ?", since).Select("COALESCE(MIN(id), 0)").Scan(&minId).Error; err != nil {
+		return false, err
+	}
+	if minId == 0 {
+		return false, nil
+	}
+	beforeId := 0
+	seen := 0
+	for {
+		var rows []ConsumeLogUsageRow
+		tx := LOG_DB.Model(&Log{}).
+			Select("id", "created_at", "channel_id", "prompt_tokens", "other").
+			Where("type = ? AND created_at >= ? AND id >= ?", LogTypeConsume, since, minId)
+		if beforeId > 0 {
+			tx = tx.Where("id < ?", beforeId)
+		}
+		if err := tx.Order("id desc").Limit(pageSize).Find(&rows).Error; err != nil {
+			return false, err
+		}
+		for _, row := range rows {
+			if seen >= maxRows {
+				return true, nil
+			}
+			visit(row)
+			seen++
+		}
+		if len(rows) < pageSize {
+			return false, nil
+		}
+		beforeId = rows[len(rows)-1].Id
+	}
+}

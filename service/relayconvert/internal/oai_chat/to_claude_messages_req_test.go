@@ -160,7 +160,7 @@ func TestOpenAIChatToClaudeMessagesKeepsContentCacheControl(t *testing.T) {
 
 	system := gjson.GetBytes(upstream, "system.0")
 	assert.Equal(t, "long stable instructions", system.Get("text").String())
-	assert.JSONEq(t, `{"type":"ephemeral"}`, system.Get("cache_control").Raw)
+	assert.JSONEq(t, `{"type":"ephemeral","ttl":"1h"}`, system.Get("cache_control").Raw, "a 5m breakpoint before a 1h one is raised to 1h")
 
 	content := gjson.GetBytes(upstream, "messages.0.content")
 	require.Len(t, content.Array(), 3)
@@ -207,4 +207,34 @@ func TestOpenAIChatToClaudeMessagesKeepsAtMostFourLatestCacheBreakpoints(t *test
 	for _, path := range []string{"messages.0.content.0", "messages.0.content.1", "messages.2.content.0.content.0", "messages.3.content.0"} {
 		assert.Equal(t, "ephemeral", gjson.GetBytes(upstream, path+".cache_control.type").String(), path)
 	}
+}
+
+// Anthropic rejects a request whose 1h breakpoint follows a 5m one. Breakpoints
+// before the last 1h one are raised to 1h, which the 1h write is billed for
+// anyway; 5m breakpoints after it stay 5m.
+func TestOpenAIChatToClaudeMessagesOrdersCacheBreakpointTTLs(t *testing.T) {
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"messages": [
+			{"role": "system", "content": [
+				{"type": "text", "text": "stable", "cache_control": {"type": "ephemeral"}},
+				{"type": "text", "text": "dynamic", "cache_control": {"type": "ephemeral", "ttl": "5m"}}
+			]},
+			{"role": "user", "content": [{"type": "text", "text": "document", "cache_control": {"type": "ephemeral", "ttl": "1h"}}]},
+			{"role": "assistant", "content": "calling", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]},
+			{"role": "tool", "tool_call_id": "call_1", "content": [{"type": "text", "text": "output", "cache_control": {"type": "ephemeral"}}]}
+		]
+	}`
+	var req dto.GeneralOpenAIRequest
+	require.NoError(t, common.UnmarshalJsonStr(body, &req))
+
+	got, err := OpenAIChatRequestToClaudeMessages(nil, req)
+	require.NoError(t, err)
+	upstream, err := common.Marshal(got)
+	require.NoError(t, err)
+
+	assert.JSONEq(t, `{"type":"ephemeral","ttl":"1h"}`, gjson.GetBytes(upstream, "system.0.cache_control").Raw)
+	assert.JSONEq(t, `{"type":"ephemeral","ttl":"1h"}`, gjson.GetBytes(upstream, "system.1.cache_control").Raw)
+	assert.JSONEq(t, `{"type":"ephemeral","ttl":"1h"}`, gjson.GetBytes(upstream, "messages.0.content.0.cache_control").Raw)
+	assert.JSONEq(t, `{"type":"ephemeral"}`, gjson.GetBytes(upstream, "messages.2.content.0.content.0.cache_control").Raw, "a 5m breakpoint after the last 1h one stays 5m")
 }

@@ -523,6 +523,13 @@ export const STATIC_I18N_KEYS = [
 
   // Channel validation
   'CLI version profiles require HTTPS HTTP/1.1; disable WebSocket transport',
+  'Independent key environments require HTTPS HTTP/1.1; disable WebSocket transport',
+
+  // Independent key environment availability (channel-key-environment.ts)
+  'Independent key environments need the Claude Code or Codex client profile',
+  'Claude key environments need an Anthropic channel',
+  'Codex key environments need an OpenAI channel',
+  'Independent key environments need a multi-key channel',
 
   // Channel upstream updates
   'No processable upstream model updates for this channel',

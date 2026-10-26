@@ -153,17 +153,26 @@ func sendChannelKeepalive(ctx context.Context, channel *model.Channel) error {
 	if lo.Contains(unsupportedTestChannelTypes, channel.Type) {
 		return fmt.Errorf("%s channels have no chat endpoint for a keepalive", constant.GetChannelTypeName(channel.Type))
 	}
-	modelName := ""
+	// The test model, else the channel's first model, that takes a chat request.
+	// Embedding, rerank, image and compaction models are passed over: a chat
+	// request to one fails on every interval without keeping anything warm.
+	candidates := channel.GetModels()
 	if channel.TestModel != nil {
-		modelName = strings.TrimSpace(*channel.TestModel)
+		candidates = append([]string{*channel.TestModel}, candidates...)
 	}
-	if modelName == "" {
-		if models := channel.GetModels(); len(models) > 0 {
-			modelName = strings.TrimSpace(models[0])
+	modelName := ""
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || common.IsImageGenerationModel(candidate) {
+			continue
+		}
+		if path := channelTestModelPath(channel, candidate); path == "/v1/chat/completions" || path == "/v1/responses" {
+			modelName = candidate
+			break
 		}
 	}
 	if modelName == "" {
-		return errors.New("channel has neither a test model nor any model")
+		return errors.New("channel has no chat model to keep alive")
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, channelKeepaliveRequestTimeout)
@@ -208,6 +217,9 @@ func sendChannelKeepalive(ctx context.Context, channel *model.Channel) error {
 		// text/event-stream itself when it is absent.
 		c.Request.Header.Set("Accept", "application/json")
 	}
+	// A seeded pick spreads keepalives over a multi-key channel's enabled keys
+	// without advancing the polling cursor that orders real traffic.
+	common.SetContextKey(c, constant.ContextKeyChannelKeySeed, fmt.Sprintf("keepalive:%d", time.Now().UnixNano()))
 	if newAPIError := middleware.SetupContextForSelectedChannel(c, channel, modelName); newAPIError != nil {
 		return newAPIError
 	}

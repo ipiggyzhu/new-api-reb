@@ -26,6 +26,48 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(asyncTaskPollHandler{})
 	service.RegisterSystemTaskHandler(scoreProjectionHandler{})
 	service.RegisterSystemTaskHandler(channelKeepaliveHandler{})
+	service.RegisterSystemTaskHandler(cacheShareAlertHandler{})
+}
+
+// cacheShareAlertHandler warns the root user about channels whose token
+// weighted cache share fell below their threshold. Off by default, and idle
+// without consume logs, which are its only input.
+type cacheShareAlertHandler struct{}
+
+func (cacheShareAlertHandler) Type() string { return model.SystemTaskTypeCacheShareAlert }
+
+func (cacheShareAlertHandler) Enabled() bool {
+	return common.LogConsumeEnabled && operation_setting.GetMonitorSetting().CacheShareAlertEnabled
+}
+
+func (cacheShareAlertHandler) Interval() time.Duration {
+	return time.Duration(operation_setting.GetMonitorSetting().GetCacheShareAlertIntervalMinutes()) * time.Minute
+}
+
+func (cacheShareAlertHandler) NewPayload() any { return nil }
+
+// Run fails without notifying when the previous cooldown cannot be read:
+// alerting with a lost cooldown would repeat every channel's alert, and the
+// cooldown is the anti-spam guarantee.
+func (cacheShareAlertHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
+	lastAlerted := map[int]int64{}
+	previous, err := model.GetPreviousSucceededSystemTask(model.SystemTaskTypeCacheShareAlert, task.ID)
+	if err == nil && previous != nil && previous.Result != "" {
+		var previousResult service.CacheShareAlertResult
+		if err = common.UnmarshalJsonStr(previous.Result, &previousResult); err == nil && previousResult.LastAlerted != nil {
+			lastAlerted = previousResult.LastAlerted
+		}
+	}
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, nil, fmt.Errorf("read previous cache share alert cooldown: %w", err))
+		return
+	}
+	result, err := service.RunCacheShareAlert(common.GetTimestamp(), lastAlerted, service.NotifyRootUser)
+	if err != nil {
+		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, result, err)
+		return
+	}
+	finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusSucceeded, result, nil)
 }
 
 // channelKeepaliveHandler sends the per-channel upstream keepalives. Each

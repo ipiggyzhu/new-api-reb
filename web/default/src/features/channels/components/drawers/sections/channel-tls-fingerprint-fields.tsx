@@ -31,12 +31,13 @@ import type { ChannelFormValues } from '../../../lib/channel-form'
 export function ChannelTLSFingerprintFields() {
   const { t } = useTranslation()
   const form = useFormContext<ChannelFormValues>()
-  const [family, enabled, fingerprint] = useWatch({
+  const [family, enabled, fingerprint, keyEnvironments] = useWatch({
     control: form.control,
     name: [
       'synthetic_client_headers_profile',
       'tls_fingerprint_enabled',
       'tls_fingerprint',
+      'key_environments',
     ],
   })
   const { data, isError } = useQuery({
@@ -46,6 +47,26 @@ export function ChannelTLSFingerprintFields() {
   })
   const options = data?.data ?? []
   const hasLegacy = Boolean(enabled && fingerprint)
+  if (keyEnvironments && (family === 'claude' || family === 'codex')) {
+    return (
+      <div className='space-y-2 px-4 py-3'>
+        <p className='text-sm font-medium'>{t('Effective TLS')}</p>
+        <p className='text-muted-foreground text-sm'>
+          {t(
+            "TLS follows each key's assigned CLI version for HTTPS and WebSocket. The channel TLS setting cannot override a key's profile."
+          )}
+        </p>
+        {hasLegacy && (
+          <p className='text-muted-foreground text-xs'>
+            {t(
+              'Saved channel TLS override: {{fingerprint}}. It is retained for use when independent key environments are turned off.',
+              { fingerprint }
+            )}
+          </p>
+        )}
+      </div>
+    )
+  }
   const effective = hasLegacy
     ? options.find((option) => option.id === fingerprint)
     : options.find((option) => option.client_family === family)

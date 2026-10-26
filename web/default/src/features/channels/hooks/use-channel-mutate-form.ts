@@ -34,6 +34,10 @@ import {
   transformFormDataToUpdatePayload,
   type ChannelFormValues,
 } from '../lib'
+import {
+  saveWithKeyEnvironmentConsent,
+  type KeyEnvironmentShortage,
+} from '../lib/channel-key-environment'
 import type { Channel } from '../types'
 
 type UseChannelMutateFormParams = {
@@ -41,6 +45,13 @@ type UseChannelMutateFormParams = {
   isEditing: boolean
   isMultiKeyChannel: boolean
   onSuccess: () => void
+  /**
+   * Asks the admin to save independent key environments that leave keys
+   * without a version. Resolves true to resend with allow_unassigned.
+   */
+  confirmKeyEnvironmentShortage?: (
+    rejection: KeyEnvironmentShortage
+  ) => Promise<boolean>
 }
 
 const SENSITIVE_UPDATE_FIELDS = [
@@ -89,50 +100,67 @@ export function useChannelMutateForm(props: UseChannelMutateFormParams) {
     ADMIN_PERMISSION_ACTIONS.SENSITIVE_WRITE
   )
 
-  return useMutation({
-    mutationFn: async (data: ChannelFormValues): Promise<string> => {
-      if (props.isEditing && props.currentRow) {
-        const payload = transformFormDataToUpdatePayload(
-          data,
-          props.currentRow.id
-        )
-        if (!data.key?.trim()) {
-          delete payload.key
-        }
-        if (!canEditSensitive) {
-          for (const field of SENSITIVE_UPDATE_FIELDS) {
-            delete payload[field]
-          }
-        }
-        const payloadWithKeyMode =
-          canEditSensitive &&
-          props.isMultiKeyChannel &&
-          data.key?.trim() &&
-          data.key_mode
-            ? {
-                ...payload,
-                key_mode: data.key_mode,
-              }
-            : payload
-
-        const response = await updateChannel(
-          props.currentRow.id,
-          payloadWithKeyMode
-        )
-        if (!response.success) {
-          throw new Error(response.message || t(ERROR_MESSAGES.UPDATE_FAILED))
-        }
-        return SUCCESS_MESSAGES.UPDATED
+  const save = async (
+    data: ChannelFormValues,
+    allowUnassigned: boolean
+  ): Promise<string> => {
+    if (props.isEditing && props.currentRow) {
+      const payload = transformFormDataToUpdatePayload(
+        data,
+        props.currentRow.id
+      )
+      if (!data.key?.trim()) {
+        delete payload.key
       }
+      if (!canEditSensitive) {
+        for (const field of SENSITIVE_UPDATE_FIELDS) {
+          delete payload[field]
+        }
+      }
+      const payloadWithKeyMode =
+        canEditSensitive &&
+        props.isMultiKeyChannel &&
+        data.key?.trim() &&
+        data.key_mode
+          ? {
+              ...payload,
+              key_mode: data.key_mode,
+            }
+          : payload
 
-      const payload = transformFormDataToCreatePayload(data)
-      const response = await createChannel(payload)
+      const response = await updateChannel(
+        props.currentRow.id,
+        allowUnassigned
+          ? { ...payloadWithKeyMode, allow_unassigned: true }
+          : payloadWithKeyMode
+      )
       if (!response.success) {
-        throw new Error(response.message || t(ERROR_MESSAGES.CREATE_FAILED))
+        throw new Error(response.message || t(ERROR_MESSAGES.UPDATE_FAILED))
       }
-      return SUCCESS_MESSAGES.CREATED
-    },
+      return SUCCESS_MESSAGES.UPDATED
+    }
+
+    const payload = transformFormDataToCreatePayload(data)
+    const response = await createChannel(
+      allowUnassigned ? { ...payload, allow_unassigned: true } : payload
+    )
+    if (!response.success) {
+      throw new Error(response.message || t(ERROR_MESSAGES.CREATE_FAILED))
+    }
+    return SUCCESS_MESSAGES.CREATED
+  }
+
+  return useMutation({
+    mutationFn: (data: ChannelFormValues): Promise<string> =>
+      saveWithKeyEnvironmentConsent(
+        (allowUnassigned) => save(data, allowUnassigned),
+        async (rejection) =>
+          (await props.confirmKeyEnvironmentShortage?.(rejection)) ?? false,
+        (key, params) => t(key, params)
+      ),
     onSuccess: (messageKey) => {
+      // A declined shortage save is not a failure; the drawer stays open.
+      if (!messageKey) return
       toast.success(t(messageKey))
       props.onSuccess()
     },

@@ -13,6 +13,9 @@ const (
 	NotifyTypeQuotaExceed   = "quota_exceed"
 	NotifyTypeChannelUpdate = "channel_update"
 	NotifyTypeChannelTest   = "channel_test"
+	// NotifyTypeCacheShareAlert has its own notification limit bucket, so the
+	// alert neither starves nor is starved by channel test notifications.
+	NotifyTypeCacheShareAlert = "cache_share_alert"
 )
 
 func NewNotify(t string, title string, content string, values []interface{}) Notify {

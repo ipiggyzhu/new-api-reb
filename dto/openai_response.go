@@ -240,7 +240,24 @@ type Usage struct {
 
 	// OpenRouter Params
 	Cost any `json:"cost,omitempty"`
+
+	// UpstreamUsageAnomaly names what was wrong with the usage the upstream
+	// itself reported, recorded by a handler before a local estimate replaced
+	// it. Billing never reads it; the settle step copies it into the admin-only
+	// log audit (see service.attachUsageAnomaly).
+	UpstreamUsageAnomaly string `json:"-"`
+	// StreamStartPromptTokens is the prompt side (input + cache read + cache
+	// creation) a Claude stream declared in message_start. Audit only, like
+	// UpstreamUsageAnomaly.
+	StreamStartPromptTokens int `json:"-"`
 }
+
+// Usage anomaly kinds recorded in the consume log's other.admin_info.usage_anomaly.
+const (
+	UsageAnomalyZeroUsage                 = "zero_usage"
+	UsageAnomalyZeroPromptTokens          = "zero_prompt_tokens"
+	UsageAnomalyClaudeStreamUsageMismatch = "claude_stream_usage_mismatch"
+)
 
 type OpenAIVideoResponse struct {
 	Id        string `json:"id" example:"file-abc123"`

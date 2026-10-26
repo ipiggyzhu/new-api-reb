@@ -138,6 +138,16 @@ export interface LogOtherData {
       original: number
       clamped: number
     }
+    // Set when a successful chat reply settled with usage that cannot be
+    // right (no usage, no prompt side, or a Claude stream whose final prompt
+    // is smaller than message_start declared). Audit only: the charge is not
+    // changed. Admin-only (nested under admin_info).
+    usage_anomaly?: {
+      kind: 'zero_usage' | 'zero_prompt_tokens' | 'claude_stream_usage_mismatch'
+      prompt_tokens: number
+      completion_tokens: number
+      stream_start_prompt_tokens?: number
+    }
   }
   // Language-independent operation descriptor (audit/login logs).
   // Frontend renders localized content from action + params via i18n templates.

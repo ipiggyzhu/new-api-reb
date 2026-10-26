@@ -308,13 +308,19 @@ export interface ChannelTLSFingerprintsResponse {
   success: boolean
   message?: string
   data?: ChannelTLSFingerprint[]
-  cli_profiles?: {
-    id: string
-    family: string
-    version: string
-    label: string
-    ja3_md5: string
-  }[]
+  cli_profiles?: CLIVersionProfileOption[]
+}
+
+export interface CLIVersionProfileOption {
+  id: string
+  family: string
+  version: string
+  label: string
+  ja3_md5: string
+  /** '' for the default cache mode, '1h' for a 1h-cache capture */
+  cache_ttl?: string
+  /** Admitted to the independent key environment pool */
+  auto_assign?: boolean
 }
 
 export interface ChannelDynamicScoreSummaryResponse {
@@ -367,6 +373,8 @@ export interface CopyChannelResponse {
   message?: string
   data?: {
     id: number
+    /** The source ran independent key environments; the copy is disabled. */
+    key_environments?: boolean
   }
 }
 
@@ -380,6 +388,18 @@ export interface KeyStatus {
   disabled_time?: number
   reason?: string
   key_preview?: string
+  /** Version the key's environment wears (independent key environments) */
+  cli_profile?: string
+  /** False for a key the pool could not cover; it serves no traffic */
+  key_env_assigned?: boolean
+}
+
+/** One key's planned environment in a reassignment preview */
+export interface KeyEnvironmentAssignment {
+  index: number
+  profile_id: string
+  previous_profile_id: string
+  downgrade: boolean
 }
 
 export type MultiKeyConfirmAction = {
@@ -405,6 +425,8 @@ export interface MultiKeyStatusResponse {
     enabled_count: number
     manual_disabled_count: number
     auto_disabled_count: number
+    key_environments?: boolean
+    unassigned_count?: number
   }
 }
 
@@ -467,10 +489,16 @@ export interface MultiKeyManageParams {
     | 'disable_all_keys'
     | 'delete_key'
     | 'delete_disabled_keys'
+    | 'preview_key_environments'
+    | 'reassign_key_environments'
   key_index?: number
   page?: number
   page_size?: number
   status?: number // 1=enabled, 2=manual_disabled, 3=auto_disabled
+  /** get_key_status: only keys without a key environment version */
+  unassigned?: boolean
+  /** reassign_key_environments: confirmed leaving keys unassigned */
+  allow_unassigned?: boolean
 }
 
 export interface BatchDeleteParams {
@@ -532,5 +560,7 @@ export interface AddChannelRequest {
   mode: 'single' | 'batch' | 'multi_to_single'
   multi_key_mode?: 'random' | 'polling'
   batch_add_set_key_prefix_2_name?: boolean
+  /** Confirms saving independent key environments that leave keys unassigned */
+  allow_unassigned?: boolean
   channel: Partial<Channel>
 }

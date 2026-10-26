@@ -135,6 +135,23 @@ func (user *User) SetAccessToken(token string) {
 	user.AccessToken = &token
 }
 
+// UpdateUserAccessToken rotates the dashboard access token by writing only the
+// access_token column, so a stale user snapshot can never overwrite fields
+// (quota, aff_quota, ...) that were changed concurrently.
+func UpdateUserAccessToken(id int, token string) error {
+	if id == 0 {
+		return errors.New("id 为空！")
+	}
+	result := DB.Model(&User{}).Where("id = ?", id).Update("access_token", token)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
 func (user *User) GetSetting() dto.UserSetting {
 	setting := dto.UserSetting{}
 	if user.Setting != "" {
@@ -725,7 +742,19 @@ func (user *User) UpdateWithTx(tx *gorm.DB, updatePassword bool) error {
 	if err = tx.First(&current, user.Id).Error; err != nil {
 		return err
 	}
-	if err = tx.Model(&current).Omit("quota", "used_quota", "request_count").Updates(newUser).Error; err != nil {
+	// Columns with dedicated atomic writers must never be written back from a
+	// possibly stale snapshot: quota/used_quota/request_count (billing),
+	// access_token (UpdateUserAccessToken), aff_* (inviteUser and
+	// TransferAffQuotaToQuota).
+	if err = tx.Model(&current).Omit(
+		"quota",
+		"used_quota",
+		"request_count",
+		"access_token",
+		"aff_count",
+		"aff_quota",
+		"aff_history",
+	).Updates(newUser).Error; err != nil {
 		return err
 	}
 	return tx.First(user, user.Id).Error

@@ -51,6 +51,7 @@ import {
   enableAllMultiKeys,
   disableAllMultiKeys,
   deleteDisabledMultiKeys,
+  reassignKeyEnvironments,
 } from '../../api'
 import { MULTI_KEY_FILTER_OPTIONS } from '../../constants'
 import {
@@ -60,10 +61,16 @@ import {
   getMultiKeyConfirmMessage,
   isDestructiveAction,
 } from '../../lib'
-import type { KeyStatus, MultiKeyConfirmAction } from '../../types'
+import type {
+  KeyEnvironmentAssignment,
+  KeyStatus,
+  MultiKeyConfirmAction,
+} from '../../types'
 import { useChannels } from '../channels-provider'
 import { StatisticsCard } from './multi-key-statistics-card'
 import { MultiKeyTableRowActions } from './multi-key-table-row-actions'
+
+const UNASSIGNED_FILTER = 0
 
 type MultiKeyManageDialogProps = {
   open: boolean
@@ -95,7 +102,15 @@ export function MultiKeyManageDialog({
   const [manualDisabledCount, setManualDisabledCount] = useState(0)
   const [autoDisabledCount, setAutoDisabledCount] = useState(0)
 
+  const [keyEnvironments, setKeyEnvironments] = useState(false)
+  const [unassignedCount, setUnassignedCount] = useState(0)
+  // A reassignment preview awaiting confirmation.
+  const [reassignPlan, setReassignPlan] = useState<
+    KeyEnvironmentAssignment[] | null
+  >(null)
+
   // UI state
+  // null = all; UNASSIGNED_FILTER = keys without a key environment version.
   const [statusFilter, setStatusFilter] = useState<number | null>(null)
   const [confirmAction, setConfirmAction] =
     useState<MultiKeyConfirmAction | null>(null)
@@ -124,7 +139,8 @@ export function MultiKeyManageDialog({
         currentRow.id,
         page,
         size,
-        status === null ? undefined : status
+        status === null || status === UNASSIGNED_FILTER ? undefined : status,
+        status === UNASSIGNED_FILTER
       )
 
       if (response.success && response.data) {
@@ -136,6 +152,8 @@ export function MultiKeyManageDialog({
         setEnabledCount(response.data.enabled_count || 0)
         setManualDisabledCount(response.data.manual_disabled_count || 0)
         setAutoDisabledCount(response.data.auto_disabled_count || 0)
+        setKeyEnvironments(response.data.key_environments === true)
+        setUnassignedCount(response.data.unassigned_count || 0)
       } else {
         toast.error(response.message || t('Failed to load key status'))
       }
@@ -145,6 +163,40 @@ export function MultiKeyManageDialog({
       )
     } finally {
       setIsLoading(false)
+    }
+  }
+
+  const previewReassignment = async () => {
+    if (!currentRow) return
+    setIsPerformingAction(true)
+    try {
+      const response = await reassignKeyEnvironments(currentRow.id, false)
+      if (!response.success) {
+        toast.error(response.message || t('Failed to preview reassignment'))
+        return
+      }
+      setReassignPlan(response.data ?? [])
+    } finally {
+      setIsPerformingAction(false)
+    }
+  }
+
+  const applyReassignment = async () => {
+    if (!currentRow) return
+    setIsPerformingAction(true)
+    try {
+      // The admin saw the keys the preview leaves unassigned.
+      const response = await reassignKeyEnvironments(currentRow.id, true, true)
+      if (!response.success) {
+        toast.error(response.message || t('Failed to reassign versions'))
+        return
+      }
+      toast.success(t('Versions reassigned'))
+      setReassignPlan(null)
+      await loadKeyStatus()
+      queryClient.invalidateQueries({ queryKey: channelsQueryKeys.lists() })
+    } finally {
+      setIsPerformingAction(false)
     }
   }
 
@@ -271,6 +323,14 @@ export function MultiKeyManageDialog({
       >
         <div className='flex min-h-0 flex-1 flex-col space-y-4 overflow-hidden'>
           {/* Statistics */}
+          {keyEnvironments && unassignedCount > 0 && (
+            <p className='text-destructive shrink-0 text-xs'>
+              {t(
+                '{{count}} keys have no version and serve no requests until a version frees up or a new real captured version is added.',
+                { count: unassignedCount }
+              )}
+            </p>
+          )}
           <div className='grid shrink-0 grid-cols-3 gap-3'>
             <StatisticsCard
               label={t('Enabled')}
@@ -299,6 +359,14 @@ export function MultiKeyManageDialog({
                   value: option.value,
                   label: t(option.label),
                 })),
+                ...(keyEnvironments
+                  ? [
+                      {
+                        value: String(UNASSIGNED_FILTER),
+                        label: t('Unassigned'),
+                      },
+                    ]
+                  : []),
               ]}
               value={statusFilter === null ? 'all' : statusFilter.toString()}
               onValueChange={(v) => v !== null && handleStatusFilterChange(v)}
@@ -313,6 +381,11 @@ export function MultiKeyManageDialog({
                       {t(option.label)}
                     </SelectItem>
                   ))}
+                  {keyEnvironments && (
+                    <SelectItem value={String(UNASSIGNED_FILTER)}>
+                      {t('Unassigned')}
+                    </SelectItem>
+                  )}
                 </SelectGroup>
               </SelectContent>
             </Select>
@@ -326,6 +399,16 @@ export function MultiKeyManageDialog({
               >
                 <RefreshCw className='h-4 w-4' />
               </Button>
+              {keyEnvironments && (
+                <Button
+                  variant='outline'
+                  size='sm'
+                  onClick={previewReassignment}
+                  disabled={!canEditSensitive || isPerformingAction}
+                >
+                  {t('Reassign versions')}
+                </Button>
+              )}
 
               {manualDisabledCount + autoDisabledCount > 0 && (
                 <Button
@@ -406,6 +489,32 @@ export function MultiKeyManageDialog({
                     className: 'w-32',
                     cell: (key) => renderStatusBadge(key.status),
                   },
+                  ...(keyEnvironments
+                    ? [
+                        {
+                          id: 'cli-profile',
+                          header: t('CLI version'),
+                          className: 'w-56',
+                          cellClassName: 'font-mono text-xs',
+                          cell: (key: KeyStatus) =>
+                            key.key_env_assigned ? (
+                              key.cli_profile
+                            ) : (
+                              <span
+                                title={t(
+                                  'Not enough versions; this key is not used for now'
+                                )}
+                              >
+                                <StatusBadge
+                                  label={t('Unassigned')}
+                                  variant='danger'
+                                  copyable={false}
+                                />
+                              </span>
+                            ),
+                        },
+                      ]
+                    : []),
                   {
                     id: 'reason',
                     header: t('Disabled Reason'),
@@ -479,6 +588,33 @@ export function MultiKeyManageDialog({
         destructive={isDestructiveAction(confirmAction)}
         isLoading={isPerformingAction}
         handleConfirm={performAction}
+      />
+
+      <ConfirmDialog
+        open={reassignPlan !== null}
+        onOpenChange={(open) => !open && setReassignPlan(null)}
+        title={t('Reassign versions')}
+        desc={
+          <div className='space-y-2'>
+            <p>
+              {t(
+                'Keys whose version changes get a new device and session; their conversations start over on the upstream account. Keys without a version serve no requests.'
+              )}
+            </p>
+            <ul className='max-h-64 space-y-1 overflow-auto font-mono text-xs'>
+              {(reassignPlan ?? []).map((assignment) => (
+                <li key={assignment.index}>
+                  #{assignment.index + 1}:{' '}
+                  {assignment.previous_profile_id || t('Unassigned')} →{' '}
+                  {assignment.profile_id || t('Unassigned')}
+                  {assignment.downgrade && ` (${t('older version')})`}
+                </li>
+              ))}
+            </ul>
+          </div>
+        }
+        isLoading={isPerformingAction}
+        handleConfirm={applyReassignment}
       />
     </>
   )

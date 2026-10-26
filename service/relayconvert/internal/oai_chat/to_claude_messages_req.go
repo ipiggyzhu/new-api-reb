@@ -426,7 +426,10 @@ type claudeCacheBreakpoint struct {
 // limitClaudeCacheBreakpoints keeps the client's cache_control from producing
 // a request Anthropic rejects. Over the limit, the latest breakpoints in
 // prompt order are kept: they cover the longest prefix, so later turns can
-// still read the cache the earlier ones wrote.
+// still read the cache the earlier ones wrote. Anthropic also requires 1h
+// breakpoints to come before 5m ones; a 5m breakpoint followed by a 1h one is
+// raised to 1h. The 1h write is billed up to the last 1h breakpoint either
+// way, so only the earlier entry's lifetime changes.
 func limitClaudeCacheBreakpoints(system []dto.ClaudeMediaMessage, messages []dto.ClaudeMessage) {
 	var breakpoints []claudeCacheBreakpoint
 	for i := range system {
@@ -460,5 +463,32 @@ func limitClaudeCacheBreakpoints(system []dto.ClaudeMediaMessage, messages []dto
 			delete(breakpoints[0].part, "cache_control")
 		}
 		breakpoints = breakpoints[1:]
+	}
+	laterHour := false
+	for i := len(breakpoints) - 1; i >= 0; i-- {
+		breakpoint := breakpoints[i]
+		var ttl string
+		if breakpoint.block != nil {
+			var cacheControl struct {
+				TTL string `json:"ttl"`
+			}
+			_ = common.Unmarshal(breakpoint.block.CacheControl, &cacheControl)
+			ttl = cacheControl.TTL
+		} else {
+			cacheControl, _ := breakpoint.part["cache_control"].(map[string]any)
+			ttl, _ = cacheControl["ttl"].(string)
+		}
+		if ttl == "1h" {
+			laterHour = true
+			continue
+		}
+		if !laterHour {
+			continue
+		}
+		if breakpoint.block != nil {
+			breakpoint.block.CacheControl = json.RawMessage(`{"type":"ephemeral","ttl":"1h"}`)
+		} else {
+			breakpoint.part["cache_control"] = map[string]any{"type": "ephemeral", "ttl": "1h"}
+		}
 	}
 }

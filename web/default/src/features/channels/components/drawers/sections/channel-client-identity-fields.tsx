@@ -32,9 +32,19 @@ import { Switch } from '@/components/ui/switch'
 
 import type { ChannelFormValues } from '../../../lib/channel-form'
 import { ChannelCLIVersionFields } from './channel-cli-version-fields'
+import { ChannelKeyEnvironmentFields } from './channel-key-environment-fields'
 import { ChannelTLSFingerprintFields } from './channel-tls-fingerprint-fields'
 
-export function ChannelClientIdentityFields() {
+type ChannelClientIdentityFieldsProps = {
+  /** The channel holds (or is being created with) several keys. */
+  multiKey?: boolean
+  /** Keys in the channel, for the key environment summary. */
+  keyCount?: number
+}
+
+export function ChannelClientIdentityFields(
+  props: ChannelClientIdentityFieldsProps = {}
+) {
   const { t } = useTranslation()
   const form = useFormContext<ChannelFormValues>()
   const enabled = useWatch({
@@ -55,120 +65,155 @@ export function ChannelClientIdentityFields() {
     name: 'cli_version_profile',
   })
   const hasVersion = Boolean(cliVersion?.startsWith(`${profile}-`))
+  const keyEnvironments =
+    useWatch({ control: form.control, name: 'key_environments' }) === true &&
+    (profile === 'claude' || profile === 'codex')
 
   return (
     <>
-      <ChannelCLIVersionFields />
-      {profileEnabled && !hasVersion && <ChannelTLSFingerprintFields />}
-      <FormField
-        control={form.control}
-        name='custom_client_identity_enabled'
-        render={({ field }) => (
-          <FormItem className='px-4 py-3'>
-            <div className='flex items-center justify-between gap-3'>
-              <div className='space-y-0.5'>
-                <FormLabel>{t('Custom Device and Session Identity')}</FormLabel>
-                <FormDescription>
-                  {t(
-                    'Controls only device/session identities. Turning it off restores their isolated defaults without changing the selected CLI version or TLS.'
-                  )}
-                </FormDescription>
-              </div>
-              <FormControl>
-                <Switch
-                  checked={profileEnabled && (field.value ?? false)}
-                  disabled={!profileEnabled}
-                  onCheckedChange={field.onChange}
-                />
-              </FormControl>
-            </div>
-          </FormItem>
-        )}
+      <ChannelKeyEnvironmentFields
+        multiKey={props.multiKey ?? false}
+        keyCount={props.keyCount}
       />
-      {!profileEnabled && (
-        <p className='text-muted-foreground px-4 pb-3 text-xs'>
-          {t(
-            'Client synthesis is off. TLS, headers and body use the standard new-api relay behavior.'
-          )}
-        </p>
-      )}
-      {profileEnabled && enabled && (
-        <div className='border-border mx-4 mb-3 rounded-lg border'>
-          <FormField
-            control={form.control}
-            name='client_device_seed'
-            render={({ field, fieldState }) => (
-              <FormItem className='px-4 py-3'>
-                <div className='flex flex-wrap items-center justify-between gap-2'>
-                  <FormLabel>{t('Device Identity')}</FormLabel>
-                  <FormControl>
-                    <Button
-                      type='button'
-                      variant='outline'
-                      size='sm'
-                      onClick={() => field.onChange(nanoid())}
-                    >
-                      {t('Regenerate Device Identity')}
-                    </Button>
-                  </FormControl>
-                </div>
-                <FormDescription aria-live='polite'>
-                  {field.value
-                    ? t('Saved configuration stays stable until regenerated.')
-                    : t('Using the default isolated identity.')}
-                  {fieldState.isDirty && (
-                    <span className='text-warning block'>
-                      {t('New identity configuration pending save.')}
-                    </span>
-                  )}
-                </FormDescription>
-              </FormItem>
-            )}
-          />
-          <FormField
-            control={form.control}
-            name='client_session_seed'
-            render={({ field, fieldState }) => (
-              <FormItem className='px-4 py-3'>
-                <div className='flex flex-wrap items-center justify-between gap-2'>
-                  <FormLabel>{t('Session Identity')}</FormLabel>
-                  <FormControl>
-                    <Button
-                      type='button'
-                      variant='outline'
-                      size='sm'
-                      onClick={() => field.onChange(nanoid())}
-                    >
-                      {t('Regenerate Session Identity')}
-                    </Button>
-                  </FormControl>
-                </div>
-                <FormDescription aria-live='polite'>
-                  {field.value
-                    ? t('Saved configuration stays stable until regenerated.')
-                    : t('Using the default isolated identity.')}
-                  {fieldState.isDirty && (
-                    <span className='text-warning block'>
-                      {t('New identity configuration pending save.')}
-                    </span>
-                  )}
-                </FormDescription>
-              </FormItem>
-            )}
-          />
+      {keyEnvironments && (
+        <>
+          <ChannelTLSFingerprintFields />
           <p className='text-muted-foreground px-4 pb-3 text-xs'>
             {t(
-              'Device/session overrides apply to matching Claude Code or Codex requests only. Users and conversations remain isolated. Rotating sessions changes cache keys; it does not change TLS.'
+              "WebSocket connections use the conversation's bound key and CLI profile. Existing connections keep their key; disabling a key affects new connections."
             )}
           </p>
           {websocket && (
-            <p className='text-warning px-4 pb-3 text-xs'>
+            <p className='text-muted-foreground px-4 pb-3 text-xs'>
               {t(
-                'TLS presets apply to HTTPS requests; WebSocket keeps its existing handshake.'
+                'Responses WebSocket is supported on OpenAI and Codex channels. Realtime is supported on OpenAI channels. Claude Messages and Responses Compact use HTTPS.'
               )}
             </p>
           )}
-        </div>
+        </>
+      )}
+      {/* Each key brings its own version, TLS, device and session. */}
+      {!keyEnvironments && (
+        <>
+          <ChannelCLIVersionFields />
+          {profileEnabled && !hasVersion && <ChannelTLSFingerprintFields />}
+          <FormField
+            control={form.control}
+            name='custom_client_identity_enabled'
+            render={({ field }) => (
+              <FormItem className='px-4 py-3'>
+                <div className='flex items-center justify-between gap-3'>
+                  <div className='space-y-0.5'>
+                    <FormLabel>
+                      {t('Custom Device and Session Identity')}
+                    </FormLabel>
+                    <FormDescription>
+                      {t(
+                        'Controls only device/session identities. Turning it off restores their isolated defaults without changing the selected CLI version or TLS.'
+                      )}
+                    </FormDescription>
+                  </div>
+                  <FormControl>
+                    <Switch
+                      checked={profileEnabled && (field.value ?? false)}
+                      disabled={!profileEnabled}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
+                </div>
+              </FormItem>
+            )}
+          />
+          {!profileEnabled && (
+            <p className='text-muted-foreground px-4 pb-3 text-xs'>
+              {t(
+                'Client synthesis is off. TLS, headers and body use the standard new-api relay behavior.'
+              )}
+            </p>
+          )}
+          {profileEnabled && enabled && (
+            <div className='border-border mx-4 mb-3 rounded-lg border'>
+              <FormField
+                control={form.control}
+                name='client_device_seed'
+                render={({ field, fieldState }) => (
+                  <FormItem className='px-4 py-3'>
+                    <div className='flex flex-wrap items-center justify-between gap-2'>
+                      <FormLabel>{t('Device Identity')}</FormLabel>
+                      <FormControl>
+                        <Button
+                          type='button'
+                          variant='outline'
+                          size='sm'
+                          onClick={() => field.onChange(nanoid())}
+                        >
+                          {t('Regenerate Device Identity')}
+                        </Button>
+                      </FormControl>
+                    </div>
+                    <FormDescription aria-live='polite'>
+                      {field.value
+                        ? t(
+                            'Saved configuration stays stable until regenerated.'
+                          )
+                        : t('Using the default isolated identity.')}
+                      {fieldState.isDirty && (
+                        <span className='text-warning block'>
+                          {t('New identity configuration pending save.')}
+                        </span>
+                      )}
+                    </FormDescription>
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name='client_session_seed'
+                render={({ field, fieldState }) => (
+                  <FormItem className='px-4 py-3'>
+                    <div className='flex flex-wrap items-center justify-between gap-2'>
+                      <FormLabel>{t('Session Identity')}</FormLabel>
+                      <FormControl>
+                        <Button
+                          type='button'
+                          variant='outline'
+                          size='sm'
+                          onClick={() => field.onChange(nanoid())}
+                        >
+                          {t('Regenerate Session Identity')}
+                        </Button>
+                      </FormControl>
+                    </div>
+                    <FormDescription aria-live='polite'>
+                      {field.value
+                        ? t(
+                            'Saved configuration stays stable until regenerated.'
+                          )
+                        : t('Using the default isolated identity.')}
+                      {fieldState.isDirty && (
+                        <span className='text-warning block'>
+                          {t('New identity configuration pending save.')}
+                        </span>
+                      )}
+                    </FormDescription>
+                  </FormItem>
+                )}
+              />
+              <p className='text-muted-foreground px-4 pb-3 text-xs'>
+                {t(
+                  'Device/session overrides apply to matching Claude Code or Codex requests only. Users and conversations remain isolated. Rotating sessions changes cache keys; it does not change TLS.'
+                )}
+              </p>
+              {websocket && (
+                <p className='text-warning px-4 pb-3 text-xs'>
+                  {t(
+                    'TLS presets apply to HTTPS requests; WebSocket keeps its existing handshake.'
+                  )}
+                </p>
+              )}
+            </div>
+          )}
+        </>
       )}
     </>
   )

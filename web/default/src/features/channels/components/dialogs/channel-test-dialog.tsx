@@ -89,7 +89,10 @@ import { useIsMobile } from '@/hooks/use-mobile'
 
 import { updateChannel } from '../../api'
 import {
+  buildChannelTestModelEntries,
+  type ChannelTestModelEntry,
   channelsQueryKeys,
+  filterChannelTestModelEntries,
   formatResponseTime,
   handleTestChannel,
 } from '../../lib'
@@ -109,9 +112,7 @@ type ChannelTestDialogContentProps = ChannelTestDialogProps & {
   currentRow: Channel
 }
 
-type ModelRow = {
-  model: string
-}
+type ModelRow = ChannelTestModelEntry
 
 type TestStatus = 'idle' | 'testing' | 'success' | 'error'
 
@@ -448,14 +449,23 @@ function ChannelTestDialogContent({
       .filter(Boolean)
   }, [modelsValue])
 
+  // The Models list as saved; deleting failed models only ever rewrites this.
   const models = useMemo(
     () => baseModels.filter((model) => !removedModels.has(model)),
     [baseModels, removedModels]
   )
 
+  const testEntries = useMemo(
+    () => buildChannelTestModelEntries(models, currentRow.model_mapping),
+    [models, currentRow.model_mapping]
+  )
+
   const successModels = useMemo(
-    () => models.filter((model) => testResults[model]?.status === 'success'),
-    [models, testResults]
+    () =>
+      testEntries
+        .map((entry) => entry.model)
+        .filter((model) => testResults[model]?.status === 'success'),
+    [testEntries, testResults]
   )
 
   const failedModels = useMemo(
@@ -463,15 +473,14 @@ function ChannelTestDialogContent({
     [models, testResults]
   )
 
-  const filteredModels = useMemo(() => {
-    if (!searchTerm) return models
-    const keyword = searchTerm.toLowerCase()
-    return models.filter((model) => model.toLowerCase().includes(keyword))
-  }, [models, searchTerm])
-
   const tableData = useMemo<ModelRow[]>(
-    () => filteredModels.map((model) => ({ model })),
-    [filteredModels]
+    () => filterChannelTestModelEntries(testEntries, searchTerm),
+    [testEntries, searchTerm]
+  )
+
+  const filteredModels = useMemo(
+    () => tableData.map((entry) => entry.model),
+    [tableData]
   )
 
   const markModelTesting = useCallback((key: string, isTesting: boolean) => {
@@ -867,21 +876,50 @@ function ChannelTestDialogContent({
         accessorKey: 'model',
         header: t('Model'),
         cell: ({ row }) => {
-          const model = row.original.model
+          const { model, upstreamModel, listed } = row.original
           const isDefault = defaultTestModel === model
 
           return (
-            <div className='flex w-max items-center gap-2 whitespace-nowrap'>
-              <span className='font-medium whitespace-nowrap' title={model}>
-                {model}
-              </span>
-              {isDefault && (
-                <StatusBadge
-                  label={t('Default')}
-                  variant='info'
-                  size='sm'
-                  copyable={false}
-                />
+            <div className='flex w-max flex-col gap-0.5 whitespace-nowrap'>
+              <div className='flex items-center gap-2'>
+                <span className='font-medium whitespace-nowrap' title={model}>
+                  {model}
+                </span>
+                {isDefault && (
+                  <StatusBadge
+                    label={t('Default')}
+                    variant='info'
+                    size='sm'
+                    copyable={false}
+                  />
+                )}
+                {!listed && (
+                  <Tooltip>
+                    <TooltipTrigger render={<span className='inline-flex' />}>
+                      <StatusBadge
+                        label={t('Not in Models')}
+                        variant='warning'
+                        size='sm'
+                        copyable={false}
+                      />
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      {t(
+                        'This model mapping alias is not in the Models list, so live requests cannot reach it until it is added.'
+                      )}
+                    </TooltipContent>
+                  </Tooltip>
+                )}
+              </div>
+              {upstreamModel && (
+                <span
+                  className='text-muted-foreground text-xs whitespace-nowrap'
+                  title={t('Mapped to upstream model {{model}}', {
+                    model: upstreamModel,
+                  })}
+                >
+                  → {upstreamModel}
+                </span>
               )}
             </div>
           )

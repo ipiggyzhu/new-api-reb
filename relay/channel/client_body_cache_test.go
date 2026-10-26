@@ -109,7 +109,7 @@ func TestClaudeCLIOwnsCacheBreakpointsOfConvertedRequests(t *testing.T) {
 	converted, shaped, c, info := convertAndShapeOpenAIRequest(t, "claude", withClientCache.Replace(oddlyCachedOpenAIRequest))
 	assert.Equal(t, map[string]string{
 		"system.0.cache_control":                       "ephemeral 1h",
-		"system.1.cache_control":                       "ephemeral",
+		"system.1.cache_control":                       "ephemeral 1h",
 		"messages.0.content.0.cache_control":           "ephemeral 1h",
 		"messages.2.content.0.content.0.cache_control": "ephemeral",
 	}, claudeCacheBreakpoints(t, converted), "conversion passes the client's breakpoints to the shaping layer")
@@ -136,7 +136,7 @@ func TestConvertedCacheBreakpointsSurviveWithoutCLIShaping(t *testing.T) {
 			assert.Equal(t, converted, final)
 			assert.Equal(t, map[string]string{
 				"system.0.cache_control":                       "ephemeral 1h",
-				"system.1.cache_control":                       "ephemeral",
+				"system.1.cache_control":                       "ephemeral 1h",
 				"messages.0.content.0.cache_control":           "ephemeral 1h",
 				"messages.2.content.0.content.0.cache_control": "ephemeral",
 			}, claudeCacheBreakpoints(t, final))
@@ -232,6 +232,30 @@ func TestClaudeCLIKeepsOnlyNativeClaudeCodeBreakpoints(t *testing.T) {
 	}
 }
 
+// A custom-content document's text blocks carry breakpoints as well. A
+// non-native sender's are stripped like any other, so the profile's placement
+// stays the whole cache layout: no fifth breakpoint and no 5m-before-1h order.
+func TestClaudeCLIStripsDocumentSourceBreakpoints(t *testing.T) {
+	request := `{"model":"claude-sonnet-4-5","max_tokens":1024,
+		"system":[{"type":"text","text":"a"},{"type":"text","text":"b"}],
+		"messages":[{"role":"user","content":[
+			{"type":"document","source":{"type":"content","content":[{"type":"text","text":"chapter 1"@ttl5m},{"type":"text","text":"chapter 2"@ttl1h}]}},
+			{"type":"text","text":"summarize"}]}]}`
+	c, info := cliTestRequest("claude")
+	c.Request.Header.Set("User-Agent", "Anthropic/Python 0.60.0")
+	info.RelayFormat = types.RelayFormatClaude
+	info.InitRequestConversionChain()
+
+	shaped := shapeClaudeMessagesBody(t, c, info, []byte(withClientCache.Replace(request)))
+	assert.JSONEq(t, string(shapeClaudeMessagesBody(t, c, info, []byte(withoutClientCache.Replace(request)))), string(shaped))
+	assert.Equal(t, map[string]string{
+		"system.0.cache_control":             "ephemeral",
+		"system.1.cache_control":             "ephemeral",
+		"messages.0.content.1.cache_control": "ephemeral",
+	}, claudeCacheBreakpoints(t, shaped))
+	assert.Equal(t, "chapter 2", gjson.GetBytes(shaped, "messages.0.content.0.source.content.1.text").String())
+}
+
 // Codex has no cache breakpoints and its prompt cache identity is the CLI
 // session: caller cache fields, and Anthropic cache_control from a conversion
 // or passthrough, must never reach a Codex-shaped upstream.
@@ -276,6 +300,28 @@ func TestCodexCLIOwnsPromptCacheFields(t *testing.T) {
 			assert.Contains(t, string(data), `"name":"wrapped"`)
 		})
 	}
+}
+
+// A Codex caller that sends no session hint at all still gets one
+// prompt_cache_key per conversation: later turns repeat the opening, so they
+// keep the first turn's key while a different conversation gets its own.
+func TestCodexCLIPromptCacheKeyStableWithoutSessionHint(t *testing.T) {
+	cacheKey := func(requestID, input string) string {
+		c, info := cliTestRequest("codex")
+		c.Request.Header.Del("session-id")
+		info.RequestId = requestID
+		body := `{"model":"gpt-6-astra","instructions":"system","input":[` + input + `]}`
+		_, reader, _, err := prepareCLIRequest(c, info, "https://upstream.test/v1/responses", strings.NewReader(body))
+		require.NoError(t, err)
+		data, err := io.ReadAll(reader)
+		require.NoError(t, err)
+		return gjson.GetBytes(data, "prompt_cache_key").String()
+	}
+	opening := `{"role":"user","content":[{"type":"input_text","text":"fix the login bug"}]}`
+	first := cacheKey("req-1", opening)
+	require.NotEmpty(t, first)
+	assert.Equal(t, first, cacheKey("req-2", opening+`,{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]},{"role":"user","content":[{"type":"input_text","text":"now add tests"}]}`))
+	assert.NotEqual(t, first, cacheKey("req-3", `{"role":"user","content":[{"type":"input_text","text":"another task"}]}`))
 }
 
 // The reverse conversion (Claude -> Chat -> Responses) is the way a Claude

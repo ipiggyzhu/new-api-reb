@@ -1,6 +1,7 @@
 package common
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/http"
@@ -43,7 +44,78 @@ var paramOverrideSensitivePathPrefixes = []string{
 }
 
 type paramOverrideAuditRecorder struct {
+	audit bool
 	lines []string
+	// fields are the top-level body keys applied operations wrote or deleted.
+	fields map[string]bool
+}
+
+// ParamOverrideWrites records what a channel's param override wrote into the
+// request body, so that later CLI profile shaping keeps the administrator's
+// explicit values instead of replacing them with profile defaults.
+type ParamOverrideWrites struct {
+	// Fields are top-level body keys an applied operation set, changed or
+	// deleted, including ones it set to the value they already had.
+	Fields map[string]bool
+	// Breakpoints counts the cache_control-bearing objects the override added
+	// or changed, keyed by ParamOverrideBreakpointKey.
+	Breakpoints map[string]int
+}
+
+func (w *ParamOverrideWrites) Wrote(field string) bool {
+	return w != nil && w.Fields[field]
+}
+
+// WroteBreakpoint reports whether the override put this cache_control-bearing
+// object (a raw JSON object) into the body.
+func (w *ParamOverrideWrites) WroteBreakpoint(object []byte) bool {
+	return w != nil && len(w.Breakpoints) > 0 && w.Breakpoints[ParamOverrideBreakpointKey(object)] > 0
+}
+
+// ParamOverrideBreakpointKey identifies a JSON object independently of its
+// key order and formatting.
+func ParamOverrideBreakpointKey(object []byte) string {
+	var value any
+	if err := common.Unmarshal(object, &value); err != nil {
+		return string(object)
+	}
+	canonical, err := common.Marshal(value)
+	if err != nil {
+		return string(object)
+	}
+	return string(canonical)
+}
+
+// collectParamOverrideBreakpoints counts every object with a cache_control key
+// below the top level of value.
+func collectParamOverrideBreakpoints(value gjson.Result, top bool, found map[string]int) {
+	if value.IsObject() && !top && value.Get("cache_control").Exists() {
+		found[ParamOverrideBreakpointKey([]byte(value.Raw))]++
+	}
+	if value.IsObject() || value.IsArray() {
+		value.ForEach(func(_, child gjson.Result) bool {
+			collectParamOverrideBreakpoints(child, false, found)
+			return true
+		})
+	}
+}
+
+// paramOverrideTopLevelField returns the first segment of a gjson/sjson path.
+func paramOverrideTopLevelField(path string) string {
+	path = strings.TrimSpace(path)
+	var field strings.Builder
+	for i := 0; i < len(path); i++ {
+		if path[i] == '\\' && i+1 < len(path) {
+			i++
+			field.WriteByte(path[i])
+			continue
+		}
+		if path[i] == '.' {
+			break
+		}
+		field.WriteByte(path[i])
+	}
+	return field.String()
 }
 
 type ConditionOperation struct {
@@ -182,21 +254,35 @@ func ApplyParamOverrideWithRelayInfo(jsonData []byte, info *RelayInfo) ([]byte, 
 	}
 
 	overrideCtx := BuildParamOverrideContext(info)
-	var recorder *paramOverrideAuditRecorder
-	if shouldEnableParamOverrideAudit(paramOverride) {
-		recorder = &paramOverrideAuditRecorder{}
-		overrideCtx[paramOverrideContextAuditRecorder] = recorder
-	}
+	recorder := &paramOverrideAuditRecorder{audit: shouldEnableParamOverrideAudit(paramOverride), fields: map[string]bool{}}
+	overrideCtx[paramOverrideContextAuditRecorder] = recorder
 	result, err := ApplyParamOverride(jsonData, paramOverride, overrideCtx)
 	if err != nil {
 		return nil, err
 	}
 	syncRuntimeHeaderOverrideFromContext(info, overrideCtx)
 	if info != nil {
-		if recorder != nil {
+		if recorder.audit {
 			info.ParamOverrideAudit = recorder.lines
 		} else {
 			info.ParamOverrideAudit = nil
+		}
+		writes := &ParamOverrideWrites{Fields: recorder.fields}
+		if bytes.Contains(result, []byte(`"cache_control"`)) {
+			before, after := map[string]int{}, map[string]int{}
+			collectParamOverrideBreakpoints(gjson.ParseBytes(jsonData), true, before)
+			collectParamOverrideBreakpoints(gjson.ParseBytes(result), true, after)
+			for key, n := range after {
+				if n > before[key] {
+					if writes.Breakpoints == nil {
+						writes.Breakpoints = map[string]int{}
+					}
+					writes.Breakpoints[key] = n - before[key]
+				}
+			}
+		}
+		if info.ChannelMeta != nil {
+			info.ChannelMeta.ParamOverrideWrites = writes
 		}
 	}
 	return result, nil
@@ -242,6 +328,21 @@ func getParamOverrideAuditRecorder(context map[string]interface{}) *paramOverrid
 
 func (r *paramOverrideAuditRecorder) recordOperation(mode, path, from, to string, value interface{}) {
 	if r == nil {
+		return
+	}
+	if r.fields != nil {
+		switch mode {
+		case "move":
+			r.fields[paramOverrideTopLevelField(from)] = true
+			r.fields[paramOverrideTopLevelField(to)] = true
+		case "copy":
+			r.fields[paramOverrideTopLevelField(to)] = true
+		case "return_error", "set_header", "delete_header", "copy_header", "move_header", "pass_headers", "sync_fields":
+		default:
+			r.fields[paramOverrideTopLevelField(path)] = true
+		}
+	}
+	if !r.audit || mode == "prune_objects" {
 		return
 	}
 	line := buildParamOverrideAuditLine(mode, path, from, to, value)
@@ -891,6 +992,7 @@ func applyOperations(jsonData []byte, operations []ParamOperation, conditionCont
 				if err != nil {
 					break
 				}
+				auditRecorder.recordOperation("prune_objects", path, "", "", op.Value)
 			}
 		case "set_header":
 			err = setHeaderOverrideInContext(context, op.Path, op.Value, op.KeepOrigin)

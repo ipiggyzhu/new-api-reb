@@ -19,6 +19,13 @@ import (
 // appends extended-cache-ttl-2025-04-11 (/tmp/capture/005.json).
 const claudeCode2306Beta = "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,inline-tools-2026-09-15,advisor-tool-2026-03-01,advanced-tool-use-2025-11-20,effort-2025-11-24"
 
+// The same for Linux 2.1.288 and 2.1.282 (/tmp/t20/cap/<version>-5m-net and
+// -1h-net), whose 1h captures append the same flag.
+const (
+	claudeCode2288Beta = "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,inline-tools-2026-09-15,advisor-tool-2026-03-01,effort-2025-11-24"
+	claudeCode2282Beta = "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,per-turn-control-2026-07-01,mid-conversation-tool-changes-2026-07-01,advisor-tool-2026-03-01,effort-2025-11-24"
+)
+
 type cliWireCapture struct {
 	header http.Header
 	body   []byte
@@ -67,8 +74,8 @@ func TestClaudeVersionProfileTTLModeShapesConvertedRequest(t *testing.T) {
 			// The capture's layout: the bare billing block first, then the
 			// last two system blocks and the last message block, nothing on
 			// tools. Exact JSON, key order included.
-			assert.Equal(t, `{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.306.813; cc_entrypoint=sdk-cli;"}`,
-				gjson.GetBytes(got.body, "system.0").Raw)
+			assert.Equal(t, `{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.306.aba; cc_entrypoint=sdk-cli;"}`,
+				gjson.GetBytes(got.body, "system.0").Raw, `the client's suffix for "first question"`)
 			breakpoints := []string{"system.1.cache_control", "system.2.cache_control", "messages.3.content.0.cache_control"}
 			require.Len(t, claudeCacheBreakpoints(t, got.body), len(breakpoints))
 			for _, path := range breakpoints {
@@ -86,8 +93,9 @@ func TestClaudeVersionProfileTTLModeShapesConvertedRequest(t *testing.T) {
 }
 
 // Under a 1h profile the real Claude Code client still decides its own cache
-// layout (task 4): its 1h and 5m breakpoints reach upstream unchanged. Only
-// when it sent none does the shaping layer place the profile's breakpoints.
+// layout (task 4): its 1h and 5m breakpoints reach upstream unchanged, behind
+// the profile's billing block. Only when it sent none does the shaping layer
+// place the profile's breakpoints.
 func TestClaudeVersionProfileTTLModeKeepsNativeClaudeCodeBreakpoints(t *testing.T) {
 	const profile = "claude-2.1.306-linux-x64-1h"
 	c, info := nativeClaudeCodeRequest()
@@ -96,11 +104,11 @@ func TestClaudeVersionProfileTTLModeKeepsNativeClaudeCodeBreakpoints(t *testing.
 	shaped := shapeClaudeMessagesBody(t, c, info, sent)
 	assert.Equal(t, map[string]string{
 		"tools.0.cache_control":                        "ephemeral 1h",
-		"system.1.cache_control":                       "ephemeral 1h",
+		"system.2.cache_control":                       "ephemeral 1h",
 		"messages.0.content.0.cache_control":           "ephemeral",
 		"messages.2.content.0.content.0.cache_control": "ephemeral",
 	}, claudeCacheBreakpoints(t, shaped))
-	assert.JSONEq(t, gjson.GetBytes(sent, "system").Raw, gjson.GetBytes(shaped, "system").Raw)
+	assertProfileBillingLeads(t, "2.1.306", string(sent), shaped)
 	assert.JSONEq(t, gjson.GetBytes(sent, "messages").Raw, gjson.GetBytes(shaped, "messages").Raw)
 	assert.Equal(t, `{"type":"ephemeral"}`, gjson.GetBytes(shaped, "messages.0.content.0.cache_control").Raw, "a native 5m breakpoint must not gain the profile TTL")
 	assert.Equal(t, "Write", gjson.GetBytes(shaped, "tools.0.name").String(), "a native cache boundary must not move")
@@ -110,10 +118,41 @@ func TestClaudeVersionProfileTTLModeKeepsNativeClaudeCodeBreakpoints(t *testing.
 	uncached := shapeClaudeMessagesBody(t, c, info, []byte(`{"model":"claude-sonnet-4-5","max_tokens":32000,
 		"system":[{"type":"text","text":"You are Claude Code."},{"type":"text","text":"project instructions"}],
 		"messages":[{"role":"user","content":[{"type":"text","text":"thanks"}]}]}`))
-	breakpoints := []string{"system.0.cache_control", "system.1.cache_control", "messages.0.content.0.cache_control"}
+	breakpoints := []string{"system.1.cache_control", "system.2.cache_control", "messages.0.content.0.cache_control"}
 	require.Len(t, claudeCacheBreakpoints(t, uncached), len(breakpoints))
 	for _, path := range breakpoints {
 		assert.Equal(t, `{"type":"ephemeral","ttl":"1h"}`, gjson.GetBytes(uncached, path).Raw, path)
+	}
+}
+
+// Choosing the 1h profile over the default one changes nothing on the wire for
+// a real Claude Code client that set its own breakpoints: same body bytes, same
+// headers, whichever TTLs the client chose. The profile's cache mode only
+// reaches requests whose breakpoints the profile places.
+func TestClaudeVersionProfileTTLModeLeavesNativeRequestsAlone(t *testing.T) {
+	server, captures := cliTLSUpstream(t)
+	bodies := map[string]string{
+		"client sends 1h and 5m": withClientCache.Replace(strings.Replace(claudeCodeCachedRequest, "@extra", "", 1)),
+		"client sends only 5m": strings.NewReplacer("@ttl1h", `,"cache_control":{"type":"ephemeral"}`, "@ttl5m", `,"cache_control":{"type":"ephemeral"}`).
+			Replace(strings.Replace(claudeCodeCachedRequest, "@extra", "", 1)),
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			wire := make(map[string]cliWireCapture)
+			for _, profile := range []string{"claude-2.1.306-linux-x64", "claude-2.1.306-linux-x64-1h"} {
+				c, info := nativeClaudeCodeRequest()
+				info.ChannelSetting.CLIVersionProfile = profile
+				withOriginalRequest(t, c, body)
+				resp, err := DoApiRequest(cliTransportAdaptor{url: server.URL + "/v1/messages"}, c, info, strings.NewReader(body))
+				require.NoError(t, err)
+				require.NoError(t, resp.Body.Close())
+				wire[profile] = <-captures
+			}
+			def, hour := wire["claude-2.1.306-linux-x64"], wire["claude-2.1.306-linux-x64-1h"]
+			assert.Equal(t, string(def.body), string(hour.body))
+			assert.Equal(t, def.header, hour.header)
+			assert.JSONEq(t, gjson.Get(body, "messages").Raw, gjson.GetBytes(hour.body, "messages").Raw, "the client's breakpoints reach upstream as sent")
+		})
 	}
 }
 

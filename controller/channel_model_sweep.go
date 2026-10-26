@@ -235,8 +235,13 @@ func testChannelModelGroup(ctx context.Context, channelID int, testUserID int, i
 				// from the selected key cannot remove the model for every key.
 				if verdict == sweepVerdictFail && channel.ChannelInfo.IsMultiKey {
 					selectedKey := common.GetContextKeyString(probe.context, constant.ContextKeyChannelKey)
+					keyEnvironments := channel.GetSetting().KeyEnvironments
 					for index, key := range channel.GetKeys() {
 						if status, exists := channel.ChannelInfo.MultiKeyStatusList[index]; exists && status != common.ChannelStatusEnabled {
+							continue
+						}
+						// An unassigned key serves no traffic, so its access does not count.
+						if _, assigned := channel.KeyEnvironmentProfile(key); keyEnvironments && !assigned {
 							continue
 						}
 						if key == selectedKey {
