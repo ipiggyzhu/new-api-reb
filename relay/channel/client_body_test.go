@@ -381,3 +381,62 @@ func TestCLIWebsocketUsesSameBodyAndIdentityAsHTTPFallback(t *testing.T) {
 		})
 	}
 }
+
+// The upstream keepalive continues the last real CLI session on a channel. A
+// real request records its model, user, token and conversation seed; a
+// synthesized request that carries them back must wear exactly the client
+// identity the real one wore, as a new turn, and must not itself become the
+// recorded session.
+func TestCLISessionContinuationReusesIdentity(t *testing.T) {
+	for _, family := range []string{"codex", "claude"} {
+		t.Run(family, func(t *testing.T) {
+			channelId := 9001
+			t.Cleanup(func() { service.ForgetChannelCLISessionForTest(channelId) })
+			path, body := "/v1/responses", `{"model":"gpt-6.1-sol","input":"hello","reasoning":{"effort":"xhigh"}}`
+			if family == "claude" {
+				path, body = "/v1/messages", `{"model":"claude-opus-5","messages":[{"role":"user","content":"hello"}]}`
+			}
+			capture := func(c *gin.Context, info *relaycommon.RelayInfo) (device, session, turn string) {
+				_, reader, headers, err := prepareCLIRequest(c, info, "https://upstream.test"+path, strings.NewReader(body))
+				require.NoError(t, err)
+				data, err := io.ReadAll(reader)
+				require.NoError(t, err)
+				if family == "claude" {
+					identity := gjson.Parse(gjson.GetBytes(data, "metadata.user_id").String())
+					return identity.Get("device_id").String(), headers.Get("X-Claude-Code-Session-Id"), ""
+				}
+				return gjson.GetBytes(data, "client_metadata.x-codex-installation-id").String(), headers.Get("session-id"),
+					gjson.GetBytes(data, "client_metadata.turn_id").String()
+			}
+
+			c, info := cliTestRequest(family)
+			info.ChannelId, info.OriginModelName = channelId, "requested-model"
+			info.ChannelSetting.ClientDeviceSeed, info.ChannelSetting.ClientSessionSeed = "device-a", "session-a"
+			realDevice, realSession, realTurn := capture(c, info)
+			recorded, ok := service.LastChannelCLISession(channelId)
+			require.True(t, ok)
+			assert.Equal(t, service.ChannelCLISession{
+				ModelName: "requested-model", UserId: 42, TokenId: 7, Seed: "caller-session",
+				Reasoning: recorded.Reasoning,
+			}, recorded)
+			if family == "codex" {
+				assert.JSONEq(t, `{"effort":"xhigh"}`, string(recorded.Reasoning))
+			}
+
+			c, info = cliTestRequest(family)
+			c.Request.Header.Del("session-id")
+			info.ChannelId, info.RequestId, info.IsChannelTest = channelId, "keepalive-turn", true
+			info.ChannelSetting.ClientDeviceSeed, info.ChannelSetting.ClientSessionSeed = "device-a", "session-a"
+			info.UserId, info.TokenId, info.CLISessionSeed = recorded.UserId, recorded.TokenId, recorded.Seed
+			device, session, turn := capture(c, info)
+			assert.Equal(t, realDevice, device)
+			assert.Equal(t, realSession, session)
+			if family == "codex" {
+				assert.NotEqual(t, realTurn, turn, "the keepalive is a new turn of the session")
+			}
+			again, ok := service.LastChannelCLISession(channelId)
+			require.True(t, ok)
+			assert.Equal(t, recorded, again, "a synthesized request is not a real session")
+		})
+	}
+}

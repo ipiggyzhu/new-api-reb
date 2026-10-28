@@ -42,6 +42,8 @@ func cliField(value any) json.RawMessage {
 type cliIdentity struct {
 	device, installation, session, turn, window, contextWindow string
 	startedAt                                                  int64
+	// seed is the conversation the session ids derive from.
+	seed string
 }
 
 // Keep stable, tenant-isolated pseudorandom IDs while matching the sample's
@@ -77,11 +79,12 @@ func requestCLIIdentity(c *gin.Context, info *relaycommon.RelayInfo, family stri
 	if sessionSeed != "" {
 		sessionKey = sessionSeed
 	}
-	seed := ""
+	seed := info.CLISessionSeed
 	for _, name := range []string{"session-id", "thread-id", "x-claude-code-session-id"} {
-		if seed = c.Request.Header.Get(name); seed != "" {
+		if seed != "" {
 			break
 		}
+		seed = c.Request.Header.Get(name)
 	}
 	if seed == "" {
 		seed = gjson.ParseBytes(body["prompt_cache_key"]).String()
@@ -122,6 +125,7 @@ func requestCLIIdentity(c *gin.Context, info *relaycommon.RelayInfo, family stri
 		turn:          isolatedCLIUUID(sessionKey, scope+":turn:"+requestID, sessionVersion, startedAt.UnixMilli()),
 		contextWindow: isolatedCLIUUID(sessionKey, scope+":context-window:"+seed, sessionVersion, sessionTime),
 		startedAt:     startedAt.UnixMilli(),
+		seed:          seed,
 	}
 	// Codex's window identifier is the thread UUID followed by the window index.
 	identity.window = identity.session + ":0"
@@ -179,6 +183,13 @@ func prepareCLIRequest(c *gin.Context, info *relaycommon.RelayInfo, requestURL s
 		return requestURL, reader, nil, fmt.Errorf("CLI request body must be a JSON object")
 	}
 	identity := requestCLIIdentity(c, info, family, body)
+	// Recorded before shaping, so the reasoning is the caller's own.
+	if !info.IsChannelTest {
+		service.RecordChannelCLISession(info.ChannelId, service.ChannelCLISession{
+			ModelName: info.OriginModelName, UserId: info.UserId, TokenId: info.TokenId,
+			MultiKeyIndex: info.ChannelMultiKeyIndex, Seed: identity.seed, Reasoning: body["reasoning"],
+		})
+	}
 	headers := make(http.Header)
 	// Preserve the downstream streaming contract, including explicit false. CLI
 	// defaults must not silently turn a synchronous request into an SSE response.

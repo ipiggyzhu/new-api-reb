@@ -159,6 +159,11 @@ type RelayInfo struct {
 	UseRuntimeHeadersOverride             bool
 	ParamOverrideAudit                    []string
 
+	// CLISessionSeed is the conversation a synthesized CLI request continues.
+	// The upstream keepalive sets it to the last real request's seed so its
+	// client identity is that session's instead of a new one.
+	CLISessionSeed string
+
 	// UpstreamRequestBodySize is the byte size of the marshaled upstream request
 	// body. It is set when the body is wrapped in a BodyStorage (see
 	// relay/common/outbound_body.go), so that DoApiRequest can populate

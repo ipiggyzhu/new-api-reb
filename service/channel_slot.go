@@ -1,6 +1,7 @@
 package service
 
 import (
+	"encoding/json"
 	"sync"
 	"sync/atomic"
 
@@ -70,6 +71,46 @@ func SetChannelLastActiveForTest(channelId int, at int64) {
 	stamp := new(atomic.Int64)
 	stamp.Store(at)
 	channelLastActive.Store(channelId, stamp)
+}
+
+// ChannelCLISession is what the last real request shaped by a CLI profile
+// (Codex or Claude Code) on a channel looked like to the upstream: the model
+// asked for, the user and token its client identity is scoped to, the key it
+// went out with, and the conversation seed its session id derives from. The
+// upstream keepalive continues this session, so to the upstream it is one more
+// turn of the same client rather than a second client on the same key.
+type ChannelCLISession struct {
+	ModelName     string
+	UserId        int
+	TokenId       int
+	MultiKeyIndex int
+	Seed          string
+	// Reasoning is the Codex request's reasoning object as the caller sent it.
+	Reasoning json.RawMessage
+}
+
+// channelLastCLISession lives in process memory for the same reason as the
+// activity record: a restart forgets it along with the activity it belongs to.
+var channelLastCLISession sync.Map // map[int]ChannelCLISession
+
+func RecordChannelCLISession(channelId int, session ChannelCLISession) {
+	if channelId <= 0 {
+		return
+	}
+	channelLastCLISession.Store(channelId, session)
+}
+
+func LastChannelCLISession(channelId int) (ChannelCLISession, bool) {
+	value, ok := channelLastCLISession.Load(channelId)
+	if !ok {
+		return ChannelCLISession{}, false
+	}
+	return value.(ChannelCLISession), true
+}
+
+// ForgetChannelCLISessionForTest drops channelId's recorded session.
+func ForgetChannelCLISessionForTest(channelId int) {
+	channelLastCLISession.Delete(channelId)
 }
 
 // HoldChannelSlot records that the request now owns a concurrency slot on

@@ -116,17 +116,25 @@ func newKeepaliveUpstream(t *testing.T, respond func(w http.ResponseWriter, r *h
 }
 
 const (
-	keepaliveChatReply      = `{"id":"chatcmpl-keepalive","object":"chat.completion","created":1,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`
-	keepaliveResponsesReply = `{"id":"resp_keepalive","object":"response","created_at":1,"status":"completed","model":"gpt-5-codex","output":[{"type":"message","id":"msg_keepalive","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}`
-	keepaliveClaudeReply    = `{"id":"msg_keepalive","type":"message","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":5,"output_tokens":1}}`
+	keepaliveChatReply       = `{"id":"chatcmpl-keepalive","object":"chat.completion","created":1,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}`
+	keepaliveResponsesReply  = `{"id":"resp_keepalive","object":"response","created_at":1,"status":"completed","model":"gpt-5-codex","output":[{"type":"message","id":"msg_keepalive","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok","annotations":[]}]}],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}`
+	keepaliveResponsesStream = "event: response.completed\ndata: " +
+		`{"type":"response.completed","response":{"id":"resp_keepalive","object":"response","status":"completed","model":"gpt-6.1-sol",` +
+		`"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}` + "\n\n"
+	keepaliveClaudeStream = "event: message_start\ndata: " +
+		`{"type":"message_start","message":{"id":"msg_keepalive","type":"message","role":"assistant","model":"claude-opus-5-5","content":[],"usage":{"input_tokens":5,"output_tokens":1}}}` + "\n\n" +
+		"event: content_block_start\ndata: " + `{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\ndata: " + `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}` + "\n\n" +
+		"event: content_block_stop\ndata: " + `{"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: message_delta\ndata: " + `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}` + "\n\n" +
+		"event: message_stop\ndata: " + `{"type":"message_stop"}` + "\n\n"
 )
 
-// TestChannelKeepaliveRequestShape pins what a keepalive sends upstream: the
-// channel's own key, the test model (else the first model), one user message
-// made of a question from the shared channel-test pool plus the reply
-// instruction, a 16-token cap, and no streaming. The channel's client profile
-// does not apply, so a Claude-profiled Anthropic channel gets none of the
-// Claude Code body, URL or header shaping.
+// TestChannelKeepaliveRequestShape pins what a keepalive sends upstream from a
+// channel without a client profile: the channel's own key, the test model
+// (else the first model), one user message made of a question from the shared
+// channel-test pool plus the reply instruction, a 16-token cap, and no
+// streaming.
 func TestChannelKeepaliveRequestShape(t *testing.T) {
 	wantPrompt := channelKeepaliveTestPrompt + "\n" + channelKeepaliveInstruction
 	for _, tc := range []struct {
@@ -134,12 +142,10 @@ func TestChannelKeepaliveRequestShape(t *testing.T) {
 		channelType int
 		models      string
 		testModel   string
-		profile     string
 		reply       string
 		wantPath    string
 		wantAuth    [2]string
 		wantBody    map[string]string
-		wantAbsent  []string
 	}{
 		{
 			name: "test model wins", channelType: constant.ChannelTypeOpenAI,
@@ -165,17 +171,6 @@ func TestChannelKeepaliveRequestShape(t *testing.T) {
 				"input.0.content": wantPrompt, "max_output_tokens": "16",
 			},
 		},
-		{
-			name: "claude profile does not apply", channelType: constant.ChannelTypeAnthropic,
-			models: "claude-sonnet-4-5", profile: constant.ClientHeaderFamilyClaude, reply: keepaliveClaudeReply,
-			wantPath: "/v1/messages", wantAuth: [2]string{"X-Api-Key", "sk-keepalive"},
-			wantBody: map[string]string{
-				"model": "claude-sonnet-4-5", "messages.#": "1", "messages.0.role": "user",
-				"messages.0.content": wantPrompt, "max_tokens": "16",
-			},
-			// What the Claude Code shaping adds to the body.
-			wantAbsent: []string{"metadata", "thinking", "context_management", "output_config", "system"},
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setupChannelKeepaliveTest(t)
@@ -190,7 +185,6 @@ func TestChannelKeepaliveRequestShape(t *testing.T) {
 			if tc.testModel != "" {
 				channel.TestModel = &tc.testModel
 			}
-			channel.SetSetting(dto.ChannelSettings{SyntheticClientHeadersProfile: tc.profile})
 
 			require.NoError(t, sendChannelKeepalive(context.Background(), channel))
 
@@ -203,17 +197,128 @@ func TestChannelKeepaliveRequestShape(t *testing.T) {
 				assert.Equal(t, want, gjson.GetBytes(request.Body, path).String(), "body field %s: %s", path, request.Body)
 			}
 			assert.False(t, gjson.GetBytes(request.Body, "stream").Bool(), "keepalive must not stream: %s", request.Body)
-			for _, path := range tc.wantAbsent {
-				assert.False(t, gjson.GetBytes(request.Body, path).Exists(), "body field %s must be absent: %s", path, request.Body)
-			}
-			if tc.profile != "" {
-				assert.Empty(t, request.Query, "the profile's ?beta=true must not be added")
-				assert.Empty(t, request.Header.Get("X-Claude-Code-Session-Id"))
-				assert.Empty(t, request.Header.Get("Anthropic-Beta"))
-				assert.NotContains(t, request.Header.Get("User-Agent"), "claude-cli")
-			}
 		})
 	}
+}
+
+// TestChannelKeepaliveWearsClientProfile pins that a keepalive on a channel
+// with a CLI profile goes out as that channel's own CLI: the CLI version's
+// headers and TLS fingerprint, the CLI's endpoint, streaming, and no output
+// limit the CLI would not send. With a real session recorded on the channel it
+// continues that session: the same model and reasoning, and on every keepalive
+// the same client and session ids, derived from that channel's seeds and no
+// other channel's.
+func TestChannelKeepaliveWearsClientProfile(t *testing.T) {
+	setupChannelKeepaliveTest(t)
+	originalSkipVerify := common.TLSInsecureSkipVerify
+	common.TLSInsecureSkipVerify = true
+	service.ResetProxyClientCache()
+	t.Cleanup(func() {
+		common.TLSInsecureSkipVerify = originalSkipVerify
+		service.ResetProxyClientCache()
+	})
+	var mu sync.Mutex
+	var captured []capturedKeepaliveRequest
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		captured = append(captured, capturedKeepaliveRequest{Path: r.URL.Path, Query: r.URL.RawQuery, Header: r.Header.Clone(), Body: body})
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		if strings.HasSuffix(r.URL.Path, "/messages") {
+			_, _ = io.WriteString(w, keepaliveClaudeStream)
+			return
+		}
+		_, _ = io.WriteString(w, keepaliveResponsesStream)
+	}))
+	t.Cleanup(upstream.Close)
+	send := func(channel *model.Channel) capturedKeepaliveRequest {
+		mu.Lock()
+		captured = nil
+		mu.Unlock()
+		require.NoError(t, sendChannelKeepalive(context.Background(), channel))
+		mu.Lock()
+		defer mu.Unlock()
+		require.Len(t, captured, 1)
+		return captured[0]
+	}
+
+	t.Run("codex", func(t *testing.T) {
+		version := service.LookupCLIVersionProfile("codex-0.156.1-windows-x64")
+		require.NotNil(t, version)
+		newChannel := func(id int, seed string) *model.Channel {
+			t.Cleanup(func() { service.ForgetChannelCLISessionForTest(id) })
+			channel := &model.Channel{
+				Id: id, Type: constant.ChannelTypeOpenAI, Key: "sk-codex", Status: common.ChannelStatusEnabled,
+				Models: "gpt-6-astra,gpt-6.1-sol", Group: "default", BaseURL: &upstream.URL,
+			}
+			channel.SetSetting(dto.ChannelSettings{
+				SyntheticClientHeadersProfile: constant.ClientHeaderFamilyCodex, CLIVersionProfile: version.ID,
+				ClientDeviceSeed: "device-" + seed, ClientSessionSeed: "session-" + seed,
+			})
+			return channel
+		}
+		first, second := newChannel(11, "a"), newChannel(12, "b")
+		installation := func(request capturedKeepaliveRequest) string {
+			return gjson.GetBytes(request.Body, "client_metadata.x-codex-installation-id").String()
+		}
+
+		fresh := send(first)
+		assert.Equal(t, "/v1/responses", fresh.Path)
+		assert.Equal(t, "Bearer sk-codex", fresh.Header.Get("Authorization"))
+		for name, value := range version.Headers {
+			assert.Equal(t, value, fresh.Header.Get(name), name)
+		}
+		assert.Equal(t, "gpt-6-astra", gjson.GetBytes(fresh.Body, "model").String(), "no session yet: the first model")
+		assert.True(t, gjson.GetBytes(fresh.Body, "stream").Bool())
+		assert.False(t, gjson.GetBytes(fresh.Body, "max_output_tokens").Exists(), "the Codex CLI sends no output limit: %s", fresh.Body)
+		require.NotEmpty(t, fresh.Header.Get("session-id"))
+		assert.Equal(t, fresh.Header.Get("session-id"), gjson.GetBytes(fresh.Body, "prompt_cache_key").String())
+		require.NotEmpty(t, installation(fresh))
+
+		session := service.ChannelCLISession{
+			ModelName: "gpt-6.1-sol", UserId: 42, TokenId: 7, Seed: "real-session",
+			Reasoning: []byte(`{"effort":"xhigh"}`),
+		}
+		service.RecordChannelCLISession(first.Id, session)
+		service.RecordChannelCLISession(second.Id, session)
+		continued := send(first)
+		assert.Equal(t, "gpt-6.1-sol", gjson.GetBytes(continued.Body, "model").String())
+		assert.Equal(t, "xhigh", gjson.GetBytes(continued.Body, "reasoning.effort").String())
+		assert.NotEqual(t, fresh.Header.Get("session-id"), continued.Header.Get("session-id"), "the real session, not a new one")
+
+		again := send(first)
+		assert.Equal(t, continued.Header.Get("session-id"), again.Header.Get("session-id"))
+		assert.Equal(t, installation(continued), installation(again))
+		assert.NotEqual(t, continued.Header.Get("x-client-request-id"), again.Header.Get("x-client-request-id"), "each keepalive is a new turn")
+
+		other := send(second)
+		assert.NotEqual(t, continued.Header.Get("session-id"), other.Header.Get("session-id"))
+		assert.NotEqual(t, installation(continued), installation(other))
+	})
+
+	t.Run("claude", func(t *testing.T) {
+		version := service.LookupCLIVersionProfile("claude-2.1.306-linux-x64")
+		require.NotNil(t, version)
+		t.Cleanup(func() { service.ForgetChannelCLISessionForTest(13) })
+		channel := &model.Channel{
+			Id: 13, Type: constant.ChannelTypeAnthropic, Key: "sk-claude", Status: common.ChannelStatusEnabled,
+			Models: "claude-opus-5-5", Group: "default", BaseURL: &upstream.URL,
+		}
+		channel.SetSetting(dto.ChannelSettings{
+			SyntheticClientHeadersProfile: constant.ClientHeaderFamilyClaude, CLIVersionProfile: version.ID,
+		})
+
+		request := send(channel)
+		assert.Equal(t, "/v1/messages", request.Path)
+		assert.Equal(t, "beta=true", request.Query)
+		assert.Equal(t, "sk-claude", request.Header.Get("X-Api-Key"))
+		assert.Equal(t, version.Headers["user-agent"], request.Header.Get("User-Agent"))
+		assert.NotEmpty(t, request.Header.Get("X-Claude-Code-Session-Id"))
+		assert.True(t, gjson.GetBytes(request.Body, "stream").Bool())
+		assert.Equal(t, int64(version.MaxTokens), gjson.GetBytes(request.Body, "max_tokens").Int(), "the profile limit, not a keepalive cap: %s", request.Body)
+		assert.NotEmpty(t, gjson.GetBytes(request.Body, "metadata.user_id").String())
+	})
 }
 
 // TestChannelKeepalivePassIsolation pins the scheduler's selection and the

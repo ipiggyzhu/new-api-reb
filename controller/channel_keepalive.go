@@ -146,15 +146,31 @@ func (s *channelKeepaliveSummary) recordFailure(channelId int, err error) {
 // relay controller is not involved, so nothing reaches channel scoring,
 // affinity or auto-disable either, and no concurrency slot is taken, so the
 // keepalive is not recorded as channel activity and cannot keep its own active
-// window open. The client profile does not apply: the
-// request goes out without synthesized client headers, TLS fingerprint or CLI
-// body shaping.
+// window open.
+//
+// To the upstream it is the channel's own client: it wears the channel's
+// client profile (headers, TLS fingerprint, CLI version, device and session
+// seeds), and on a channel whose real traffic is a Codex or Claude Code CLI it
+// continues the last real session there, with its model, user and token scope,
+// key and conversation seed, streams like the CLI does, and sends no output
+// limit the CLI would not send.
 func sendChannelKeepalive(ctx context.Context, channel *model.Channel) error {
 	if lo.Contains(unsupportedTestChannelTypes, channel.Type) {
 		return fmt.Errorf("%s channels have no chat endpoint for a keepalive", constant.GetChannelTypeName(channel.Type))
 	}
+	apiType, _ := common.ChannelType2APIType(channel.Type)
+	channelSetting := channel.GetSetting()
+	channelSetting.Normalize(apiType)
+	family := channelSetting.SyntheticClientHeadersProfile
+	cliProfile := family == constant.ClientHeaderFamilyCodex || family == constant.ClientHeaderFamilyClaude
+	session, continued := service.LastChannelCLISession(channel.Id)
+	continued = continued && cliProfile
+
 	modelName := ""
-	if channel.TestModel != nil {
+	if continued {
+		modelName = session.ModelName
+	}
+	if modelName == "" && channel.TestModel != nil {
 		modelName = strings.TrimSpace(*channel.TestModel)
 	}
 	if modelName == "" {
@@ -170,40 +186,68 @@ func sendChannelKeepalive(ctx context.Context, channel *model.Channel) error {
 	defer cancel()
 
 	prompt := operation_setting.PickChannelTestPrompt() + "\n" + channelKeepaliveInstruction
+	// The CLIs always stream and never cap the output, so a CLI-profiled
+	// keepalive does neither. The ChatGPT Codex backend also refuses
+	// non-streaming requests (the reason the automatic channel test streams for
+	// Codex, commit 5f67d2a2).
+	isStream := cliProfile || channel.Type == constant.ChannelTypeCodex
+	var maxTokens *uint
+	if !cliProfile {
+		maxTokens = lo.ToPtr(uint(channelKeepaliveMaxTokens))
+	}
 	requestPath := "/v1/chat/completions"
 	relayFormat := types.RelayFormatOpenAI
-	isStream := false
 	var request dto.Request = &dto.GeneralOpenAIRequest{
 		Model:     modelName,
-		Stream:    lo.ToPtr(false),
+		Stream:    lo.ToPtr(isStream),
 		Messages:  []dto.Message{{Role: "user", Content: prompt}},
-		MaxTokens: lo.ToPtr(uint(channelKeepaliveMaxTokens)),
+		MaxTokens: maxTokens,
 	}
-	// Codex channels and codex models only exist on the Responses endpoint, as
-	// in the channel test. The ChatGPT Codex backend also refuses non-streaming
-	// requests (the reason the automatic channel test streams for Codex, commit
-	// 5f67d2a2), so that one channel type streams.
-	if channel.Type == constant.ChannelTypeCodex || strings.Contains(strings.ToLower(modelName), "codex") {
+	// Codex channels and codex models only exist on the Responses endpoint, and
+	// an OpenAI channel wearing the Codex profile is a Codex CLI upstream, as in
+	// the channel test.
+	if channel.Type == constant.ChannelTypeCodex || strings.Contains(strings.ToLower(modelName), "codex") ||
+		(channel.Type == constant.ChannelTypeOpenAI && family == constant.ClientHeaderFamilyCodex) {
 		input, err := common.Marshal([]dto.Message{{Role: "user", Content: prompt}})
 		if err != nil {
 			return err
 		}
-		isStream = channel.Type == constant.ChannelTypeCodex
 		requestPath = "/v1/responses"
 		relayFormat = types.RelayFormatOpenAIResponses
-		request = &dto.OpenAIResponsesRequest{
+		responsesRequest := &dto.OpenAIResponsesRequest{
 			Model:           modelName,
 			Input:           input,
 			Stream:          lo.ToPtr(isStream),
-			MaxOutputTokens: lo.ToPtr(uint(channelKeepaliveMaxTokens)),
+			MaxOutputTokens: maxTokens,
 		}
+		if continued && len(session.Reasoning) > 0 {
+			var reasoning dto.Reasoning
+			if err := common.Unmarshal(session.Reasoning, &reasoning); err == nil {
+				responsesRequest.Reasoning = &reasoning
+			}
+		}
+		request = responsesRequest
+	}
+	originalBody, err := common.Marshal(request)
+	if err != nil {
+		return err
 	}
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, requestPath, nil)
+	c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, requestPath, bytes.NewReader(originalBody))
 	c.Request.Header.Set("Content-Type", "application/json")
-	if !isStream {
+	// The CLI shaping reads the caller's own body to tell what the caller asked
+	// for (an output limit, an effort) from what conversion filled in.
+	if _, err := common.GetBodyStorage(c); err != nil {
+		return err
+	}
+	defer common.CleanupBodyStorage(c)
+	if family != "" {
+		// Dress the synthetic request as the configured client, as the channel
+		// test does; the relay forwards these for channel-test requests.
+		applyTestClientHeaders(c.Request.Header, apiType, family, isStream)
+	} else if !isStream {
 		// The adaptor copies this request's Accept upstream; streaming fills in
 		// text/event-stream itself when it is absent.
 		c.Request.Header.Set("Accept", "application/json")
@@ -211,17 +255,19 @@ func sendChannelKeepalive(ctx context.Context, channel *model.Channel) error {
 	if newAPIError := middleware.SetupContextForSelectedChannel(c, channel, modelName); newAPIError != nil {
 		return newAPIError
 	}
-	// Keepalive is system traffic and does not wear the channel's client profile.
-	// Clearing the profile on this request's copy of the settings makes every
-	// shaping step see "no profile"; the shaping code itself is untouched.
-	channelSetting := channel.GetSetting()
-	channelSetting.SyntheticClientHeadersProfile = ""
-	channelSetting.SyntheticClientHeaders = false
-	channelSetting.CLIVersionProfile = ""
-	channelSetting.TLSFingerprint = ""
-	channelSetting.ClientDeviceSeed = ""
-	channelSetting.ClientSessionSeed = ""
-	common.SetContextKey(c, constant.ContextKeyChannelSetting, channelSetting)
+	// The session belongs to one key of a multi-key channel; continuing it on
+	// another key would tie the two keys to one client. If that key is gone or
+	// disabled, the keepalive goes out as a new client on the key just picked.
+	if continued && channel.ChannelInfo.IsMultiKey {
+		keys := channel.GetKeys()
+		status, hasStatus := channel.ChannelInfo.MultiKeyStatusList[session.MultiKeyIndex]
+		if session.MultiKeyIndex < len(keys) && (!hasStatus || status == common.ChannelStatusEnabled) {
+			common.SetContextKey(c, constant.ContextKeyChannelKey, keys[session.MultiKeyIndex])
+			common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, session.MultiKeyIndex)
+		} else {
+			continued = false
+		}
+	}
 
 	info, err := relaycommon.GenRelayInfo(c, relayFormat, request, nil)
 	if err != nil {
@@ -230,8 +276,13 @@ func sendChannelKeepalive(ctx context.Context, channel *model.Channel) error {
 	// The channel-test flag gives the synthetic-request semantics the relay
 	// already implements for tests: no caller body or headers to pass through and
 	// no WebSocket upgrade probe. Nothing that scores, bills or disables a channel
-	// reads it here, because none of those run on this path.
+	// reads it here, because none of those run on this path. It also keeps this
+	// request from being recorded as the channel's last real CLI session.
 	info.IsChannelTest = true
+	if continued {
+		info.UserId, info.TokenId = session.UserId, session.TokenId
+		info.CLISessionSeed = session.Seed
+	}
 	// Nobody reads the response, so there is no one to keep alive with pings.
 	info.DisablePing = true
 	info.InitChannelMeta(c)
@@ -240,7 +291,6 @@ func sendChannelKeepalive(ctx context.Context, channel *model.Channel) error {
 	}
 	request.SetModelName(info.UpstreamModelName)
 
-	apiType, _ := common.ChannelType2APIType(channel.Type)
 	adaptor := relay.GetAdaptor(apiType)
 	if adaptor == nil {
 		return fmt.Errorf("invalid api type: %d, adaptor is nil", apiType)
