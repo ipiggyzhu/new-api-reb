@@ -550,7 +550,8 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelName, channel.Name)
 	common.SetContextKey(c, constant.ContextKeyChannelType, channel.Type)
 	common.SetContextKey(c, constant.ContextKeyChannelCreateTime, channel.CreatedTime)
-	common.SetContextKey(c, constant.ContextKeyChannelSetting, channel.GetSetting())
+	setting := channel.GetSetting()
+	common.SetContextKey(c, constant.ContextKeyChannelSetting, setting)
 	common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, channel.GetOtherSettings())
 	paramOverride := channel.GetParamOverride()
 	headerOverride := channel.GetHeaderOverride()
@@ -566,19 +567,32 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelModelMapping, channel.GetModelMapping())
 	common.SetContextKey(c, constant.ContextKeyChannelStatusCodeMapping, channel.GetStatusCodeMapping())
 
-	key, index, newAPIError := channel.GetNextEnabledKey()
+	// On a multi-key channel dressed as a CLI, one conversation stays on one key,
+	// so the upstream never sees a client's conversation hop between accounts.
+	// Requests that name no conversation keep the channel's key mode.
+	conversation := ""
+	if family := setting.SyntheticClientHeadersProfile; channel.ChannelInfo.IsMultiKey &&
+		(family == constant.ClientHeaderFamilyCodex || family == constant.ClientHeaderFamilyClaude) {
+		var body []byte
+		if cached, ok := c.Get(common.KeyBodyStorage); ok {
+			if storage, ok := cached.(common.BodyStorage); ok {
+				body, _ = storage.Bytes()
+			}
+		}
+		conversation = service.CLIConversationSeed(c.Request.Header, body)
+	}
+	var key string
+	var index int
+	var newAPIError *types.NewAPIError
+	if conversation != "" {
+		key, index, newAPIError = channel.GetStickyEnabledKey(conversation)
+	} else {
+		key, index, newAPIError = channel.GetNextEnabledKey()
+	}
 	if newAPIError != nil {
 		return newAPIError
 	}
-	if channel.ChannelInfo.IsMultiKey {
-		common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, true)
-		common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, index)
-	} else {
-		// 必须设置为 false，否则在重试到单个 key 的时候会导致日志显示错误
-		common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, false)
-	}
-	// c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))
-	common.SetContextKey(c, constant.ContextKeyChannelKey, key)
+	SetupContextForChannelKey(c, channel, setting, key, index)
 	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, channel.GetBaseURL())
 
 	common.SetContextKey(c, constant.ContextKeySystemPromptOverride, false)
@@ -603,6 +617,30 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 		c.Set("bot_id", channel.Other)
 	}
 	return nil
+}
+
+// SetupContextForChannelKey binds the request to one key of channel: the key,
+// its index, the upstream identity slot it wears, and the channel setting with
+// the key's own environment (CLI version, proxy) laid over it. Every path that
+// picks or pins a key goes through here and sets all of them, so a retry onto
+// another channel or key never keeps the previous key's index, identity or
+// proxy.
+func SetupContextForChannelKey(c *gin.Context, channel *model.Channel, setting dto.ChannelSettings, key string, index int) {
+	slot := channel.KeyIdentitySlot(key)
+	if env, ok := channel.ChannelInfo.MultiKeyEnvs[model.KeyFingerprint(key)]; ok && channel.ChannelInfo.IsMultiKey {
+		if env.CLIVersionProfile != "" {
+			setting.CLIVersionProfile = env.CLIVersionProfile
+		}
+		if env.Proxy != "" {
+			setting.Proxy = env.Proxy
+		}
+	}
+	common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, channel.ChannelInfo.IsMultiKey)
+	common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, index)
+	common.SetContextKey(c, constant.ContextKeyChannelKeySlot, slot)
+	common.SetContextKey(c, constant.ContextKeyChannelKey, key)
+	common.SetContextKey(c, constant.ContextKeyChannelSetting, setting)
+	service.HoldChannelKey(c, channel.Id, slot)
 }
 
 // extractModelNameFromGeminiPath 从 Gemini API URL 路径中提取模型名

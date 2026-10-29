@@ -31,7 +31,7 @@ func cliTestRequest(profile string) (*gin.Context, *relaycommon.RelayInfo) {
 		UserId: 42, TokenId: 7, RequestId: "request-one", IsStream: true,
 		StartTime: time.UnixMilli(1700000000000),
 		ChannelMeta: &relaycommon.ChannelMeta{
-			ChannelId: 9, ApiType: constant.APITypeOpenAI,
+			ChannelId: 9, ApiType: constant.APITypeOpenAI, ChannelKeySlot: "0",
 			ChannelSetting: dto.ChannelSettings{SyntheticClientHeadersProfile: profile},
 		},
 	}
@@ -382,16 +382,16 @@ func TestCLIWebsocketUsesSameBodyAndIdentityAsHTTPFallback(t *testing.T) {
 	}
 }
 
-// The upstream keepalive continues the last real CLI session on a channel. A
-// real request records its model, user, token and conversation seed; a
-// synthesized request that carries them back must wear exactly the client
-// identity the real one wore, as a new turn, and must not itself become the
-// recorded session.
+// The upstream keepalive continues the last real CLI session on a key. A real
+// request records its model, user, token and conversation seed; a synthesized
+// request that carries them back must wear exactly the client identity the
+// real one wore, as a new turn, and must not itself become the recorded
+// session.
 func TestCLISessionContinuationReusesIdentity(t *testing.T) {
 	for _, family := range []string{"codex", "claude"} {
 		t.Run(family, func(t *testing.T) {
 			channelId := 9001
-			t.Cleanup(func() { service.ForgetChannelCLISessionForTest(channelId) })
+			t.Cleanup(func() { service.ForgetChannelKeysForTest(channelId) })
 			path, body := "/v1/responses", `{"model":"gpt-6.1-sol","input":"hello","reasoning":{"effort":"xhigh"}}`
 			if family == "claude" {
 				path, body = "/v1/messages", `{"model":"claude-opus-5","messages":[{"role":"user","content":"hello"}]}`
@@ -413,7 +413,7 @@ func TestCLISessionContinuationReusesIdentity(t *testing.T) {
 			info.ChannelId, info.OriginModelName = channelId, "requested-model"
 			info.ChannelSetting.ClientDeviceSeed, info.ChannelSetting.ClientSessionSeed = "device-a", "session-a"
 			realDevice, realSession, realTurn := capture(c, info)
-			recorded, ok := service.LastChannelCLISession(channelId)
+			recorded, ok := service.LastChannelCLISession(channelId, "0")
 			require.True(t, ok)
 			assert.Equal(t, service.ChannelCLISession{
 				ModelName: "requested-model", UserId: 42, TokenId: 7, Seed: "caller-session",
@@ -422,6 +422,8 @@ func TestCLISessionContinuationReusesIdentity(t *testing.T) {
 			if family == "codex" {
 				assert.JSONEq(t, `{"effort":"xhigh"}`, string(recorded.Reasoning))
 			}
+			_, otherKey := service.LastChannelCLISession(channelId, "k0123456789abcdef")
+			assert.False(t, otherKey, "the session belongs to the key that carried it")
 
 			c, info = cliTestRequest(family)
 			c.Request.Header.Del("session-id")
@@ -434,9 +436,31 @@ func TestCLISessionContinuationReusesIdentity(t *testing.T) {
 			if family == "codex" {
 				assert.NotEqual(t, realTurn, turn, "the keepalive is a new turn of the session")
 			}
-			again, ok := service.LastChannelCLISession(channelId)
+			again, ok := service.LastChannelCLISession(channelId, "0")
 			require.True(t, ok)
 			assert.Equal(t, recorded, again, "a synthesized request is not a real session")
 		})
 	}
+}
+
+// A key wears the identity of its slot. A single-key channel's slot is "0",
+// which is the index every key used to be scoped by, so its device id is the
+// one it always had; two keys of a multi-key channel never share one.
+func TestCLIIdentityFollowsKeySlot(t *testing.T) {
+	device := func(slot string) string {
+		c, info := cliTestRequest("claude")
+		info.ChannelKeySlot = slot
+		info.ChannelSetting.ClientDeviceSeed = "device-a"
+		_, reader, _, err := prepareCLIRequest(c, info, "https://upstream.test/v1/messages", strings.NewReader(`{"model":"claude-opus-5","messages":[{"role":"user","content":"hello"}]}`))
+		require.NoError(t, err)
+		data, err := io.ReadAll(reader)
+		require.NoError(t, err)
+		return gjson.Get(gjson.GetBytes(data, "metadata.user_id").String(), "device_id").String()
+	}
+	t.Cleanup(func() { service.ForgetChannelKeysForTest(9) })
+
+	assert.Equal(t, appcommon.GenerateHMACWithKey([]byte("device-a"), "cli:claude:9:0:42:7:device"), device("0"))
+	assert.Equal(t, device("k0123456789abcdef"), device("k0123456789abcdef"))
+	assert.NotEqual(t, device("0"), device("k0123456789abcdef"))
+	assert.NotEqual(t, device("kfedcba9876543210"), device("k0123456789abcdef"))
 }

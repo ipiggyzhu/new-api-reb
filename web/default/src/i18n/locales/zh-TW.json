@@ -5434,6 +5434,23 @@
     "Keepalive active window (minutes)": "保活活動視窗（分鐘）",
     "Between 5 and 10080 minutes. Keepalives continue for this long after the last real request, then stop until the channel is used again. Set it longer than the interval.": "取值 5 到 10080 分鐘。最後一次真實請求之後的這段時間內繼續保活，之後停止，直到渠道再次被使用。應大於保活間隔。",
     "Keepalive active window must be at least 5 minutes": "保活活動視窗不能少於 5 分鐘",
-    "Keepalive active window must be at most 10080 minutes": "保活活動視窗不能超過 10080 分鐘"
+    "Keepalive active window must be at most 10080 minutes": "保活活動視窗不能超過 10080 分鐘",
+    "Edit Environment": "編輯環境",
+    "Edit Key Environment": "編輯金鑰環境",
+    "Empty fields inherit the channel setting. The key keeps its own device and session identity either way.": "留空的項目沿用渠道設定。無論是否填寫，此金鑰都保留自己的裝置與工作階段識別碼。",
+    "A per-key CLI version needs the channel's client type to be Claude Code or Codex.": "按金鑰設定 CLI 版本需要渠道的用戶端類型為 Claude Code 或 Codex。",
+    "Supports http, https, socks5 and socks5h. Leave empty to use the channel proxy.": "支援 http、https、socks5、socks5h。留空則使用渠道代理。",
+    "The saved password is hidden. Enter the full proxy address, password included.": "已儲存的密碼已隱藏，請輸入包含密碼的完整代理地址。",
+    "Inherit channel setting": "沿用渠道設定",
+    "CLI Version": "CLI 版本",
+    "Proxy": "代理",
+    "Enter one key per line": "每行輸入一個金鑰",
+    "Enter one API key per line. All keys go into this one channel.": "每行輸入一個 API 金鑰，所有金鑰都放在這一個渠道裡。",
+    "A single-key channel saves all these lines as one key.": "單金鑰渠道會把這幾行整體儲存為一個金鑰。",
+    "To add them as separate keys, choose \"Append keys (convert to multi-key)\".": "如需作為多個獨立金鑰新增，請選擇「追加金鑰並轉為多金鑰」。",
+    "Replace the key": "替換金鑰",
+    "Append keys (convert to multi-key)": "追加金鑰並轉為多金鑰",
+    "The new key replaces the current one.": "新金鑰將替換目前的金鑰。",
+    "The channel becomes multi-key: its current key stays first and keeps its identity, and each added key gets an identity of its own.": "渠道將轉為多金鑰：目前的金鑰排在首位並保留原有身分，每個新增金鑰各自取得獨立身分。"
   }
 }

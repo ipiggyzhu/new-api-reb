@@ -1,6 +1,7 @@
 package dto
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -90,41 +91,45 @@ func TestUpstreamKeepaliveActiveWindow(t *testing.T) {
 	}
 }
 
-// TestUpstreamKeepaliveDue pins the activity-aware schedule with the default
-// 30-minute interval and 120-minute window. The minutes chosen sit outside the
-// ±10% jitter, so every verdict is exact.
+// TestUpstreamKeepaliveDue pins the activity-aware schedule of one key with the
+// default 30-minute interval and 120-minute window. The minutes chosen sit
+// outside the ±10% jitter, so every verdict is exact.
 func TestUpstreamKeepaliveDue(t *testing.T) {
 	const active int64 = 1_700_000_000
 	const minute int64 = 60
-	on := func(lastTime int64) *ChannelOtherSettings {
-		return &ChannelOtherSettings{UpstreamKeepaliveEnabled: true, UpstreamKeepaliveLastTime: lastTime}
-	}
+	on := &ChannelOtherSettings{UpstreamKeepaliveEnabled: true}
 	for _, tc := range []struct {
-		name       string
-		settings   *ChannelOtherSettings
-		lastActive int64
-		now        int64
-		due        bool
+		name          string
+		settings      *ChannelOtherSettings
+		lastActive    int64
+		lastKeepalive int64
+		now           int64
+		due           bool
 	}{
-		{"switched off", &ChannelOtherSettings{}, active, active + 40*minute, false},
-		{"no real request seen", on(0), 0, active, false},
-		{"task10 send stamp without real traffic", on(active - 600*minute), 0, active, false},
-		{"request in flight", on(0), active + 40*minute, active + 40*minute, false},
-		{"active, interval not reached", on(0), active, active + 20*minute, false},
-		{"quiet for an interval inside the window", on(0), active, active + 40*minute, true},
-		{"old task10 send stamp before the activity", on(active - 600*minute), active, active + 40*minute, true},
-		{"recent keepalive, interval not reached", on(active + 40*minute), active, active + 60*minute, false},
-		{"keepalive interval reached inside the window", on(active + 40*minute), active, active + 80*minute, true},
-		{"window closed", on(active + 80*minute), active, active + 120*minute, false},
-		{"long after the window", on(active + 80*minute), active, active + 600*minute, false},
+		{"switched off", &ChannelOtherSettings{}, active, 0, active + 40*minute, false},
+		{"no real request seen", on, 0, 0, active, false},
+		{"keepalive stamp without real traffic", on, 0, active - 600*minute, active, false},
+		{"request in flight", on, active + 40*minute, 0, active + 40*minute, false},
+		{"active, interval not reached", on, active, 0, active + 20*minute, false},
+		{"quiet for an interval inside the window", on, active, 0, active + 40*minute, true},
+		{"keepalive from before the activity", on, active, active - 600*minute, active + 40*minute, true},
+		{"recent keepalive, interval not reached", on, active, active + 40*minute, active + 60*minute, false},
+		{"keepalive interval reached inside the window", on, active, active + 40*minute, active + 80*minute, true},
+		{"window closed", on, active, active + 80*minute, active + 120*minute, false},
+		{"long after the window", on, active, active + 80*minute, active + 600*minute, false},
+		// The channel's stored stamp is written by whichever key went last; it
+		// must not hold back another key.
+		{"another key's keepalive on the channel", &ChannelOtherSettings{
+			UpstreamKeepaliveEnabled: true, UpstreamKeepaliveLastTime: active + 40*minute,
+		}, active, 0, active + 60*minute, true},
 		{"longer window keeps bridging", &ChannelOtherSettings{
-			UpstreamKeepaliveEnabled: true, UpstreamKeepaliveActiveWindowMinutes: 240, UpstreamKeepaliveLastTime: active + 160*minute,
-		}, active, active + 200*minute, true},
+			UpstreamKeepaliveEnabled: true, UpstreamKeepaliveActiveWindowMinutes: 240,
+		}, active, active + 160*minute, active + 200*minute, true},
 		{"dirty window value is clamped, not unbounded", &ChannelOtherSettings{
 			UpstreamKeepaliveEnabled: true, UpstreamKeepaliveActiveWindowMinutes: 1_000_000,
-		}, active, active + 10081*minute, false},
+		}, active, 0, active + 10081*minute, false},
 	} {
-		assert.Equal(t, tc.due, tc.settings.UpstreamKeepaliveDue(7, tc.lastActive, tc.now), tc.name)
+		assert.Equal(t, tc.due, tc.settings.UpstreamKeepaliveDue(7, "0", tc.lastActive, tc.lastKeepalive, tc.now), tc.name)
 	}
 }
 
@@ -138,13 +143,14 @@ func TestUpstreamKeepaliveDueStopsWithoutRealTraffic(t *testing.T) {
 	const minute int64 = 60
 	settings := ChannelOtherSettings{UpstreamKeepaliveEnabled: true}
 	lastActive := start
+	var lastKeepalive int64
 	var sends []int64
 	for now := start; now <= start+600*minute; now += minute {
 		if now == start+300*minute {
 			lastActive = now
 		}
-		if settings.UpstreamKeepaliveDue(3, lastActive, now) {
-			settings.UpstreamKeepaliveLastTime = now
+		if settings.UpstreamKeepaliveDue(3, "0", lastActive, lastKeepalive, now) {
+			lastKeepalive = now
 			sends = append(sends, (now-start)/minute)
 		}
 	}
@@ -167,20 +173,22 @@ func TestUpstreamKeepaliveDueStopsWithoutRealTraffic(t *testing.T) {
 	assert.GreaterOrEqual(t, renewed[0], int64(327))
 }
 
-// Channels used at the same moment drift apart: none is due before 90% of the
-// interval, all are due after 110%, and the ones due in between differ.
+// Keys used at the same moment drift apart, including the keys of one channel:
+// none is due before 90% of the interval, all are due after 110%, and the ones
+// due in between differ.
 func TestUpstreamKeepaliveDueJitter(t *testing.T) {
 	const active int64 = 1_700_000_000
 	const interval int64 = 30 * 60
+	settings := ChannelOtherSettings{UpstreamKeepaliveEnabled: true}
 	dueAtInterval := 0
-	for channelId := 1; channelId <= 200; channelId++ {
-		settings := ChannelOtherSettings{UpstreamKeepaliveEnabled: true}
-		require.False(t, settings.UpstreamKeepaliveDue(channelId, active, active+interval*9/10-1), "channel %d due too early", channelId)
-		require.True(t, settings.UpstreamKeepaliveDue(channelId, active, active+interval*11/10), "channel %d not due after the jitter window", channelId)
-		// The verdict for one channel is stable between the scheduler's check
-		// and the run that follows it.
-		require.Equal(t, settings.UpstreamKeepaliveDue(channelId, active, active+interval), settings.UpstreamKeepaliveDue(channelId, active, active+interval))
-		if settings.UpstreamKeepaliveDue(channelId, active, active+interval) {
+	for key := 1; key <= 200; key++ {
+		slot := fmt.Sprintf("k%d", key)
+		require.False(t, settings.UpstreamKeepaliveDue(7, slot, active, 0, active+interval*9/10-1), "key %s due too early", slot)
+		require.True(t, settings.UpstreamKeepaliveDue(7, slot, active, 0, active+interval*11/10), "key %s not due after the jitter window", slot)
+		// The verdict for one key is stable between the scheduler's check and
+		// the run that follows it.
+		require.Equal(t, settings.UpstreamKeepaliveDue(7, slot, active, 0, active+interval), settings.UpstreamKeepaliveDue(7, slot, active, 0, active+interval))
+		if settings.UpstreamKeepaliveDue(7, slot, active, 0, active+interval) {
 			dueAtInterval++
 		}
 	}

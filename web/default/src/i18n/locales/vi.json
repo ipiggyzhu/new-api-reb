@@ -5434,6 +5434,23 @@
     "Keepalive active window (minutes)": "Cửa sổ hoạt động keepalive (phút)",
     "Between 5 and 10080 minutes. Keepalives continue for this long after the last real request, then stop until the channel is used again. Set it longer than the interval.": "Từ 5 đến 10080 phút. Keepalive tiếp tục trong khoảng thời gian này sau yêu cầu thật cuối cùng, sau đó dừng cho đến khi kênh được dùng lại. Nên đặt lớn hơn khoảng thời gian.",
     "Keepalive active window must be at least 5 minutes": "Cửa sổ hoạt động keepalive phải ít nhất 5 phút",
-    "Keepalive active window must be at most 10080 minutes": "Cửa sổ hoạt động keepalive tối đa 10080 phút"
+    "Keepalive active window must be at most 10080 minutes": "Cửa sổ hoạt động keepalive tối đa 10080 phút",
+    "Edit Environment": "Sửa môi trường",
+    "Edit Key Environment": "Sửa môi trường của khóa",
+    "Empty fields inherit the channel setting. The key keeps its own device and session identity either way.": "Các trường để trống sẽ kế thừa cài đặt của kênh. Dù thế nào, khóa vẫn giữ danh tính thiết bị và phiên riêng.",
+    "A per-key CLI version needs the channel's client type to be Claude Code or Codex.": "Để đặt phiên bản CLI riêng cho từng khóa, loại ứng dụng khách của kênh phải là Claude Code hoặc Codex.",
+    "Supports http, https, socks5 and socks5h. Leave empty to use the channel proxy.": "Hỗ trợ http, https, socks5 và socks5h. Để trống để dùng proxy của kênh.",
+    "The saved password is hidden. Enter the full proxy address, password included.": "Mật khẩu đã lưu bị ẩn. Hãy nhập đầy đủ địa chỉ proxy, kèm cả mật khẩu.",
+    "Inherit channel setting": "Kế thừa cài đặt kênh",
+    "CLI Version": "Phiên bản CLI",
+    "Proxy": "Proxy",
+    "Enter one key per line": "Nhập một khóa mỗi dòng",
+    "Enter one API key per line. All keys go into this one channel.": "Nhập một khóa API mỗi dòng. Tất cả các khóa đều nằm trong kênh này.",
+    "A single-key channel saves all these lines as one key.": "Kênh một khóa sẽ lưu tất cả các dòng này thành một khóa.",
+    "To add them as separate keys, choose \"Append keys (convert to multi-key)\".": "Để thêm chúng thành các khóa riêng, hãy chọn \"Thêm khóa (chuyển sang đa khóa)\".",
+    "Replace the key": "Thay thế khóa",
+    "Append keys (convert to multi-key)": "Thêm khóa (chuyển sang đa khóa)",
+    "The new key replaces the current one.": "Khóa mới sẽ thay thế khóa hiện tại.",
+    "The channel becomes multi-key: its current key stays first and keeps its identity, and each added key gets an identity of its own.": "Kênh sẽ chuyển sang đa khóa: khóa hiện tại vẫn đứng đầu và giữ danh tính của nó, mỗi khóa được thêm sẽ có danh tính riêng."
   }
 }

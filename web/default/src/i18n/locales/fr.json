@@ -5434,6 +5434,23 @@
     "Keepalive active window (minutes)": "Fenêtre d'activité du keepalive (minutes)",
     "Between 5 and 10080 minutes. Keepalives continue for this long after the last real request, then stop until the channel is used again. Set it longer than the interval.": "Entre 5 et 10080 minutes. Les keepalives continuent pendant cette durée après la dernière vraie requête, puis s'arrêtent jusqu'à ce que le canal soit de nouveau utilisé. Choisissez une valeur supérieure à l'intervalle.",
     "Keepalive active window must be at least 5 minutes": "La fenêtre d'activité du keepalive doit être d'au moins 5 minutes",
-    "Keepalive active window must be at most 10080 minutes": "La fenêtre d'activité du keepalive doit être d'au plus 10080 minutes"
+    "Keepalive active window must be at most 10080 minutes": "La fenêtre d'activité du keepalive doit être d'au plus 10080 minutes",
+    "Edit Environment": "Modifier l'environnement",
+    "Edit Key Environment": "Modifier l'environnement de la clé",
+    "Empty fields inherit the channel setting. The key keeps its own device and session identity either way.": "Les champs vides reprennent le réglage du canal. Dans tous les cas, la clé conserve sa propre identité d'appareil et de session.",
+    "A per-key CLI version needs the channel's client type to be Claude Code or Codex.": "Une version CLI par clé exige que le type de client du canal soit Claude Code ou Codex.",
+    "Supports http, https, socks5 and socks5h. Leave empty to use the channel proxy.": "Prend en charge http, https, socks5 et socks5h. Laissez vide pour utiliser le proxy du canal.",
+    "The saved password is hidden. Enter the full proxy address, password included.": "Le mot de passe enregistré est masqué. Saisissez l'adresse complète du proxy, mot de passe compris.",
+    "Inherit channel setting": "Hériter du réglage du canal",
+    "CLI Version": "Version CLI",
+    "Proxy": "Proxy",
+    "Enter one key per line": "Saisissez une clé par ligne",
+    "Enter one API key per line. All keys go into this one channel.": "Saisissez une clé API par ligne. Toutes les clés vont dans ce seul canal.",
+    "A single-key channel saves all these lines as one key.": "Un canal à clé unique enregistre toutes ces lignes comme une seule clé.",
+    "To add them as separate keys, choose \"Append keys (convert to multi-key)\".": "Pour les ajouter comme clés distinctes, choisissez « Ajouter des clés (convertir en multi-clés) ».",
+    "Replace the key": "Remplacer la clé",
+    "Append keys (convert to multi-key)": "Ajouter des clés (convertir en multi-clés)",
+    "The new key replaces the current one.": "La nouvelle clé remplace la clé actuelle.",
+    "The channel becomes multi-key: its current key stays first and keeps its identity, and each added key gets an identity of its own.": "Le canal devient multi-clés : sa clé actuelle reste en première position et conserve son identité, et chaque clé ajoutée reçoit sa propre identité."
   }
 }

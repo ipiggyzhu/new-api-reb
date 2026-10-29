@@ -5434,6 +5434,23 @@
     "Keepalive active window (minutes)": "Окно активности keepalive (минуты)",
     "Between 5 and 10080 minutes. Keepalives continue for this long after the last real request, then stop until the channel is used again. Set it longer than the interval.": "От 5 до 10080 минут. Keepalive продолжается в течение этого времени после последнего реального запроса, затем останавливается до следующего использования канала. Укажите значение больше интервала.",
     "Keepalive active window must be at least 5 minutes": "Окно активности keepalive должно быть не меньше 5 минут",
-    "Keepalive active window must be at most 10080 minutes": "Окно активности keepalive должно быть не больше 10080 минут"
+    "Keepalive active window must be at most 10080 minutes": "Окно активности keepalive должно быть не больше 10080 минут",
+    "Edit Environment": "Изменить окружение",
+    "Edit Key Environment": "Изменить окружение ключа",
+    "Empty fields inherit the channel setting. The key keeps its own device and session identity either way.": "Пустые поля наследуют настройку канала. В любом случае ключ сохраняет собственные идентификаторы устройства и сеанса.",
+    "A per-key CLI version needs the channel's client type to be Claude Code or Codex.": "Чтобы задать версию CLI для отдельного ключа, тип клиента канала должен быть Claude Code или Codex.",
+    "Supports http, https, socks5 and socks5h. Leave empty to use the channel proxy.": "Поддерживаются http, https, socks5 и socks5h. Оставьте пустым, чтобы использовать прокси канала.",
+    "The saved password is hidden. Enter the full proxy address, password included.": "Сохранённый пароль скрыт. Введите полный адрес прокси вместе с паролем.",
+    "Inherit channel setting": "Наследовать настройку канала",
+    "CLI Version": "Версия CLI",
+    "Proxy": "Прокси",
+    "Enter one key per line": "Введите по одному ключу на строку",
+    "Enter one API key per line. All keys go into this one channel.": "Введите по одному API-ключу на строку. Все ключи попадут в этот один канал.",
+    "A single-key channel saves all these lines as one key.": "Канал с одним ключом сохранит все эти строки как один ключ.",
+    "To add them as separate keys, choose \"Append keys (convert to multi-key)\".": "Чтобы добавить их как отдельные ключи, выберите «Добавить ключи (преобразовать в несколько ключей)».",
+    "Replace the key": "Заменить ключ",
+    "Append keys (convert to multi-key)": "Добавить ключи (преобразовать в несколько ключей)",
+    "The new key replaces the current one.": "Новый ключ заменит текущий.",
+    "The channel becomes multi-key: its current key stays first and keeps its identity, and each added key gets an identity of its own.": "Канал станет многоключевым: текущий ключ останется первым и сохранит свою идентичность, а каждый добавленный ключ получит собственную."
   }
 }

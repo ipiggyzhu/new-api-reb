@@ -65,6 +65,9 @@ type ChannelMeta struct {
 	ChannelId            int
 	ChannelIsMultiKey    bool
 	ChannelMultiKeyIndex int
+	// ChannelKeySlot is the upstream identity slot of the key in use; see
+	// model.Channel.KeyIdentitySlot.
+	ChannelKeySlot       string
 	ChannelBaseUrl       string
 	ApiType              int
 	ApiVersion           string
@@ -213,6 +216,7 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 		ChannelId:            common.GetContextKeyInt(c, constant.ContextKeyChannelId),
 		ChannelIsMultiKey:    common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey),
 		ChannelMultiKeyIndex: common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex),
+		ChannelKeySlot:       common.GetContextKeyString(c, constant.ContextKeyChannelKeySlot),
 		ChannelBaseUrl:       common.GetContextKeyString(c, constant.ContextKeyChannelBaseUrl),
 		ApiType:              apiType,
 		ApiVersion:           c.GetString("api_version"),

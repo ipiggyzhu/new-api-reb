@@ -1,7 +1,10 @@
 package model
 
 import (
+	"crypto/sha256"
 	"database/sql/driver"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,6 +93,26 @@ type ChannelInfo struct {
 	MultiKeyDisabledTime   map[int]int64         `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
 	MultiKeyPollingIndex   int                   `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
 	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
+	// The two below are keyed by KeyFingerprint rather than by index: deleting a
+	// key shifts every index after it, and a key's environment and upstream
+	// identity have to stay with the key.
+	MultiKeyEnvs              map[string]MultiKeyEnv `json:"multi_key_envs,omitempty"`               // key fingerprint -> 该key的独立环境
+	MultiKeyOriginFingerprint string                 `json:"multi_key_origin_fingerprint,omitempty"` // 转为多Key前原单Key的指纹，该key沿用原身份
+}
+
+// MultiKeyEnv is one key's own client environment on a multi-key channel. An
+// empty field inherits the channel setting of the same name.
+type MultiKeyEnv struct {
+	CLIVersionProfile string `json:"cli_version_profile,omitempty"`
+	Proxy             string `json:"proxy,omitempty"`
+}
+
+// KeyFingerprint names a key without revealing it: the first 8 bytes of its
+// SHA-256, hex encoded. Multi-key state that has to follow a key across
+// re-indexing is keyed by it.
+func KeyFingerprint(key string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(key)))
+	return hex.EncodeToString(sum[:8])
 }
 
 type ChannelSortOptions struct {
@@ -215,6 +238,12 @@ func (c ChannelInfo) clone() ChannelInfo {
 		cloned.MultiKeyDisabledTime = make(map[int]int64, len(c.MultiKeyDisabledTime))
 		for index, disabledAt := range c.MultiKeyDisabledTime {
 			cloned.MultiKeyDisabledTime[index] = disabledAt
+		}
+	}
+	if c.MultiKeyEnvs != nil {
+		cloned.MultiKeyEnvs = make(map[string]MultiKeyEnv, len(c.MultiKeyEnvs))
+		for fingerprint, env := range c.MultiKeyEnvs {
+			cloned.MultiKeyEnvs[fingerprint] = env
 		}
 	}
 	return cloned
@@ -350,6 +379,68 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		// Unknown mode, default to first enabled key (or original key string)
 		return keys[enabledIdx[0]], enabledIdx[0], nil
 	}
+}
+
+// GetStickyEnabledKey picks the enabled key a conversation is pinned to, by
+// rendezvous hashing the conversation seed against each key's fingerprint. A
+// conversation stays on its key for as long as that key is enabled; disabling
+// or removing a key moves only the conversations that were on it, and a new key
+// takes over only the conversations it wins. Nothing is mutated, so unlike
+// GetNextEnabledKey no polling lock is needed.
+func (channel *Channel) GetStickyEnabledKey(seed string) (string, int, *types.NewAPIError) {
+	if !channel.ChannelInfo.IsMultiKey {
+		return channel.Key, 0, nil
+	}
+	keys := channel.GetKeys()
+	if len(keys) == 0 {
+		return "", 0, types.NewError(errors.New("no keys available"), types.ErrorCodeChannelNoAvailableKey)
+	}
+	selected := -1
+	var best uint64
+	for i, key := range keys {
+		if status, ok := channel.ChannelInfo.MultiKeyStatusList[i]; ok && status != common.ChannelStatusEnabled {
+			continue
+		}
+		sum := sha256.Sum256([]byte(seed + "\x00" + KeyFingerprint(key)))
+		if score := binary.BigEndian.Uint64(sum[:8]); selected < 0 || score > best {
+			selected, best = i, score
+		}
+	}
+	if selected < 0 {
+		return "", 0, types.NewError(errors.New("no enabled keys"), types.ErrorCodeChannelNoAvailableKey)
+	}
+	return keys[selected], selected, nil
+}
+
+// KeyIdentitySlot names the upstream identity a key wears. A single-key channel,
+// and the key a channel had before it became multi-key, keep slot "0", the
+// identity they always had; every other key of a multi-key channel gets a slot
+// derived from its fingerprint, so its identity follows the key and is never
+// shared with another key.
+func (channel *Channel) KeyIdentitySlot(key string) string {
+	if !channel.ChannelInfo.IsMultiKey {
+		return "0"
+	}
+	fingerprint := KeyFingerprint(key)
+	if fingerprint == channel.ChannelInfo.MultiKeyOriginFingerprint {
+		return "0"
+	}
+	return "k" + fingerprint
+}
+
+// EnabledKeyForSlot finds the enabled key that wears identity slot, and reports
+// false when that key is gone or disabled.
+func (channel *Channel) EnabledKeyForSlot(slot string) (string, int, bool) {
+	if !channel.ChannelInfo.IsMultiKey {
+		return channel.Key, 0, slot == "0"
+	}
+	for i, key := range channel.GetKeys() {
+		status, hasStatus := channel.ChannelInfo.MultiKeyStatusList[i]
+		if channel.KeyIdentitySlot(key) == slot && (!hasStatus || status == common.ChannelStatusEnabled) {
+			return key, i, true
+		}
+	}
+	return "", 0, false
 }
 
 func (channel *Channel) SaveChannelInfo() error {
@@ -703,6 +794,18 @@ func (channel *Channel) Update() error {
 			for idx := range channel.ChannelInfo.MultiKeyStatusList {
 				if idx >= channel.ChannelInfo.MultiKeySize {
 					delete(channel.ChannelInfo.MultiKeyStatusList, idx)
+				}
+			}
+		}
+		// Drop the environments of keys that are no longer on the channel.
+		if len(channel.ChannelInfo.MultiKeyEnvs) > 0 {
+			present := make(map[string]bool, len(keys))
+			for _, key := range keys {
+				present[KeyFingerprint(key)] = true
+			}
+			for fingerprint := range channel.ChannelInfo.MultiKeyEnvs {
+				if !present[fingerprint] {
+					delete(channel.ChannelInfo.MultiKeyEnvs, fingerprint)
 				}
 			}
 		}

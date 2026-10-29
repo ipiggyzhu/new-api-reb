@@ -177,17 +177,18 @@ type ChannelOtherSettings struct {
 	// 抖动变成永久回退。保存渠道会清零本项，这就是"手动重新开启"的动作。
 	WebsocketUnsupported bool                  `json:"websocket_unsupported,omitempty"`
 	AdvancedCustom       *AdvancedCustomConfig `json:"advanced_custom,omitempty"`
-	// 上游保活：开关打开后，渠道在真实请求停下之后的活动窗口内，后台按间隔用
-	// 渠道自己的 key 发一笔极小的请求，桥接使用中的请求间隙；有真实请求在流动
-	// 时不发，超过活动窗口仍无真实请求就停，直到下一次真实请求。保活是系统
-	// 流量：不挂用户、不计费、不写消费日志、不进渠道评分，失败也不禁用渠道，
-	// 也不算渠道活动。
+	// 上游保活：开关打开后，渠道的每个 key 在自己的真实请求停下之后的活动窗口内，
+	// 后台按间隔用这个 key 和它自己的客户端环境发一笔极小的请求，桥接使用中的
+	// 请求间隙；这个 key 有真实请求在流动时不发，超过活动窗口仍无真实请求就停，
+	// 直到它的下一次真实请求。保活是系统流量：不挂用户、不计费、不写消费日志、
+	// 不进渠道评分，失败也不禁用渠道，也不算渠道活动。
 	UpstreamKeepaliveEnabled         bool `json:"upstream_keepalive_enabled,omitempty"`          // 是否开启上游保活
 	UpstreamKeepaliveIntervalMinutes int  `json:"upstream_keepalive_interval_minutes,omitempty"` // 保活间隔（分钟），0 表示默认值
 	// 活动窗口（分钟），0 表示默认值：最后一次真实请求之后多久内继续保活。
 	UpstreamKeepaliveActiveWindowMinutes int `json:"upstream_keepalive_active_window_minutes,omitempty"`
-	// 上次保活的发送时间，由保活任务在发送前写入（失败也写），所以重启后不会
-	// 把所有渠道当成到期而齐射。它是任务进度而不是配置，模型校验比对渠道配置
+	// 渠道最近一次保活（任一 key）的发送时间，由保活任务在发送前写入（失败也写），
+	// 供管理端展示；写不进去就不发。各 key 的保活时间与活动记录一样只在进程内，
+	// 调度只看各 key 自己的记录。它是任务进度而不是配置，模型校验比对渠道配置
 	// 是否被改动时会忽略这一项。
 	UpstreamKeepaliveLastTime int64 `json:"upstream_keepalive_last_time,omitempty"`
 }
@@ -249,34 +250,35 @@ func (s *ChannelOtherSettings) UpstreamKeepaliveActiveWindow() int64 {
 	return int64(minutes) * 60
 }
 
-// UpstreamKeepaliveDue reports whether channelId's keepalive should be sent at
-// now (unix seconds). lastActive is when real relay traffic last used the
-// channel (now while a request is in flight, 0 when none has been seen).
+// UpstreamKeepaliveDue reports whether the keepalive of the key in identity
+// slot of channelId should be sent at now (unix seconds). lastActive is when
+// real relay traffic last used that key (now while a request is in flight, 0
+// when none has been seen) and lastKeepalive when its last keepalive went out.
 //
-// A keepalive only bridges a gap in a channel that is being used: it is due
-// once the channel has been quiet for an interval, counted from the later of
-// the last real request and the last keepalive, and only while the last real
-// request is still inside the active window. A channel no real request has
-// reached is never due, and since a keepalive does not move lastActive, the
-// keepalives stop by themselves when the window closes.
+// A keepalive only bridges a gap in a key that is being used: it is due once
+// the key has been quiet for an interval, counted from the later of its last
+// real request and its last keepalive, and only while that real request is
+// still inside the active window. A key no real request has reached is never
+// due, and since a keepalive does not move lastActive, the keepalives stop by
+// themselves when the window closes.
 //
-// The interval carries a ±10% jitter so channels used together drift apart
-// instead of firing in the same minute forever. The jitter is derived from the
-// channel id and the moment the quiet period started rather than drawn at
-// random, so the scheduler's "is anything due" check and the run that follows
-// agree on the same channel, and every send or new request re-rolls the offset.
-func (s *ChannelOtherSettings) UpstreamKeepaliveDue(channelId int, lastActive int64, now int64) bool {
+// The interval carries a ±10% jitter so keys used together drift apart instead
+// of firing in the same minute forever. The jitter is derived from the key and
+// the moment the quiet period started rather than drawn at random, so the
+// scheduler's "is anything due" check and the run that follows agree on the
+// same key, and every send or new request re-rolls the offset.
+func (s *ChannelOtherSettings) UpstreamKeepaliveDue(channelId int, slot string, lastActive, lastKeepalive, now int64) bool {
 	if !s.UpstreamKeepaliveEnabled || lastActive <= 0 {
 		return false
 	}
 	if now-lastActive >= s.UpstreamKeepaliveActiveWindow() {
 		return false
 	}
-	quietSince := max(lastActive, s.UpstreamKeepaliveLastTime)
+	quietSince := max(lastActive, lastKeepalive)
 	interval := s.UpstreamKeepaliveInterval()
 	span := interval / 10
 	hash := fnv.New64a()
-	_, _ = fmt.Fprintf(hash, "%d:%d", channelId, quietSince)
+	_, _ = fmt.Fprintf(hash, "%d:%s:%d", channelId, slot, quietSince)
 	jitter := int64(hash.Sum64()%uint64(2*span+1)) - span
 	return now-quietSince >= interval+jitter
 }

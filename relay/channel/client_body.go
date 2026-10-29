@@ -64,8 +64,12 @@ func isolatedCLIUUID(key, scope string, version byte, timestampMillis int64) str
 	return id.String()
 }
 
-func requestCLIIdentity(c *gin.Context, info *relaycommon.RelayInfo, family string, body cliObject) cliIdentity {
-	scope := fmt.Sprintf("cli:%s:%d:%d:%d:%d", family, info.ChannelId, info.ChannelMultiKeyIndex, info.UserId, info.TokenId)
+// requestCLIIdentity derives the client identity a CLI-shaped request wears.
+// It is scoped to the key's identity slot rather than its index: a single-key
+// channel's slot is "0", the index it always had, and each other key of a
+// multi-key channel has its own slot that follows the key across re-indexing.
+func requestCLIIdentity(c *gin.Context, info *relaycommon.RelayInfo, family string, data []byte) cliIdentity {
+	scope := fmt.Sprintf("cli:%s:%d:%s:%d:%d", family, info.ChannelId, info.ChannelKeySlot, info.UserId, info.TokenId)
 	deviceSeed := strings.TrimSpace(info.ChannelSetting.ClientDeviceSeed)
 	sessionSeed := strings.TrimSpace(info.ChannelSetting.ClientSessionSeed)
 	cacheKey := scope + ":" + deviceSeed + ":" + sessionSeed
@@ -80,21 +84,8 @@ func requestCLIIdentity(c *gin.Context, info *relaycommon.RelayInfo, family stri
 		sessionKey = sessionSeed
 	}
 	seed := info.CLISessionSeed
-	for _, name := range []string{"session-id", "thread-id", "x-claude-code-session-id"} {
-		if seed != "" {
-			break
-		}
-		seed = c.Request.Header.Get(name)
-	}
 	if seed == "" {
-		seed = gjson.ParseBytes(body["prompt_cache_key"]).String()
-	}
-	if seed == "" {
-		seed = gjson.GetBytes(body["client_metadata"], "session_id").String()
-	}
-	if seed == "" {
-		userID := gjson.GetBytes(body["metadata"], "user_id").String()
-		seed = gjson.Get(userID, "session_id").String()
+		seed = service.CLIConversationSeed(c.Request.Header, data)
 	}
 	requestID := info.RequestId
 	if requestID == "" {
@@ -182,12 +173,12 @@ func prepareCLIRequest(c *gin.Context, info *relaycommon.RelayInfo, requestURL s
 	if err := common.Unmarshal(data, &body); err != nil || body == nil {
 		return requestURL, reader, nil, fmt.Errorf("CLI request body must be a JSON object")
 	}
-	identity := requestCLIIdentity(c, info, family, body)
+	identity := requestCLIIdentity(c, info, family, data)
 	// Recorded before shaping, so the reasoning is the caller's own.
 	if !info.IsChannelTest {
-		service.RecordChannelCLISession(info.ChannelId, service.ChannelCLISession{
+		service.RecordChannelCLISession(info.ChannelId, info.ChannelKeySlot, service.ChannelCLISession{
 			ModelName: info.OriginModelName, UserId: info.UserId, TokenId: info.TokenId,
-			MultiKeyIndex: info.ChannelMultiKeyIndex, Seed: identity.seed, Reasoning: body["reasoning"],
+			Seed: identity.seed, Reasoning: body["reasoning"],
 		})
 	}
 	headers := make(http.Header)

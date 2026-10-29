@@ -73,12 +73,12 @@ func setupChannelKeepaliveTest(t *testing.T) *gorm.DB {
 	service.InitHttpClient()
 	// The activity record is process-wide; start every test with no traffic seen.
 	for id := 1; id <= keepaliveTestMaxChannelId; id++ {
-		service.SetChannelLastActiveForTest(id, 0)
+		service.ForgetChannelKeysForTest(id)
 	}
 
 	t.Cleanup(func() {
 		for id := 1; id <= keepaliveTestMaxChannelId; id++ {
-			service.SetChannelLastActiveForTest(id, 0)
+			service.ForgetChannelKeysForTest(id)
 		}
 		restoreMonitor()
 		channel_score.ResetAll()
@@ -186,7 +186,7 @@ func TestChannelKeepaliveRequestShape(t *testing.T) {
 				channel.TestModel = &tc.testModel
 			}
 
-			require.NoError(t, sendChannelKeepalive(context.Background(), channel))
+			require.NoError(t, sendChannelKeepalive(context.Background(), channel, "0", channel.Key, 0))
 
 			captured := requests()
 			require.Len(t, captured, 1)
@@ -236,7 +236,7 @@ func TestChannelKeepaliveWearsClientProfile(t *testing.T) {
 		mu.Lock()
 		captured = nil
 		mu.Unlock()
-		require.NoError(t, sendChannelKeepalive(context.Background(), channel))
+		require.NoError(t, sendChannelKeepalive(context.Background(), channel, "0", channel.Key, 0))
 		mu.Lock()
 		defer mu.Unlock()
 		require.Len(t, captured, 1)
@@ -247,7 +247,7 @@ func TestChannelKeepaliveWearsClientProfile(t *testing.T) {
 		version := service.LookupCLIVersionProfile("codex-0.156.1-windows-x64")
 		require.NotNil(t, version)
 		newChannel := func(id int, seed string) *model.Channel {
-			t.Cleanup(func() { service.ForgetChannelCLISessionForTest(id) })
+			t.Cleanup(func() { service.ForgetChannelKeysForTest(id) })
 			channel := &model.Channel{
 				Id: id, Type: constant.ChannelTypeOpenAI, Key: "sk-codex", Status: common.ChannelStatusEnabled,
 				Models: "gpt-6-astra,gpt-6.1-sol", Group: "default", BaseURL: &upstream.URL,
@@ -280,8 +280,8 @@ func TestChannelKeepaliveWearsClientProfile(t *testing.T) {
 			ModelName: "gpt-6.1-sol", UserId: 42, TokenId: 7, Seed: "real-session",
 			Reasoning: []byte(`{"effort":"xhigh"}`),
 		}
-		service.RecordChannelCLISession(first.Id, session)
-		service.RecordChannelCLISession(second.Id, session)
+		service.RecordChannelCLISession(first.Id, "0", session)
+		service.RecordChannelCLISession(second.Id, "0", session)
 		continued := send(first)
 		assert.Equal(t, "gpt-6.1-sol", gjson.GetBytes(continued.Body, "model").String())
 		assert.Equal(t, "xhigh", gjson.GetBytes(continued.Body, "reasoning.effort").String())
@@ -300,7 +300,7 @@ func TestChannelKeepaliveWearsClientProfile(t *testing.T) {
 	t.Run("claude", func(t *testing.T) {
 		version := service.LookupCLIVersionProfile("claude-2.1.306-linux-x64")
 		require.NotNil(t, version)
-		t.Cleanup(func() { service.ForgetChannelCLISessionForTest(13) })
+		t.Cleanup(func() { service.ForgetChannelKeysForTest(13) })
 		channel := &model.Channel{
 			Id: 13, Type: constant.ChannelTypeAnthropic, Key: "sk-claude", Status: common.ChannelStatusEnabled,
 			Models: "claude-opus-5-5", Group: "default", BaseURL: &upstream.URL,
@@ -323,15 +323,16 @@ func TestChannelKeepaliveWearsClientProfile(t *testing.T) {
 
 // TestChannelKeepalivePassIsolation pins the scheduler's selection and the
 // keepalive's isolation from everything a real request or channel test touches.
-// Only enabled, switched-on channels whose real traffic stopped an interval ago
-// and is still inside the active window are sent: not one with a request in
-// flight, one last used past the window, or one never used since startup even
-// if task10 stamped a send time on it. A 401 with auto-disable on is logged and
-// nothing more: the channel stays enabled, no consume or error log is written,
-// no channel score is recorded, and the test time and response time do not
-// move. The keepalive is not activity either, so the channels' activity record
-// is where the seed put it. The send time is stamped for success and failure
-// alike, so a pass right after finds nothing due and sends nothing.
+// Only enabled, switched-on channels whose key's real traffic stopped an
+// interval ago and is still inside the active window are sent: not one whose
+// key has a request in flight, one last used past the window, one kept alive
+// less than an interval ago, or one never used since startup even if task10
+// stamped a send time on it. A 401 with auto-disable on is logged and nothing
+// more: the channel stays enabled, no consume or error log is written, no
+// channel score is recorded, and the test time and response time do not move.
+// The keepalive is not activity either, so the keys' activity records are where
+// the seed put them. The send time is stamped for success and failure alike, so
+// a pass right after finds nothing due and sends nothing.
 func TestChannelKeepalivePassIsolation(t *testing.T) {
 	db := setupChannelKeepaliveTest(t)
 	upstream, requests := newKeepaliveUpstream(t, func(w http.ResponseWriter, r *http.Request) {
@@ -352,16 +353,17 @@ func TestChannelKeepalivePassIsolation(t *testing.T) {
 		return dto.ChannelOtherSettings{UpstreamKeepaliveEnabled: true, UpstreamKeepaliveLastTime: lastTime}
 	}
 	for _, seed := range []struct {
-		id         int
-		key        string
-		status     int
-		settings   *dto.ChannelOtherSettings
-		raw        string
-		lastActive int64
+		id            int
+		key           string
+		status        int
+		settings      *dto.ChannelOtherSettings
+		raw           string
+		lastActive    int64
+		lastKeepalive int64
 	}{
 		{id: 1, key: "sk-revoked", status: common.ChannelStatusEnabled, settings: lo.ToPtr(keepalive(0)), lastActive: quiet},
 		{id: 2, key: "sk-live", status: common.ChannelStatusEnabled, settings: lo.ToPtr(keepalive(0)), lastActive: quiet},
-		{id: 3, key: "sk-recent", status: common.ChannelStatusEnabled, settings: lo.ToPtr(keepalive(recent)), lastActive: quiet},
+		{id: 3, key: "sk-recent", status: common.ChannelStatusEnabled, settings: lo.ToPtr(keepalive(recent)), lastActive: quiet, lastKeepalive: recent},
 		// Switched off but still matching the scan's LIKE.
 		{id: 4, key: "sk-off", status: common.ChannelStatusEnabled, raw: `{"upstream_keepalive_enabled":false}`, lastActive: quiet},
 		{id: 5, key: "sk-disabled", status: common.ChannelStatusManuallyDisabled, settings: lo.ToPtr(keepalive(0)), lastActive: quiet},
@@ -371,7 +373,7 @@ func TestChannelKeepalivePassIsolation(t *testing.T) {
 		{id: 7, key: "sk-stale", status: common.ChannelStatusEnabled, settings: lo.ToPtr(keepalive(0)), lastActive: now - 121*60},
 		// Sent unconditionally by task10 long ago, no real traffic since startup.
 		{id: 8, key: "sk-unused", status: common.ChannelStatusEnabled, settings: lo.ToPtr(keepalive(now - 600*60))},
-		// A request is being served right now, so the channel is in use.
+		// A request is being served right now, so the key is in use.
 		{id: 10, key: "sk-busy", status: common.ChannelStatusEnabled, settings: lo.ToPtr(keepalive(0)), lastActive: quiet},
 	} {
 		channel := &model.Channel{
@@ -383,10 +385,14 @@ func TestChannelKeepalivePassIsolation(t *testing.T) {
 			channel.SetOtherSettings(*seed.settings)
 		}
 		require.NoError(t, db.Create(channel).Error)
-		service.SetChannelLastActiveForTest(seed.id, seed.lastActive)
+		service.SetChannelKeyActivityForTest(seed.id, "0", seed.lastActive, seed.lastKeepalive)
 	}
+	// Bound the way the distributor binds a request: the slot, then the key.
+	busy, _ := gin.CreateTestContext(httptest.NewRecorder())
 	require.True(t, model.AcquireChannelSlot(10, 0))
-	t.Cleanup(func() { model.ReleaseChannelSlot(10) })
+	service.HoldChannelSlot(busy, 10)
+	service.HoldChannelKey(busy, 10, "0")
+	t.Cleanup(func() { service.ReleaseHeldChannelSlot(busy) })
 
 	summary, err := runChannelKeepalivePass(context.Background())
 	require.NoError(t, err)
@@ -396,6 +402,7 @@ func TestChannelKeepalivePassIsolation(t *testing.T) {
 	assert.Equal(t, 1, summary.Failed)
 	require.Len(t, summary.Failures, 1)
 	assert.Equal(t, 1, summary.Failures[0].ChannelId)
+	assert.Nil(t, summary.Failures[0].KeyIndex, "a single-key channel's failure names no key")
 	assert.Contains(t, summary.Failures[0].Error, "401")
 	captured := requests()
 	require.Len(t, captured, 2)
@@ -427,7 +434,7 @@ func TestChannelKeepalivePassIsolation(t *testing.T) {
 	// A sent keepalive leaves the activity record alone, so it cannot keep its
 	// own window open.
 	for _, id := range []int{1, 2} {
-		assert.Equal(t, quiet, service.ChannelLastActiveAt(id, common.GetTimestamp()), "channel %d: a keepalive is not channel activity", id)
+		assert.Equal(t, quiet, service.ChannelKeyActivityAt(id, "0", common.GetTimestamp()).LastActive, "channel %d: a keepalive is not channel activity", id)
 	}
 
 	var logCount int64
@@ -446,21 +453,148 @@ func TestChannelKeepalivePassIsolation(t *testing.T) {
 	assert.Len(t, requests(), 2, "a pass right after must not send again")
 	assert.False(t, channelKeepaliveHandler{}.Enabled(), "no task row is scheduled while nothing is due")
 
-	// A real request on the stale channel, bound the way the distributor binds
-	// one, brings it back into the active window: due again once it has been
-	// quiet for an interval, not before.
+	// A real request on the stale channel's key, bound the way the distributor
+	// binds one, brings it back into the active window: due again once it has
+	// been quiet for an interval, not before.
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	require.True(t, model.AcquireChannelSlot(7, 0))
 	service.HoldChannelSlot(c, 7)
-	assert.Equal(t, now+999, service.ChannelLastActiveAt(7, now+999), "a request in flight is activity as of now")
+	service.HoldChannelKey(c, 7, "0")
+	assert.Equal(t, now+999, service.ChannelKeyActivityAt(7, "0", now+999).LastActive, "a request in flight is activity as of now")
 	service.ReleaseHeldChannelSlot(c)
-	reentered := service.ChannelLastActiveAt(7, common.GetTimestamp())
+	activity := service.ChannelKeyActivityAt(7, "0", common.GetTimestamp())
+	reentered := activity.LastActive
 	require.GreaterOrEqual(t, reentered, now)
 	stored, err := model.GetChannelById(7, true)
 	require.NoError(t, err)
 	settings := stored.GetOtherSettings()
-	assert.False(t, settings.UpstreamKeepaliveDue(7, reentered, reentered+20*60))
-	assert.True(t, settings.UpstreamKeepaliveDue(7, reentered, reentered+40*60))
+	assert.False(t, settings.UpstreamKeepaliveDue(7, "0", reentered, activity.LastKeepalive, reentered+20*60))
+	assert.True(t, settings.UpstreamKeepaliveDue(7, "0", reentered, activity.LastKeepalive, reentered+40*60))
+}
+
+// TestChannelKeepaliveKeepsEachKeyApart pins that the keys of a multi-key CLI
+// channel are kept alive as the separate clients they are to the upstream. Each
+// key is judged on its own activity: the one serving a request is skipped while
+// the others are sent, and a disabled one is never sent. Each goes out with its
+// own key, wearing its own CLI version where it has one and the channel's where
+// it does not, and continues its own last session under its own identity: with
+// the same user, token and conversation seed, two keys are still two sessions
+// and two installations. A failing key is named by its index and stays enabled.
+func TestChannelKeepaliveKeepsEachKeyApart(t *testing.T) {
+	db := setupChannelKeepaliveTest(t)
+	originalSkipVerify := common.TLSInsecureSkipVerify
+	common.TLSInsecureSkipVerify = true
+	service.ResetProxyClientCache()
+	t.Cleanup(func() {
+		common.TLSInsecureSkipVerify = originalSkipVerify
+		service.ResetProxyClientCache()
+	})
+	var mu sync.Mutex
+	sent := map[string]capturedKeepaliveRequest{}
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		mu.Lock()
+		sent[key] = capturedKeepaliveRequest{Path: r.URL.Path, Header: r.Header.Clone(), Body: body}
+		mu.Unlock()
+		if key == "sk-key-d" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"error":{"message":"invalid api key","type":"invalid_request_error","code":"invalid_api_key"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, keepaliveResponsesStream)
+	}))
+	t.Cleanup(upstream.Close)
+	channelVersion := service.LookupCLIVersionProfile("codex-0.156.1-windows-x64")
+	keyVersion := service.LookupCLIVersionProfile("codex-0.160.0-windows-x64")
+	require.NotNil(t, channelVersion)
+	require.NotNil(t, keyVersion)
+
+	keys := []string{"sk-key-a", "sk-key-b", "sk-key-c", "sk-key-d", "sk-key-e"}
+	channel := &model.Channel{
+		Id: 14, Type: constant.ChannelTypeOpenAI, Key: strings.Join(keys, "\n"), Status: common.ChannelStatusEnabled,
+		Models: "gpt-6-astra,gpt-6.1-sol", Group: "default", BaseURL: &upstream.URL, AutoBan: lo.ToPtr(1),
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey: true, MultiKeySize: len(keys), MultiKeyMode: constant.MultiKeyModeRandom,
+			MultiKeyOriginFingerprint: model.KeyFingerprint("sk-key-a"),
+			MultiKeyStatusList:        map[int]int{4: common.ChannelStatusManuallyDisabled},
+			MultiKeyEnvs:              map[string]model.MultiKeyEnv{model.KeyFingerprint("sk-key-b"): {CLIVersionProfile: keyVersion.ID}},
+		},
+	}
+	channel.SetSetting(dto.ChannelSettings{
+		SyntheticClientHeadersProfile: constant.ClientHeaderFamilyCodex, CLIVersionProfile: channelVersion.ID,
+		ClientDeviceSeed: "device", ClientSessionSeed: "session",
+	})
+	channel.SetOtherSettings(dto.ChannelOtherSettings{UpstreamKeepaliveEnabled: true})
+	require.NoError(t, db.Create(channel).Error)
+	quiet := common.GetTimestamp() - 40*60
+	slots := make(map[string]string, len(keys))
+	for _, key := range keys {
+		slots[key] = channel.KeyIdentitySlot(key)
+		service.SetChannelKeyActivityForTest(channel.Id, slots[key], quiet, 0)
+	}
+	service.RecordChannelCLISession(channel.Id, slots["sk-key-a"], service.ChannelCLISession{
+		ModelName: "gpt-6-astra", UserId: 42, TokenId: 7, Seed: "conversation",
+	})
+	service.RecordChannelCLISession(channel.Id, slots["sk-key-b"], service.ChannelCLISession{
+		ModelName: "gpt-6.1-sol", UserId: 42, TokenId: 7, Seed: "conversation", Reasoning: []byte(`{"effort":"xhigh"}`),
+	})
+	// sk-key-c is serving a request right now.
+	busy, _ := gin.CreateTestContext(httptest.NewRecorder())
+	require.True(t, model.AcquireChannelSlot(channel.Id, 0))
+	service.HoldChannelSlot(busy, channel.Id)
+	service.HoldChannelKey(busy, channel.Id, slots["sk-key-c"])
+	t.Cleanup(func() { service.ReleaseHeldChannelSlot(busy) })
+
+	summary, err := runChannelKeepalivePass(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, 3, summary.Due)
+	assert.Equal(t, 2, summary.Succeeded)
+	require.Len(t, summary.Failures, 1)
+	assert.Equal(t, channel.Id, summary.Failures[0].ChannelId)
+	assert.Equal(t, lo.ToPtr(3), summary.Failures[0].KeyIndex, "a multi-key channel's failure names the key")
+	mu.Lock()
+	captured := make(map[string]capturedKeepaliveRequest, len(sent))
+	for key, request := range sent {
+		captured[key] = request
+	}
+	mu.Unlock()
+	require.Len(t, captured, 3)
+	require.Contains(t, captured, "sk-key-d")
+	a, b := captured["sk-key-a"], captured["sk-key-b"]
+	require.NotNil(t, a.Header, "sk-key-a is kept alive")
+	require.NotNil(t, b.Header, "sk-key-b is kept alive")
+
+	assert.Equal(t, channelVersion.Headers["user-agent"], a.Header.Get("User-Agent"), "a key without a CLI version of its own wears the channel's")
+	assert.Equal(t, keyVersion.Headers["user-agent"], b.Header.Get("User-Agent"), "a key wears its own CLI version")
+	assert.Equal(t, "gpt-6-astra", gjson.GetBytes(a.Body, "model").String(), "each key continues its own session")
+	assert.Equal(t, "gpt-6.1-sol", gjson.GetBytes(b.Body, "model").String())
+	assert.Equal(t, "xhigh", gjson.GetBytes(b.Body, "reasoning.effort").String())
+	installation := func(request capturedKeepaliveRequest) string {
+		return gjson.GetBytes(request.Body, "client_metadata.x-codex-installation-id").String()
+	}
+	require.NotEmpty(t, a.Header.Get("session-id"))
+	require.NotEmpty(t, installation(a))
+	assert.NotEqual(t, a.Header.Get("session-id"), b.Header.Get("session-id"), "one conversation on two keys is two sessions")
+	assert.NotEqual(t, installation(a), installation(b), "two keys are two installations")
+
+	now := common.GetTimestamp()
+	for _, key := range []string{"sk-key-a", "sk-key-b", "sk-key-d"} {
+		assert.Positive(t, service.ChannelKeyActivityAt(channel.Id, slots[key], now).LastKeepalive, "%s: its own keepalive is stamped", key)
+	}
+	for _, key := range []string{"sk-key-c", "sk-key-e"} {
+		assert.Zero(t, service.ChannelKeyActivityAt(channel.Id, slots[key], now).LastKeepalive, "%s: another key's keepalive is not its own", key)
+	}
+	stored, err := model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, map[int]int{4: common.ChannelStatusManuallyDisabled}, stored.ChannelInfo.MultiKeyStatusList, "a failed keepalive disables no key")
+
+	again, err := runChannelKeepalivePass(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, again.Due, "each key that was sent waits its own interval")
 }
 
 // A real relay request through the distributor is what opens the keepalive's
@@ -471,11 +605,11 @@ func TestRelayRequestIsChannelActivity(t *testing.T) {
 		_, _ = io.WriteString(w, keepaliveChatReply)
 	}), 0, 0)
 	for _, id := range []int{81, 82} {
-		service.SetChannelLastActiveForTest(id, 0)
+		service.ForgetChannelKeysForTest(id)
 	}
 	t.Cleanup(func() {
 		for _, id := range []int{81, 82} {
-			service.SetChannelLastActiveForTest(id, 0)
+			service.ForgetChannelKeysForTest(id)
 		}
 	})
 	before := common.GetTimestamp()
@@ -496,7 +630,7 @@ func TestRelayRequestIsChannelActivity(t *testing.T) {
 	now := common.GetTimestamp()
 	served := 0
 	for _, id := range []int{81, 82} {
-		if lastActive := service.ChannelLastActiveAt(id, now); lastActive > 0 {
+		if lastActive := service.ChannelKeyActivityAt(id, "0", now).LastActive; lastActive > 0 {
 			assert.GreaterOrEqual(t, lastActive, before, "channel %d", id)
 			served++
 		}
@@ -509,8 +643,8 @@ func TestRelayRequestIsChannelActivity(t *testing.T) {
 func TestChannelTestIsNotChannelActivity(t *testing.T) {
 	f := newUpstreamValidationFixture(t)
 	channel := f.createChannel(t, dto.ChannelOtherSettings{UpstreamKeepaliveEnabled: true})
-	service.SetChannelLastActiveForTest(channel.Id, 0)
-	t.Cleanup(func() { service.SetChannelLastActiveForTest(channel.Id, 0) })
+	service.ForgetChannelKeysForTest(channel.Id)
+	t.Cleanup(func() { service.ForgetChannelKeysForTest(channel.Id) })
 
 	testChannel(context.Background(), channel, 1, "gpt-4o", "", false)
 
@@ -518,7 +652,7 @@ func TestChannelTestIsNotChannelActivity(t *testing.T) {
 	reached := len(f.requestedModel)
 	f.mu.Unlock()
 	require.Positive(t, reached, "the channel test must reach the upstream for this to mean anything")
-	assert.Zero(t, service.ChannelLastActiveAt(channel.Id, common.GetTimestamp()))
+	assert.Empty(t, service.ChannelKeyActivities(common.GetTimestamp())[channel.Id], "no key of the channel is recorded as used")
 }
 
 // The task row is where an admin sees keepalive failures, so a pass with a
@@ -537,7 +671,7 @@ func TestChannelKeepaliveHandlerRecordsFailures(t *testing.T) {
 	channel.SetOtherSettings(dto.ChannelOtherSettings{UpstreamKeepaliveEnabled: true})
 	require.NoError(t, db.Create(channel).Error)
 	require.False(t, channelKeepaliveHandler{}.Enabled(), "no real traffic seen, nothing to keep alive")
-	service.SetChannelLastActiveForTest(channel.Id, common.GetTimestamp()-40*60)
+	service.SetChannelKeyActivityForTest(channel.Id, "0", common.GetTimestamp()-40*60, 0)
 	require.True(t, channelKeepaliveHandler{}.Enabled())
 
 	const runnerID = "keepalive-runner"

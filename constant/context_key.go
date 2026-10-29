@@ -37,6 +37,9 @@ const (
 	ContextKeyChannelIsMultiKey        ContextKey = "channel_is_multi_key"
 	ContextKeyChannelMultiKeyIndex     ContextKey = "channel_multi_key_index"
 	ContextKeyChannelKey               ContextKey = "channel_key"
+	// ContextKeyChannelKeySlot is the upstream identity slot of the selected key
+	// (model.Channel.KeyIdentitySlot): "0" on a single-key channel.
+	ContextKeyChannelKeySlot ContextKey = "channel_key_slot"
 
 	// ContextKeyUpstreamRequestOrigin is the scheme and host of the last upstream
 	// request, which differs from the base URL for absolute Advanced Custom routes

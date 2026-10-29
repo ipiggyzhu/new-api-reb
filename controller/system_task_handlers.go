@@ -28,19 +28,19 @@ func RegisterScheduledSystemTasks() {
 	service.RegisterSystemTaskHandler(channelKeepaliveHandler{})
 }
 
-// channelKeepaliveHandler sends the per-channel upstream keepalives. Each
-// channel has its own switch, interval and active window in its settings, and
-// is only due in the gaps of its own real traffic, so there is no global
-// cadence: Enabled() asks whether any channel is due, which keeps an idle
+// channelKeepaliveHandler sends the per-key upstream keepalives. Each channel
+// has its own switch, interval and active window in its settings, and each of
+// its keys is only due in the gaps of that key's own real traffic, so there is
+// no global cadence: Enabled() asks whether any key is due, which keeps an idle
 // installation from scheduling a row every minute, and the one-minute Interval
-// is only the resolution at which due channels are picked up.
+// is only the resolution at which due keys are picked up.
 type channelKeepaliveHandler struct{}
 
 func (channelKeepaliveHandler) Type() string { return model.SystemTaskTypeChannelKeepalive }
 
 func (channelKeepaliveHandler) Enabled() bool {
-	ids, err := findDueKeepaliveChannelIDs(common.GetTimestamp())
-	return err == nil && len(ids) > 0
+	due, err := findDueKeepalives(common.GetTimestamp())
+	return err == nil && len(due) > 0
 }
 
 func (channelKeepaliveHandler) Interval() time.Duration { return time.Minute }
@@ -48,8 +48,9 @@ func (channelKeepaliveHandler) Interval() time.Duration { return time.Minute }
 func (channelKeepaliveHandler) NewPayload() any { return nil }
 
 // Run records a pass in which any keepalive failed as failed, with the failing
-// channel ids in the error column, so the system task list shows it without
-// opening the result. The channels themselves are left alone.
+// channel ids (and key indexes on multi-key channels) in the error column, so
+// the system task list shows it without opening the result. The channels and
+// keys themselves are left alone.
 func (channelKeepaliveHandler) Run(ctx context.Context, task *model.SystemTask, runnerID string) {
 	summary, err := runChannelKeepalivePass(ctx)
 	if err != nil {
@@ -59,7 +60,11 @@ func (channelKeepaliveHandler) Run(ctx context.Context, task *model.SystemTask, 
 	if summary.Failed > 0 {
 		ids := make([]string, 0, len(summary.Failures))
 		for _, failure := range summary.Failures {
-			ids = append(ids, fmt.Sprintf("#%d", failure.ChannelId))
+			id := fmt.Sprintf("#%d", failure.ChannelId)
+			if failure.KeyIndex != nil {
+				id += fmt.Sprintf(" key %d", *failure.KeyIndex)
+			}
+			ids = append(ids, id)
 		}
 		err := fmt.Errorf("%d of %d keepalives failed: channels %s", summary.Failed, summary.Due, strings.Join(ids, ", "))
 		finishSystemTaskHandler(task, runnerID, model.SystemTaskStatusFailed, summary, err)

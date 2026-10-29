@@ -478,6 +478,22 @@ export async function deleteMultiKey(
 }
 
 /**
+ * Set a key's own CLI version and proxy in multi-key channel
+ */
+export async function setMultiKeyEnv(
+  channelId: number,
+  keyIndex: number,
+  env: Pick<MultiKeyManageParams, 'cli_version_profile' | 'proxy'>
+): Promise<{ success: boolean; message?: string }> {
+  return manageMultiKeys({
+    channel_id: channelId,
+    action: 'set_key_env',
+    key_index: keyIndex,
+    ...env,
+  }) as Promise<{ success: boolean; message?: string }>
+}
+
+/**
  * Enable all keys in multi-key channel
  */
 export async function enableAllMultiKeys(

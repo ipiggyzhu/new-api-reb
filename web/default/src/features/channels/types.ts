@@ -380,6 +380,9 @@ export interface KeyStatus {
   disabled_time?: number
   reason?: string
   key_preview?: string
+  /** The key's own environment; an absent field inherits the channel's. The proxy password arrives masked. */
+  cli_version_profile?: string
+  proxy?: string
 }
 
 export type MultiKeyConfirmAction = {
@@ -467,10 +470,14 @@ export interface MultiKeyManageParams {
     | 'disable_all_keys'
     | 'delete_key'
     | 'delete_disabled_keys'
+    | 'set_key_env'
   key_index?: number
   page?: number
   page_size?: number
   status?: number // 1=enabled, 2=manual_disabled, 3=auto_disabled
+  // set_key_env: an omitted field keeps the key's value, '' inherits the channel's
+  cli_version_profile?: string
+  proxy?: string
 }
 
 export interface BatchDeleteParams {

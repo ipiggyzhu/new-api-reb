@@ -279,7 +279,7 @@ export const channelFormSchema = z
     multi_key_mode: z.enum(['single', 'batch', 'multi_to_single']).optional(),
     multi_key_type: z.enum(['random', 'polling']).optional(),
     batch_add_set_key_prefix_2_name: z.boolean().optional(),
-    key_mode: z.enum(['append', 'replace']).optional(), // For editing multi-key channels
+    key_mode: z.enum(['append', 'replace']).optional(), // For editing; 'append' converts a single-key channel to multi-key
     // Channel extra settings (stored in setting JSON, not sent directly)
     force_format: z.boolean().optional(),
     thinking_to_content: z.boolean().optional(),
@@ -696,7 +696,9 @@ export function transformChannelToFormDefaults(
     multi_key_mode: 'single',
     multi_key_type: channel.channel_info.multi_key_mode || 'random',
     batch_add_set_key_prefix_2_name: false,
-    key_mode: 'append', // Default to append mode for editing multi-key channels
+    // Multi-key channels append by default; a single-key channel keeps replacing
+    // its key unless the admin explicitly converts it to multi-key
+    key_mode: channel.channel_info.is_multi_key ? 'append' : 'replace',
     // Channel extra settings
     ...extraSettings,
     // Type-specific settings

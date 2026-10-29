@@ -56,6 +56,7 @@ func channelModelValidationConfigMatches(current, expected *Channel) bool {
 		reflect.DeepEqual(current.OpenAIOrganization, expected.OpenAIOrganization) &&
 		current.ChannelInfo.IsMultiKey == expected.ChannelInfo.IsMultiKey &&
 		reflect.DeepEqual(current.ChannelInfo.MultiKeyStatusList, expected.ChannelInfo.MultiKeyStatusList) &&
+		reflect.DeepEqual(current.ChannelInfo.MultiKeyEnvs, expected.ChannelInfo.MultiKeyEnvs) &&
 		current.Other == expected.Other && reflect.DeepEqual(current.Setting, expected.Setting) &&
 		reflect.DeepEqual(current.ParamOverride, expected.ParamOverride) && reflect.DeepEqual(current.HeaderOverride, expected.HeaderOverride)
 }

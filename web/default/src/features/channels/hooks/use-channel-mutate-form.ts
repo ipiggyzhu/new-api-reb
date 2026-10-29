@@ -104,11 +104,13 @@ export function useChannelMutateForm(props: UseChannelMutateFormParams) {
             delete payload[field]
           }
         }
+        // A single-key channel only sends 'append', which converts it to
+        // multi-key; replacing its key is the plain update
         const payloadWithKeyMode =
           canEditSensitive &&
-          props.isMultiKeyChannel &&
           data.key?.trim() &&
-          data.key_mode
+          data.key_mode &&
+          (props.isMultiKeyChannel || data.key_mode === 'append')
             ? {
                 ...payload,
                 key_mode: data.key_mode,
