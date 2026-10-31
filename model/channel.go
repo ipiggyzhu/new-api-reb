@@ -385,9 +385,12 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 // rendezvous hashing the conversation seed against each key's fingerprint. A
 // conversation stays on its key for as long as that key is enabled; disabling
 // or removing a key moves only the conversations that were on it, and a new key
-// takes over only the conversations it wins. Nothing is mutated, so unlike
-// GetNextEnabledKey no polling lock is needed.
-func (channel *Channel) GetStickyEnabledKey(seed string) (string, int, *types.NewAPIError) {
+// takes over only the conversations it wins. A key cooling down for modelName
+// after a failure (MarkChannelKeyCooldown) hands its conversations to their
+// next key until the window ends; with every key cooling, each conversation
+// keeps its own. Nothing is mutated, so unlike GetNextEnabledKey no polling
+// lock is needed.
+func (channel *Channel) GetStickyEnabledKey(seed string, modelName string) (string, int, *types.NewAPIError) {
 	if !channel.ChannelInfo.IsMultiKey {
 		return channel.Key, 0, nil
 	}
@@ -396,14 +399,19 @@ func (channel *Channel) GetStickyEnabledKey(seed string) (string, int, *types.Ne
 		return "", 0, types.NewError(errors.New("no keys available"), types.ErrorCodeChannelNoAvailableKey)
 	}
 	selected := -1
+	selectedCooling := false
 	var best uint64
 	for i, key := range keys {
 		if status, ok := channel.ChannelInfo.MultiKeyStatusList[i]; ok && status != common.ChannelStatusEnabled {
 			continue
 		}
-		sum := sha256.Sum256([]byte(seed + "\x00" + KeyFingerprint(key)))
-		if score := binary.BigEndian.Uint64(sum[:8]); selected < 0 || score > best {
-			selected, best = i, score
+		fingerprint := KeyFingerprint(key)
+		cooling := coolingDown(channelKeyCooldownKey(channel.Id, fingerprint, modelName))
+		sum := sha256.Sum256([]byte(seed + "\x00" + fingerprint))
+		score := binary.BigEndian.Uint64(sum[:8])
+		// A ready key beats a cooling one; between two alike the higher score wins.
+		if selected < 0 || (selectedCooling && !cooling) || (cooling == selectedCooling && score > best) {
+			selected, selectedCooling, best = i, cooling, score
 		}
 	}
 	if selected < 0 {
@@ -908,8 +916,6 @@ func (channel *Channel) Delete() error {
 	return err
 }
 
-var channelStatusLock sync.Mutex
-
 // channelPollingLocks stores locks for each channel.id to ensure thread-safe polling
 var channelPollingLocks sync.Map
 
@@ -1054,10 +1060,22 @@ func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
 }
 
 func UpdateChannelStatus(channelId int, usingKey string, status int, reason string) bool {
-	// Serialize the persisted read-modify-write in both cache modes. The database
-	// is authoritative; a failed read or save must not publish a cache mutation.
-	channelStatusLock.Lock()
-	defer channelStatusLock.Unlock()
+	// The admin's channel edit and multi-key management hold this channel's
+	// polling lock from their read to their write. Holding it here as well keeps
+	// either side from writing back a row read before the other's change: an
+	// edit re-enabling a key just disabled, or this save dropping a key's new
+	// environment. The save below writes the whole row, settings included, so
+	// the settings lock is held too: a keepalive stamp, a WebSocket probe result
+	// or a model sweep written meanwhile would otherwise be lost. Together they
+	// serialize this read-modify-write per channel in both cache modes, so status
+	// updates of different channels do not wait on each other. The database is
+	// authoritative; a failed read or save must not publish a cache mutation.
+	pollingLock := GetChannelPollingLock(channelId)
+	pollingLock.Lock()
+	defer pollingLock.Unlock()
+	settingsLock := channelSettingsLock(channelId)
+	settingsLock.Lock()
+	defer settingsLock.Unlock()
 
 	channel, err := GetChannelById(channelId, true)
 	if err != nil {
@@ -1083,10 +1101,7 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 
 	beforeStatus := channel.Status
 	if channel.ChannelInfo.IsMultiKey {
-		pollingLock := GetChannelPollingLock(channelId)
-		pollingLock.Lock()
 		handlerMultiKeyUpdate(channel, usingKey, status, reason)
-		pollingLock.Unlock()
 	} else {
 		info := channel.GetOtherInfo()
 		info["status_reason"] = reason

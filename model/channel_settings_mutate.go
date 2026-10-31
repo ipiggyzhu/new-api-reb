@@ -83,7 +83,8 @@ func channelSettingsMatchIgnoringKeepalive(current, expected string) bool {
 func ApplyChannelModelSweep(expected *Channel, models string, modelMapping *string, disableIfEmpty bool) (bool, error) {
 	lock := channelSettingsLock(expected.Id)
 	lock.Lock()
-	defer lock.Unlock()
+	unlock := sync.OnceFunc(lock.Unlock)
+	defer unlock()
 
 	var current Channel
 	applied := false
@@ -154,6 +155,9 @@ func ApplyChannelModelSweep(expected *Channel, models string, modelMapping *stri
 	}
 	if applied {
 		CacheUpdateChannel(&current)
+		// The full rebuild runs unlocked: it rescans when a publish lands meanwhile,
+		// and holding the lock across it would stall this channel's status updates.
+		unlock()
 		// The model plaza caches pricing even when channel routing uses the DB.
 		InitChannelCache()
 	}
@@ -234,7 +238,8 @@ func MutateChannelSettingsWithModels(
 	}
 	lock := channelSettingsLock(expected.Id)
 	lock.Lock()
-	defer lock.Unlock()
+	unlock := sync.OnceFunc(lock.Unlock)
+	defer unlock()
 	var channel Channel
 	changed := false
 	err := DB.Transaction(func(tx *gorm.DB) error {
@@ -269,6 +274,8 @@ func MutateChannelSettingsWithModels(
 	}
 	if changed {
 		CacheUpdateChannel(&channel)
+		// Unlocked for the same reason as in ApplyChannelModelSweep.
+		unlock()
 		InitChannelCache()
 	}
 	return nil

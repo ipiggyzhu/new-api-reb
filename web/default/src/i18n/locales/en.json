@@ -5446,11 +5446,10 @@
     "Proxy": "Proxy",
     "Enter one key per line": "Enter one key per line",
     "Enter one API key per line. All keys go into this one channel.": "Enter one API key per line. All keys go into this one channel.",
-    "A single-key channel saves all these lines as one key.": "A single-key channel saves all these lines as one key.",
-    "To add them as separate keys, choose \"Append keys (convert to multi-key)\".": "To add them as separate keys, choose \"Append keys (convert to multi-key)\".",
     "Replace the key": "Replace the key",
     "Append keys (convert to multi-key)": "Append keys (convert to multi-key)",
-    "The new key replaces the current one.": "The new key replaces the current one.",
-    "The channel becomes multi-key: its current key stays first and keeps its identity, and each added key gets an identity of its own.": "The channel becomes multi-key: its current key stays first and keeps its identity, and each added key gets an identity of its own."
+    "The current key stays first; new keys are added after it.": "The current key stays first; new keys are added after it.",
+    "These lines will be saved as one key.": "These lines will be saved as one key.",
+    "These lines will be saved as one key; to add them separately, choose \"Append keys (convert to multi-key)\".": "These lines will be saved as one key; to add them separately, choose \"Append keys (convert to multi-key)\"."
   }
 }

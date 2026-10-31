@@ -2963,10 +2963,18 @@ export function ChannelMutateDrawer({
                                 control={form.control}
                                 name='key'
                                 render={({ field }) => {
+                                  // Appending to a single-key channel turns it
+                                  // into a multi-key one
+                                  const convertsToMultiKey =
+                                    isEditing &&
+                                    !isMultiKeyChannel &&
+                                    keyMode === 'append'
                                   let keyPlaceholder = t(
                                     getKeyPromptForType(currentType)
                                   )
-                                  if (isEditing) {
+                                  if (convertsToMultiKey) {
+                                    keyPlaceholder = t('Enter one key per line')
+                                  } else if (isEditing) {
                                     keyPlaceholder = t(
                                       'Leave empty to keep existing key'
                                     )
@@ -3022,7 +3030,11 @@ export function ChannelMutateDrawer({
                                   let keyDescription: ReactNode = t(
                                     FIELD_DESCRIPTIONS.KEY
                                   )
-                                  if (isEditing) {
+                                  if (convertsToMultiKey) {
+                                    keyDescription = t(
+                                      'The current key stays first; new keys are added after it.'
+                                    )
+                                  } else if (isEditing) {
                                     let keyModeDescription = t(
                                       'Append mode: New keys will be added to the end of the existing key list'
                                     )
@@ -3043,16 +3055,13 @@ export function ChannelMutateDrawer({
                                         )}
                                         {replacesWithMultipleKeys && (
                                           <span className='text-warning mt-1 block'>
-                                            {t(
-                                              'A single-key channel saves all these lines as one key.'
-                                            )}
-                                            {supportsKeyConversion && (
-                                              <span className='block'>
-                                                {t(
-                                                  'To add them as separate keys, choose "Append keys (convert to multi-key)".'
+                                            {supportsKeyConversion
+                                              ? t(
+                                                  'These lines will be saved as one key; to add them separately, choose "Append keys (convert to multi-key)".'
+                                                )
+                                              : t(
+                                                  'These lines will be saved as one key.'
                                                 )}
-                                              </span>
-                                            )}
                                           </span>
                                         )}
                                       </>
@@ -3217,17 +3226,11 @@ export function ChannelMutateDrawer({
                                               label: t(
                                                 'Append to existing keys'
                                               ),
-                                              description: t(
-                                                'Append mode: New keys will be added to the end of the existing key list'
-                                              ),
                                             },
                                             {
                                               value: 'replace',
                                               label: t(
                                                 'Replace all existing keys'
-                                              ),
-                                              description: t(
-                                                'Replace mode: Will completely replace all existing keys'
                                               ),
                                             },
                                           ]
@@ -3235,17 +3238,11 @@ export function ChannelMutateDrawer({
                                             {
                                               value: 'replace',
                                               label: t('Replace the key'),
-                                              description: t(
-                                                'The new key replaces the current one.'
-                                              ),
                                             },
                                             {
                                               value: 'append',
                                               label: t(
                                                 'Append keys (convert to multi-key)'
-                                              ),
-                                              description: t(
-                                                'The channel becomes multi-key: its current key stays first and keeps its identity, and each added key gets an identity of its own.'
                                               ),
                                             },
                                           ]
@@ -3281,14 +3278,17 @@ export function ChannelMutateDrawer({
                                               </SelectGroup>
                                             </SelectContent>
                                           </Select>
-                                          <FormDescription>
-                                            {
-                                              keyModeOptions.find(
-                                                (option) =>
-                                                  option.value === field.value
-                                              )?.description
-                                            }
-                                          </FormDescription>
+                                          {isMultiKeyChannel && (
+                                            <FormDescription>
+                                              {field.value === 'replace'
+                                                ? t(
+                                                    'Replace mode: Will completely replace all existing keys'
+                                                  )
+                                                : t(
+                                                    'Append mode: New keys will be added to the end of the existing key list'
+                                                  )}
+                                            </FormDescription>
+                                          )}
                                           <FormMessage />
                                         </FormItem>
                                       )

@@ -5446,11 +5446,10 @@
     "Proxy": "Прокси",
     "Enter one key per line": "Введите по одному ключу на строку",
     "Enter one API key per line. All keys go into this one channel.": "Введите по одному API-ключу на строку. Все ключи попадут в этот один канал.",
-    "A single-key channel saves all these lines as one key.": "Канал с одним ключом сохранит все эти строки как один ключ.",
-    "To add them as separate keys, choose \"Append keys (convert to multi-key)\".": "Чтобы добавить их как отдельные ключи, выберите «Добавить ключи (преобразовать в несколько ключей)».",
     "Replace the key": "Заменить ключ",
     "Append keys (convert to multi-key)": "Добавить ключи (преобразовать в несколько ключей)",
-    "The new key replaces the current one.": "Новый ключ заменит текущий.",
-    "The channel becomes multi-key: its current key stays first and keeps its identity, and each added key gets an identity of its own.": "Канал станет многоключевым: текущий ключ останется первым и сохранит свою идентичность, а каждый добавленный ключ получит собственную."
+    "The current key stays first; new keys are added after it.": "Текущий ключ остаётся первым, новые ключи добавляются после него.",
+    "These lines will be saved as one key.": "Эти строки будут сохранены как один ключ.",
+    "These lines will be saved as one key; to add them separately, choose \"Append keys (convert to multi-key)\".": "Эти строки будут сохранены как один ключ; чтобы добавить их по отдельности, выберите «Добавить ключи (преобразовать в несколько ключей)»."
   }
 }

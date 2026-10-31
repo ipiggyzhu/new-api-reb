@@ -5446,11 +5446,10 @@
     "Proxy": "Proxy",
     "Enter one key per line": "Saisissez une clé par ligne",
     "Enter one API key per line. All keys go into this one channel.": "Saisissez une clé API par ligne. Toutes les clés vont dans ce seul canal.",
-    "A single-key channel saves all these lines as one key.": "Un canal à clé unique enregistre toutes ces lignes comme une seule clé.",
-    "To add them as separate keys, choose \"Append keys (convert to multi-key)\".": "Pour les ajouter comme clés distinctes, choisissez « Ajouter des clés (convertir en multi-clés) ».",
     "Replace the key": "Remplacer la clé",
     "Append keys (convert to multi-key)": "Ajouter des clés (convertir en multi-clés)",
-    "The new key replaces the current one.": "La nouvelle clé remplace la clé actuelle.",
-    "The channel becomes multi-key: its current key stays first and keeps its identity, and each added key gets an identity of its own.": "Le canal devient multi-clés : sa clé actuelle reste en première position et conserve son identité, et chaque clé ajoutée reçoit sa propre identité."
+    "The current key stays first; new keys are added after it.": "La clé actuelle reste en premier ; les nouvelles clés sont ajoutées après.",
+    "These lines will be saved as one key.": "Ces lignes seront enregistrées comme une seule clé.",
+    "These lines will be saved as one key; to add them separately, choose \"Append keys (convert to multi-key)\".": "Ces lignes seront enregistrées comme une seule clé ; pour les ajouter séparément, choisissez « Ajouter des clés (convertir en multi-clés) »."
   }
 }

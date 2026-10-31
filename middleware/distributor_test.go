@@ -164,7 +164,7 @@ func TestSetupContextForSelectedChannelBindsTheKeysEnvironment(t *testing.T) {
 	conversations := map[string]string{}
 	for i := 0; len(conversations) < 2; i++ {
 		seed := fmt.Sprintf("conversation-%d", i)
-		if key, _, _ := multi.GetStickyEnabledKey(seed); conversations[key] == "" {
+		if key, _, _ := multi.GetStickyEnabledKey(seed, "gpt-6.1-sol"); conversations[key] == "" {
 			conversations[key] = seed
 		}
 	}

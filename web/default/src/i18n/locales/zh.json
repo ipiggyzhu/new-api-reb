@@ -5446,11 +5446,10 @@
     "Proxy": "代理",
     "Enter one key per line": "每行输入一个密钥",
     "Enter one API key per line. All keys go into this one channel.": "每行输入一个 API 密钥，所有密钥都放在这一个渠道里。",
-    "A single-key channel saves all these lines as one key.": "单密钥渠道会把这几行整体保存为一个密钥。",
-    "To add them as separate keys, choose \"Append keys (convert to multi-key)\".": "如需作为多个独立密钥添加，请选择“追加密钥并转为多密钥”。",
     "Replace the key": "替换密钥",
     "Append keys (convert to multi-key)": "追加密钥并转为多密钥",
-    "The new key replaces the current one.": "新密钥将替换当前密钥。",
-    "The channel becomes multi-key: its current key stays first and keeps its identity, and each added key gets an identity of its own.": "渠道将转为多密钥：当前密钥排在首位并保留原有身份，每个新增密钥各自获得独立身份。"
+    "The current key stays first; new keys are added after it.": "当前密钥保留在首位，新密钥依次追加在后。",
+    "These lines will be saved as one key.": "这几行会被保存为一个密钥。",
+    "These lines will be saved as one key; to add them separately, choose \"Append keys (convert to multi-key)\".": "这几行会被保存为一个密钥；如需分别添加，请选择“追加密钥并转为多密钥”。"
   }
 }

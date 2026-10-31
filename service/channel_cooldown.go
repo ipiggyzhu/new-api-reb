@@ -22,6 +22,12 @@ const (
 	defaultOverloadCooldown  = 30 * time.Second
 )
 
+// Used when one key of a multi-key channel failed in a way the upstream did not
+// time-box. Long enough that a key that keeps failing costs each of its
+// conversations one attempt a minute; short enough that a one-off failure moves
+// them only briefly.
+const defaultKeyFaultCooldown = time.Minute
+
 // UpstreamRetryAfter reads how long an upstream asked to be left alone:
 // retry-after-ms or retry-after (seconds or an HTTP date) first, then the reset
 // of an Anthropic limit reported as exhausted — the unified subscription limit
@@ -94,4 +100,30 @@ func ChannelCooldownFor(err *types.NewAPIError) time.Duration {
 	default:
 		return defaultRateLimitCooldown
 	}
+}
+
+// ChannelKeyCooldownFor is how long the key of a multi-key channel that
+// answered err should sit out of its conversations' sticky selection: as long
+// as a channel would cool for a refusal, defaultKeyFaultCooldown for any other
+// fault that moves a request to another channel, and zero when the request
+// itself was at fault. The channel is not cooled as a whole, so without this a
+// conversation pinned to a failing key would go back to it every turn.
+func ChannelKeyCooldownFor(err *types.NewAPIError) time.Duration {
+	if cooldown := ChannelCooldownFor(err); cooldown > 0 {
+		return cooldown
+	}
+	if err == nil {
+		return 0
+	}
+	switch err.StatusCode {
+	case http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		// The default retry ranges still send these to another channel, but a
+		// request too large or malformed fails the same way on every key: cooling
+		// this one would move every other conversation pinned to it as well.
+		return 0
+	}
+	if IsChannelRoutingFaultError(err) {
+		return defaultKeyFaultCooldown
+	}
+	return 0
 }

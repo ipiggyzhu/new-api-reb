@@ -5446,11 +5446,10 @@
     "Proxy": "Proxy",
     "Enter one key per line": "Nhập một khóa mỗi dòng",
     "Enter one API key per line. All keys go into this one channel.": "Nhập một khóa API mỗi dòng. Tất cả các khóa đều nằm trong kênh này.",
-    "A single-key channel saves all these lines as one key.": "Kênh một khóa sẽ lưu tất cả các dòng này thành một khóa.",
-    "To add them as separate keys, choose \"Append keys (convert to multi-key)\".": "Để thêm chúng thành các khóa riêng, hãy chọn \"Thêm khóa (chuyển sang đa khóa)\".",
     "Replace the key": "Thay thế khóa",
     "Append keys (convert to multi-key)": "Thêm khóa (chuyển sang đa khóa)",
-    "The new key replaces the current one.": "Khóa mới sẽ thay thế khóa hiện tại.",
-    "The channel becomes multi-key: its current key stays first and keeps its identity, and each added key gets an identity of its own.": "Kênh sẽ chuyển sang đa khóa: khóa hiện tại vẫn đứng đầu và giữ danh tính của nó, mỗi khóa được thêm sẽ có danh tính riêng."
+    "The current key stays first; new keys are added after it.": "Khóa hiện tại vẫn đứng đầu; các khóa mới được thêm vào sau.",
+    "These lines will be saved as one key.": "Các dòng này sẽ được lưu thành một khóa.",
+    "These lines will be saved as one key; to add them separately, choose \"Append keys (convert to multi-key)\".": "Các dòng này sẽ được lưu thành một khóa; để thêm riêng từng khóa, hãy chọn \"Thêm khóa (chuyển sang đa khóa)\"."
   }
 }

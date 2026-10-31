@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -186,7 +187,17 @@ func CLIConversationSeed(header http.Header, body []byte) string {
 	if seed := gjson.GetBytes(body, "client_metadata.session_id").String(); seed != "" {
 		return seed
 	}
-	return gjson.Get(gjson.GetBytes(body, "metadata.user_id").String(), "session_id").String()
+	userID := gjson.GetBytes(body, "metadata.user_id").String()
+	if seed := gjson.Get(userID, "session_id").String(); seed != "" {
+		return seed
+	}
+	// Claude Code with the legacy user_id (the 2.1.76 profile) sends
+	// user_<device>_account_<account>_session_<session> and no session header.
+	if prefix, seed, found := strings.Cut(userID, "_session_"); found &&
+		strings.HasPrefix(prefix, "user_") && strings.Contains(prefix, "_account_") {
+		return seed
+	}
+	return ""
 }
 
 // HoldChannelSlot records that the request now owns a concurrency slot on

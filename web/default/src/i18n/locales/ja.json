@@ -5446,11 +5446,10 @@
     "Proxy": "プロキシ",
     "Enter one key per line": "1行に1つのキーを入力してください",
     "Enter one API key per line. All keys go into this one channel.": "1行に1つの API キーを入力してください。すべてのキーがこの1つのチャネルに入ります。",
-    "A single-key channel saves all these lines as one key.": "単一キーのチャネルでは、これらの行がまとめて1つのキーとして保存されます。",
-    "To add them as separate keys, choose \"Append keys (convert to multi-key)\".": "別々のキーとして追加するには、「キーを追加（マルチキーに変換）」を選択してください。",
     "Replace the key": "キーを置き換える",
     "Append keys (convert to multi-key)": "キーを追加（マルチキーに変換）",
-    "The new key replaces the current one.": "新しいキーで現在のキーを置き換えます。",
-    "The channel becomes multi-key: its current key stays first and keeps its identity, and each added key gets an identity of its own.": "チャネルはマルチキーになります。現在のキーは先頭に残って元の ID を保持し、追加した各キーにはそれぞれ独自の ID が割り当てられます。"
+    "The current key stays first; new keys are added after it.": "現在のキーは先頭に残り、新しいキーはその後ろに追加されます。",
+    "These lines will be saved as one key.": "これらの行は1つのキーとして保存されます。",
+    "These lines will be saved as one key; to add them separately, choose \"Append keys (convert to multi-key)\".": "これらの行は1つのキーとして保存されます。別々に追加するには「キーを追加（マルチキーに変換）」を選択してください。"
   }
 }

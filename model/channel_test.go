@@ -3,6 +3,7 @@ package model
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -65,7 +66,7 @@ func TestKeyFingerprint(t *testing.T) {
 // keeps its key, even when the removal shifts that key's index.
 func TestGetStickyEnabledKeyMovesOnlyTheLostKeysConversations(t *testing.T) {
 	pick := func(channel *Channel, seed string) string {
-		key, index, apiErr := channel.GetStickyEnabledKey(seed)
+		key, index, apiErr := channel.GetStickyEnabledKey(seed, "sticky-model")
 		require.Nil(t, apiErr)
 		require.Equal(t, channel.GetKeys()[index], key, "the index names the key returned")
 		return key
@@ -100,9 +101,62 @@ func TestGetStickyEnabledKeyMovesOnlyTheLostKeysConversations(t *testing.T) {
 	allDisabled := &Channel{Key: "key-a", ChannelInfo: ChannelInfo{
 		IsMultiKey: true, MultiKeyStatusList: map[int]int{0: common.ChannelStatusAutoDisabled},
 	}}
-	_, _, apiErr := allDisabled.GetStickyEnabledKey("conversation-0")
+	_, _, apiErr := allDisabled.GetStickyEnabledKey("conversation-0", "sticky-model")
 	require.NotNil(t, apiErr)
 	assert.Equal(t, types.ErrorCodeChannelNoAvailableKey, apiErr.GetErrorCode())
+}
+
+// A key that failed cools down for the model it failed on, and while it cools
+// its conversations go to their next key and no other conversation moves. With
+// every key cooling each conversation keeps its own, and once the window ends
+// it is back on its key.
+func TestGetStickyEnabledKeyPassesOverCoolingKeys(t *testing.T) {
+	const modelName = "sticky-model"
+	channel := &Channel{Id: 900131, Key: "key-a\nkey-b\nkey-c", ChannelInfo: ChannelInfo{IsMultiKey: true}}
+	forget := func() {
+		for _, key := range channel.GetKeys() {
+			channelCooldowns.Delete(channelKeyCooldownKey(channel.Id, KeyFingerprint(key), modelName))
+		}
+	}
+	t.Cleanup(forget)
+	pick := func(seed string, modelName string) string {
+		key, _, apiErr := channel.GetStickyEnabledKey(seed, modelName)
+		require.Nil(t, apiErr)
+		return key
+	}
+	seeds := make([]string, 30)
+	pinned := make(map[string]string, len(seeds))
+	onKeyB := 0
+	for i := range seeds {
+		seeds[i] = fmt.Sprintf("conversation-%d", i)
+		pinned[seeds[i]] = pick(seeds[i], modelName)
+		if pinned[seeds[i]] == "key-b" {
+			onKeyB++
+		}
+	}
+	require.NotZero(t, onKeyB)
+
+	MarkChannelKeyCooldown(channel.Id, "key-b", modelName, time.Now().Add(time.Hour))
+	for _, seed := range seeds {
+		if pinned[seed] == "key-b" {
+			assert.NotEqual(t, "key-b", pick(seed, modelName), "a cooling key hands %s to its next key", seed)
+			assert.Equal(t, "key-b", pick(seed, "other-model"), "a cooldown belongs to the model that failed")
+		} else {
+			assert.Equal(t, pinned[seed], pick(seed, modelName), "%s stays on its key", seed)
+		}
+	}
+
+	MarkChannelKeyCooldown(channel.Id, "key-a", modelName, time.Now().Add(time.Hour))
+	MarkChannelKeyCooldown(channel.Id, "key-c", modelName, time.Now().Add(time.Hour))
+	for _, seed := range seeds {
+		assert.Equal(t, pinned[seed], pick(seed, modelName), "with every key cooling %s keeps its own", seed)
+	}
+
+	forget()
+	MarkChannelKeyCooldown(channel.Id, "key-b", modelName, time.Now().Add(-time.Second))
+	for _, seed := range seeds {
+		assert.Equal(t, pinned[seed], pick(seed, modelName), "once the window ends %s is back on its key", seed)
+	}
 }
 
 // A single-key channel, and the key a channel had before it became multi-key,

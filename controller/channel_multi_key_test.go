@@ -2,6 +2,7 @@ package controller
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -232,7 +233,8 @@ func TestManageMultiKeysKeyStatusShowsTheKeysEnvironment(t *testing.T) {
 
 // A key's own CLI version has to keep fitting the channel it is laid over, so
 // a channel setting that would break it is refused until the key is changed,
-// and one it still fits is saved.
+// and one it still fits is saved. A save that also replaces the key is not held
+// back by the environment it drops along with the key.
 func TestUpdateChannelRefusesSettingsThatBreakAKeysEnvironment(t *testing.T) {
 	f := newUpstreamValidationFixture(t)
 	channel := &model.Channel{
@@ -266,4 +268,184 @@ func TestUpdateChannelRefusesSettingsThatBreakAKeysEnvironment(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "http://channel-proxy:8080", stored.GetSetting().Proxy)
 	assert.Equal(t, channel.ChannelInfo.MultiKeyEnvs, stored.ChannelInfo.MultiKeyEnvs)
+
+	response = callChannelAdminAPI(t, UpdateChannel, common.RoleRootUser, http.MethodPut, map[string]any{
+		"id": channel.Id, "type": channel.Type, "setting": `{"synthetic_client_headers_profile":"claude"}`,
+		"key_mode": "replace", "key": "sk-key-a\nsk-key-c",
+	})
+	require.True(t, response.Success, response.Message)
+	stored, err = model.GetChannelById(channel.Id, true)
+	require.NoError(t, err)
+	assert.Equal(t, constant.ClientHeaderFamilyClaude, stored.GetSetting().SyntheticClientHeadersProfile)
+	assert.Empty(t, stored.ChannelInfo.MultiKeyEnvs)
+}
+
+// Replacing a multi-key channel's keys keeps each key's state with the key: a
+// key still on the list keeps its disabled state, reason and time at its new
+// position, and a new key starts enabled whatever the key it took the position
+// of had. A key listed twice is matched occurrence by occurrence, and a Vertex
+// credential uploaded again is the same key whatever order its file or the
+// stored key lists the fields in; the stored text is kept, so the key keeps its
+// identity and environment too.
+func TestUpdateChannelReplaceKeepsKeyStatusWithTheKey(t *testing.T) {
+	f := newUpstreamValidationFixture(t)
+	const vertexA = `{"project_id":"proj-a","type":"service_account"}`
+	const vertexB = `{"project_id":"proj-b","type":"service_account"}`
+	const vertexBUploaded = `{"type":"service_account","project_id":"proj-b"}`
+	const vertexRegion = `{"default":"us-central1"}`
+	for i, tc := range []struct {
+		name        string
+		channelType int
+		key         string
+		other       string
+		info        model.ChannelInfo
+		patch       map[string]any
+		wantKey     string
+		wantStatus  map[int]int
+		wantReason  map[int]string
+		wantTime    map[int]int64
+		wantEnvs    map[string]model.MultiKeyEnv
+	}{
+		{
+			name: "new keys take positions of disabled ones", channelType: constant.ChannelTypeOpenAI, key: "sk-key-a\nsk-key-b\nsk-key-c",
+			info: model.ChannelInfo{
+				MultiKeyStatusList:     map[int]int{1: common.ChannelStatusAutoDisabled, 2: common.ChannelStatusManuallyDisabled},
+				MultiKeyDisabledReason: map[int]string{1: "401 unauthorized"},
+				MultiKeyDisabledTime:   map[int]int64{1: 1761800000},
+			},
+			patch:      map[string]any{"key": "sk-key-d\nsk-key-e\nsk-key-b"},
+			wantKey:    "sk-key-d\nsk-key-e\nsk-key-b",
+			wantStatus: map[int]int{2: common.ChannelStatusAutoDisabled},
+			wantReason: map[int]string{2: "401 unauthorized"},
+			wantTime:   map[int]int64{2: 1761800000},
+		},
+		{
+			name: "a key listed twice", channelType: constant.ChannelTypeOpenAI, key: "sk-key-a\nsk-key-a\nsk-key-b",
+			info: model.ChannelInfo{
+				MultiKeyStatusList:     map[int]int{1: common.ChannelStatusManuallyDisabled},
+				MultiKeyDisabledReason: map[int]string{1: "manual"},
+				MultiKeyDisabledTime:   map[int]int64{1: 1761800000},
+			},
+			patch:      map[string]any{"key": "sk-key-b\nsk-key-a\nsk-key-a"},
+			wantKey:    "sk-key-b\nsk-key-a\nsk-key-a",
+			wantStatus: map[int]int{2: common.ChannelStatusManuallyDisabled},
+			wantReason: map[int]string{2: "manual"},
+			wantTime:   map[int]int64{2: 1761800000},
+		},
+		{
+			name: "vertex credential uploaded again", channelType: constant.ChannelTypeVertexAi, key: vertexA + "\n" + vertexB, other: vertexRegion,
+			info: model.ChannelInfo{
+				MultiKeyStatusList:     map[int]int{1: common.ChannelStatusAutoDisabled},
+				MultiKeyDisabledReason: map[int]string{1: "invalid_grant"},
+				MultiKeyDisabledTime:   map[int]int64{1: 1761800000},
+			},
+			patch:      map[string]any{"other": vertexRegion, "key": vertexBUploaded},
+			wantKey:    vertexB,
+			wantStatus: map[int]int{0: common.ChannelStatusAutoDisabled},
+			wantReason: map[int]string{0: "invalid_grant"},
+			wantTime:   map[int]int64{0: 1761800000},
+		},
+		{
+			name: "vertex credential stored as uploaded", channelType: constant.ChannelTypeVertexAi, key: vertexA + "\n" + vertexBUploaded, other: vertexRegion,
+			info: model.ChannelInfo{
+				MultiKeyStatusList:     map[int]int{1: common.ChannelStatusAutoDisabled},
+				MultiKeyDisabledReason: map[int]string{1: "invalid_grant"},
+				MultiKeyDisabledTime:   map[int]int64{1: 1761800000},
+				MultiKeyEnvs:           map[string]model.MultiKeyEnv{model.KeyFingerprint(vertexBUploaded): {Proxy: "http://proxy-b:8080"}},
+			},
+			patch:      map[string]any{"other": vertexRegion, "key": `[` + vertexB + `,{"project_id":"proj-c","type":"service_account"}]`},
+			wantKey:    vertexBUploaded + "\n" + `{"project_id":"proj-c","type":"service_account"}`,
+			wantStatus: map[int]int{0: common.ChannelStatusAutoDisabled},
+			wantReason: map[int]string{0: "invalid_grant"},
+			wantTime:   map[int]int64{0: 1761800000},
+			wantEnvs:   map[string]model.MultiKeyEnv{model.KeyFingerprint(vertexBUploaded): {Proxy: "http://proxy-b:8080"}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := tc.info
+			info.IsMultiKey, info.MultiKeySize, info.MultiKeyMode = true, len(strings.Split(tc.key, "\n")), constant.MultiKeyModeRandom
+			channel := &model.Channel{
+				Id: 60 + i, Name: "multi-key", Type: tc.channelType, Key: tc.key, Other: tc.other,
+				Status: common.ChannelStatusEnabled, Models: "gpt-4o", Group: "default", ChannelInfo: info,
+			}
+			require.NoError(t, f.db.Create(channel).Error)
+			patch := map[string]any{"id": channel.Id, "type": channel.Type, "key_mode": "replace"}
+			for field, value := range tc.patch {
+				patch[field] = value
+			}
+
+			response := callChannelAdminAPI(t, UpdateChannel, common.RoleRootUser, http.MethodPut, patch)
+
+			require.True(t, response.Success, response.Message)
+			stored, err := model.GetChannelById(channel.Id, true)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantKey, stored.Key)
+			assert.Equal(t, tc.wantStatus, stored.ChannelInfo.MultiKeyStatusList)
+			assert.Equal(t, tc.wantReason, stored.ChannelInfo.MultiKeyDisabledReason)
+			assert.Equal(t, tc.wantTime, stored.ChannelInfo.MultiKeyDisabledTime)
+			assert.Equal(t, tc.wantEnvs, stored.ChannelInfo.MultiKeyEnvs)
+		})
+	}
+}
+
+// A new channel takes no key environment or origin key from the request:
+// environments are set one key at a time on the saved channel, where they are
+// checked, and a channel created multi-key had no key before it.
+func TestAddChannelIgnoresKeyEnvironmentsInTheRequest(t *testing.T) {
+	f := newUpstreamValidationFixture(t)
+	response := callChannelAdminAPI(t, AddChannel, common.RoleRootUser, http.MethodPost, AddChannelRequest{
+		Mode: "multi_to_single", MultiKeyMode: constant.MultiKeyModeRandom,
+		Channel: &model.Channel{
+			Name: "new-multi-key", Type: constant.ChannelTypeOpenAI, Key: "sk-key-a\nsk-key-b",
+			Status: common.ChannelStatusEnabled, Models: "gpt-4o", Group: "default",
+			ChannelInfo: model.ChannelInfo{
+				MultiKeyEnvs: map[string]model.MultiKeyEnv{
+					model.KeyFingerprint("sk-key-b"): {CLIVersionProfile: "codex-9.9.9-windows-x64", Proxy: "ftp://proxy-b:21"},
+				},
+				MultiKeyOriginFingerprint: model.KeyFingerprint("sk-key-b"),
+			},
+		},
+	})
+
+	require.True(t, response.Success, response.Message)
+	var stored model.Channel
+	require.NoError(t, f.db.Where("name = ?", "new-multi-key").First(&stored).Error)
+	require.True(t, stored.ChannelInfo.IsMultiKey)
+	assert.Empty(t, stored.ChannelInfo.MultiKeyEnvs)
+	assert.Equal(t, "k"+model.KeyFingerprint("sk-key-b"), stored.KeyIdentitySlot("sk-key-b"))
+}
+
+// The channel endpoints never return a key's own environment, whose proxy can
+// carry a password; multi-key management shows it with the password masked.
+func TestChannelEndpointsLeaveOutKeyEnvironments(t *testing.T) {
+	f := newUpstreamValidationFixture(t)
+	channel := &model.Channel{
+		Id: 55, Name: "multi-key", Type: constant.ChannelTypeOpenAI, Key: "sk-key-a\nsk-key-b",
+		Status: common.ChannelStatusEnabled, Models: "gpt-4o", Group: "default",
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey: true, MultiKeySize: 2, MultiKeyMode: constant.MultiKeyModeRandom,
+			MultiKeyEnvs: map[string]model.MultiKeyEnv{
+				model.KeyFingerprint("sk-key-b"): {Proxy: "socks5://user:secret@proxy-b:1080"},
+			},
+		},
+	}
+	require.NoError(t, f.db.Create(channel).Error)
+
+	for _, endpoint := range []struct {
+		name    string
+		handler gin.HandlerFunc
+		target  string
+		params  gin.Params
+	}{
+		{"channel detail", GetChannel, "/api/channel/55", gin.Params{{Key: "id", Value: "55"}}},
+		{"channel list", GetAllChannels, "/api/channel/?p=1&page_size=10", nil},
+	} {
+		c, recorder := newAuthenticatedContext(t, http.MethodGet, endpoint.target, nil, 1)
+		c.Params = endpoint.params
+		endpoint.handler(c)
+		require.Equal(t, http.StatusOK, recorder.Code, endpoint.name)
+		assert.Contains(t, recorder.Body.String(), `"is_multi_key":true`, endpoint.name)
+		assert.NotContains(t, recorder.Body.String(), "secret", endpoint.name)
+		assert.NotContains(t, recorder.Body.String(), "multi_key_envs", endpoint.name)
+	}
 }

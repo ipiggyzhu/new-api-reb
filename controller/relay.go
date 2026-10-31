@@ -418,6 +418,14 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			logger.LogWarn(c, fmt.Sprintf("channel #%d cooling down for model %s for %s after status %d",
 				channel.Id, relayInfo.OriginModelName, cooldown, newAPIError.StatusCode))
 		}
+		// The key cools instead, so the conversations pinned to it go to their next
+		// key until the window ends rather than spending each turn's first attempt
+		// on the key that just failed.
+		if cooldown := service.ChannelKeyCooldownFor(newAPIError); cooldown > 0 && !relayInfo.IsChannelTest && channel.ChannelInfo.IsMultiKey {
+			model.MarkChannelKeyCooldown(channel.Id, common.GetContextKeyString(c, constant.ContextKeyChannelKey), relayInfo.OriginModelName, time.Now().Add(cooldown))
+			logger.LogWarn(c, fmt.Sprintf("channel #%d key #%d cooling down for model %s for %s after status %d",
+				channel.Id, common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex), relayInfo.OriginModelName, cooldown, newAPIError.StatusCode))
+		}
 		// Report this attempt, not just the request's final outcome. The
 		// distributor's post-c.Next() hook only ever sees the last channel, so
 		// without a report here a channel that failed and was retried away from

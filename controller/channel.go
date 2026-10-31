@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -70,6 +71,8 @@ func clearChannelInfo(channel *model.Channel) {
 	if channel.ChannelInfo.IsMultiKey {
 		channel.ChannelInfo.MultiKeyDisabledReason = nil
 		channel.ChannelInfo.MultiKeyDisabledTime = nil
+		// 各密钥的环境里有代理密码，只经多密钥管理脱敏后返回
+		channel.ChannelInfo.MultiKeyEnvs = nil
 	}
 }
 
@@ -721,6 +724,9 @@ func AddChannel(c *gin.Context) {
 	}
 
 	addChannelRequest.Channel.CreatedTime = common.GetTimestamp()
+	// 各密钥的独立环境只能在建好的渠道上经校验逐个设置；新渠道也没有转换前的原密钥
+	addChannelRequest.Channel.ChannelInfo.MultiKeyEnvs = nil
+	addChannelRequest.Channel.ChannelInfo.MultiKeyOriginFingerprint = ""
 	keys := make([]string, 0)
 	switch addChannelRequest.Mode {
 	case "multi_to_single":
@@ -1053,6 +1059,13 @@ func UpdateChannel(c *gin.Context) {
 		})
 		return
 	}
+	// 从读取原渠道到写回都持有该渠道的锁，与多密钥管理和自动禁用互斥：
+	// 期间被禁用的密钥、设置的密钥环境不会被这里读到的旧数据覆盖。
+	// 写回后即释放，重建缓存不必持锁：重建期间有别的发布时会重新扫描。
+	lock := model.GetChannelPollingLock(channel.Id)
+	lock.Lock()
+	unlock := sync.OnceFunc(lock.Unlock)
+	defer unlock()
 	// Preserve existing ChannelInfo to ensure multi-key channels keep correct state even if the client does not send ChannelInfo in the request.
 	originChannel, err := model.GetChannelById(channel.Id, true)
 	if err != nil {
@@ -1070,21 +1083,6 @@ func UpdateChannel(c *gin.Context) {
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSensitiveWrite) {
 		common.ApiErrorI18n(c, i18n.MsgAuthInsufficientPrivilege)
 		return
-	}
-
-	// 各密钥的独立环境叠加在渠道设置之上，渠道设置改动后也必须仍然成立。
-	effectiveSetting := originChannel.GetSetting()
-	if channel.Setting != nil {
-		effectiveSetting = channel.GetSetting()
-	}
-	for _, env := range channel.ChannelInfo.MultiKeyEnvs {
-		if err := validateMultiKeyEnv(effectiveSetting, env); err != nil {
-			c.JSON(http.StatusOK, gin.H{
-				"success": false,
-				"message": "有密钥的独立环境与新的渠道设置冲突，请先在多密钥管理中修改：" + err.Error(),
-			})
-			return
-		}
 	}
 
 	// If the request explicitly specifies a new MultiKeyMode, apply it on top of the original info.
@@ -1169,7 +1167,46 @@ func UpdateChannel(c *gin.Context) {
 				channel.Key = strings.Join(allKeys, "\n")
 			}
 		case "replace":
-			// 覆盖模式：直接使用新密钥（默认行为，不需要特殊处理）
+			// 覆盖模式：直接使用新密钥。Vertex 的 JSON 密钥按新建渠道时的格式存；
+			// 重新上传的凭证与已有密钥内容相同时沿用已有密钥的原文，
+			// 不论原文的字段顺序如何，该密钥的状态和环境都保留。
+			if channel.Type == constant.ChannelTypeVertexAi && channel.GetOtherSettings().VertexKeyType != dto.VertexKeyTypeAPIKey && channel.Key != "" {
+				trimmed := strings.TrimSpace(channel.Key)
+				var newKeys []string
+				if strings.HasPrefix(trimmed, "[") {
+					array, err := getVertexArrayKeys(trimmed)
+					if err != nil {
+						c.JSON(http.StatusOK, gin.H{
+							"success": false,
+							"message": "覆盖密钥解析失败: " + err.Error(),
+						})
+						return
+					}
+					newKeys = array
+				} else if strings.HasPrefix(trimmed, "{") {
+					// 单个 JSON 密钥
+					if array, err := getVertexArrayKeys("[" + trimmed + "]"); err == nil {
+						newKeys = array
+					}
+				}
+				if len(newKeys) > 0 {
+					// 含换行的原文不能按行存回，不沿用
+					originals := make(map[string]string)
+					for _, original := range originChannel.GetKeys() {
+						original = strings.TrimSpace(original)
+						canonical, err := getVertexArrayKeys("[" + original + "]")
+						if err == nil && len(canonical) == 1 && !strings.Contains(original, "\n") {
+							originals[canonical[0]] = original
+						}
+					}
+					for i, key := range newKeys {
+						if original, ok := originals[key]; ok {
+							newKeys[i] = original
+						}
+					}
+					channel.Key = strings.Join(newKeys, "\n")
+				}
+			}
 		}
 	} else if channel.KeyMode != nil && *channel.KeyMode == "append" && channel.Key != "" {
 		// 单密钥渠道追加密钥即转为多密钥：原密钥留在首位，并沿用它原来的上游身份。
@@ -1209,7 +1246,63 @@ func UpdateChannel(c *gin.Context) {
 			}
 		}
 	}
+
+	// 保存后渠道上的密钥
+	keys := originChannel.GetKeys()
+	if channel.Key != "" {
+		keys = channel.GetKeys()
+	}
+	// 覆盖多密钥渠道的密钥时，按序号存的启用状态、禁用原因和时间要跟着密钥走：
+	// 仍在新列表里的密钥保留原状态，新密钥从启用开始，不继承旧列表同一序号的状态。
+	// 重复的密钥按出现的先后一一对应。
+	if originChannel.ChannelInfo.IsMultiKey && channel.Key != "" && (channel.KeyMode == nil || *channel.KeyMode != "append") {
+		oldIndexes := make(map[string][]int)
+		for i, key := range originChannel.GetKeys() {
+			oldIndexes[strings.TrimSpace(key)] = append(oldIndexes[strings.TrimSpace(key)], i)
+		}
+		origin := originChannel.ChannelInfo
+		channel.ChannelInfo.MultiKeyStatusList = make(map[int]int)
+		channel.ChannelInfo.MultiKeyDisabledTime = make(map[int]int64)
+		channel.ChannelInfo.MultiKeyDisabledReason = make(map[int]string)
+		for i, key := range keys {
+			indexes := oldIndexes[strings.TrimSpace(key)]
+			if len(indexes) == 0 {
+				continue
+			}
+			old := indexes[0]
+			oldIndexes[strings.TrimSpace(key)] = indexes[1:]
+			if status, ok := origin.MultiKeyStatusList[old]; ok {
+				channel.ChannelInfo.MultiKeyStatusList[i] = status
+			}
+			if disabledTime, ok := origin.MultiKeyDisabledTime[old]; ok {
+				channel.ChannelInfo.MultiKeyDisabledTime[i] = disabledTime
+			}
+			if reason, ok := origin.MultiKeyDisabledReason[old]; ok {
+				channel.ChannelInfo.MultiKeyDisabledReason[i] = reason
+			}
+		}
+	}
+	// 各密钥的独立环境叠加在渠道设置之上，渠道设置改动后也必须仍然成立。
+	// 只校验保存后仍在渠道上的密钥，被换掉的密钥的环境会随之丢弃。
+	effectiveSetting := originChannel.GetSetting()
+	if channel.Setting != nil {
+		effectiveSetting = channel.GetSetting()
+	}
+	for _, key := range keys {
+		env, ok := channel.ChannelInfo.MultiKeyEnvs[model.KeyFingerprint(key)]
+		if !ok {
+			continue
+		}
+		if err := validateMultiKeyEnv(effectiveSetting, env); err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "有密钥的独立环境与新的渠道设置冲突，请先在多密钥管理中修改：" + err.Error(),
+			})
+			return
+		}
+	}
 	err = channel.Update()
+	unlock()
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -1615,6 +1708,12 @@ func ManageMultiKeys(c *gin.Context) {
 		return
 	}
 
+	// 从读取渠道到写回都持有该渠道的锁，与编辑渠道和自动禁用互斥：
+	// 期间被禁用的密钥不会被这里读到的旧数据重新启用，这里的修改也不会被对方覆盖。
+	lock := model.GetChannelPollingLock(request.ChannelId)
+	lock.Lock()
+	defer lock.Unlock()
+
 	channel, err := model.GetChannelById(request.ChannelId, true)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{
@@ -1646,10 +1745,6 @@ func ManageMultiKeys(c *gin.Context) {
 			"id":     channel.Id,
 		})
 	}
-
-	lock := model.GetChannelPollingLock(channel.Id)
-	lock.Lock()
-	defer lock.Unlock()
 
 	switch request.Action {
 	case "get_key_status":

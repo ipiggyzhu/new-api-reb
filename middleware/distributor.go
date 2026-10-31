@@ -567,9 +567,10 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelModelMapping, channel.GetModelMapping())
 	common.SetContextKey(c, constant.ContextKeyChannelStatusCodeMapping, channel.GetStatusCodeMapping())
 
-	// On a multi-key channel dressed as a CLI, one conversation stays on one key,
-	// so the upstream never sees a client's conversation hop between accounts.
-	// Requests that name no conversation keep the channel's key mode.
+	// On a multi-key channel dressed as a CLI, one conversation stays on one key
+	// while that key serves, so the upstream never sees a client's conversation
+	// hop between accounts. Requests that name no conversation keep the channel's
+	// key mode.
 	conversation := ""
 	if family := setting.SyntheticClientHeadersProfile; channel.ChannelInfo.IsMultiKey &&
 		(family == constant.ClientHeaderFamilyCodex || family == constant.ClientHeaderFamilyClaude) {
@@ -585,7 +586,7 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	var index int
 	var newAPIError *types.NewAPIError
 	if conversation != "" {
-		key, index, newAPIError = channel.GetStickyEnabledKey(conversation)
+		key, index, newAPIError = channel.GetStickyEnabledKey(conversation, modelName)
 	} else {
 		key, index, newAPIError = channel.GetNextEnabledKey()
 	}
