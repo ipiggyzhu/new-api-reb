@@ -22,6 +22,9 @@ type ChannelKeyEnvironment struct {
 	ChannelId int     `json:"channel_id" gorm:"not null;uniqueIndex:idx_channel_key_env_profile"`
 	KeyTag    string  `json:"-" gorm:"type:varchar(16);not null;uniqueIndex"`
 	ProfileId *string `json:"profile_id" gorm:"type:varchar(64);uniqueIndex:idx_channel_key_env_profile"`
+	// Proxy overrides the channel proxy only while independent environments
+	// are enabled. It may contain credentials, so admin responses redact it.
+	Proxy string `json:"-" gorm:"type:text"`
 }
 
 // ChannelKeyTag names a key without revealing it: the first 8 bytes of the
@@ -42,10 +45,10 @@ func ChannelKeyTag(key string) string {
 // channelSyncLock.
 var (
 	keyEnvironmentLock     sync.RWMutex
-	channelKeyEnvironments map[int]map[string]string
+	channelKeyEnvironments map[int]map[string]ChannelKeyEnvironment
 )
 
-func loadChannelKeyEnvironments(db *gorm.DB, channelIds ...int) (map[int]map[string]string, error) {
+func loadChannelKeyEnvironments(db *gorm.DB, channelIds ...int) (map[int]map[string]ChannelKeyEnvironment, error) {
 	var rows []ChannelKeyEnvironment
 	query := db.Model(&ChannelKeyEnvironment{})
 	if len(channelIds) > 0 {
@@ -54,21 +57,17 @@ func loadChannelKeyEnvironments(db *gorm.DB, channelIds ...int) (map[int]map[str
 	if err := query.Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	projection := make(map[int]map[string]string)
+	projection := make(map[int]map[string]ChannelKeyEnvironment)
 	for _, row := range rows {
 		if projection[row.ChannelId] == nil {
-			projection[row.ChannelId] = make(map[string]string)
+			projection[row.ChannelId] = make(map[string]ChannelKeyEnvironment)
 		}
-		profileId := ""
-		if row.ProfileId != nil {
-			profileId = *row.ProfileId
-		}
-		projection[row.ChannelId][row.KeyTag] = profileId
+		projection[row.ChannelId][row.KeyTag] = row
 	}
 	return projection, nil
 }
 
-func installChannelKeyEnvironments(projection map[int]map[string]string) {
+func installChannelKeyEnvironments(projection map[int]map[string]ChannelKeyEnvironment) {
 	keyEnvironmentLock.Lock()
 	defer keyEnvironmentLock.Unlock()
 	channelKeyEnvironments = projection
@@ -78,7 +77,7 @@ func installChannelKeyEnvironments(projection map[int]map[string]string) {
 // map ("" = unassigned). With the memory cache on it is the cached projection
 // and must not be modified; with it off it is read from the database, as the
 // channel itself was.
-func ChannelKeyEnvironmentAssignments(channelId int) map[string]string {
+func channelKeyEnvironmentRows(channelId int) map[string]ChannelKeyEnvironment {
 	if !common.MemoryCacheEnabled {
 		projection, err := loadChannelKeyEnvironments(DB, channelId)
 		if err != nil {
@@ -92,15 +91,39 @@ func ChannelKeyEnvironmentAssignments(channelId int) map[string]string {
 	return channelKeyEnvironments[channelId]
 }
 
+func ChannelKeyEnvironmentAssignments(channelId int) map[string]string {
+	rows := channelKeyEnvironmentRows(channelId)
+	assignments := make(map[string]string, len(rows))
+	for tag, row := range rows {
+		if row.ProfileId != nil {
+			assignments[tag] = *row.ProfileId
+		} else {
+			assignments[tag] = ""
+		}
+	}
+	return assignments
+}
+
+// KeyEnvironmentConfig is the one environment the selected key wears. A
+// saved row has no effect while the switch is off; an unassigned key cannot
+// serve traffic even when it has a saved proxy.
+func (channel *Channel) KeyEnvironmentConfig(key string) (ChannelKeyEnvironment, bool) {
+	if channel == nil || !channel.GetSetting().KeyEnvironments {
+		return ChannelKeyEnvironment{}, false
+	}
+	row := channelKeyEnvironmentRows(channel.Id)[ChannelKeyTag(key)]
+	return row, row.ProfileId != nil && *row.ProfileId != ""
+}
+
 // KeyEnvironmentProfile is the profile assigned to key when the channel runs
 // independent key environments. ok is false for a channel without the switch
 // and for an unassigned or unknown key, which must then serve no traffic.
 func (channel *Channel) KeyEnvironmentProfile(key string) (string, bool) {
-	if channel == nil || !channel.GetSetting().KeyEnvironments {
+	row, assigned := channel.KeyEnvironmentConfig(key)
+	if !assigned {
 		return "", false
 	}
-	profileId := ChannelKeyEnvironmentAssignments(channel.Id)[ChannelKeyTag(key)]
-	return profileId, profileId != ""
+	return *row.ProfileId, true
 }
 
 // keyEnvironmentAssigned narrows enabled key indexes to the assigned keys of an

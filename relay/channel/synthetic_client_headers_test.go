@@ -1,11 +1,11 @@
 package channel
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	appcommon "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/common"
@@ -89,7 +89,7 @@ func TestWildcardPassthroughLeaksClientHeaders(t *testing.T) {
 func TestStaleSendOriginalRequestKeyIsInert(t *testing.T) {
 	c := newHeaderOverrideTestContext(t)
 	var setting dto.ChannelSettings
-	require.NoError(t, json.Unmarshal([]byte(`{"send_original_request":true}`), &setting))
+	require.NoError(t, appcommon.Unmarshal([]byte(`{"send_original_request":true}`), &setting))
 	info := newHeaderOverrideRelayInfo(setting)
 
 	got, err := processHeaderOverride(info, c)
@@ -104,7 +104,8 @@ func TestStaleSendOriginalRequestKeyIsInert(t *testing.T) {
 func TestSyntheticClientHeadersBlocksEveryLeak(t *testing.T) {
 	c := newHeaderOverrideTestContext(t)
 	info := wildcardPassthroughInfo(dto.ChannelSettings{
-		SyntheticClientHeadersProfile: constant.ClientHeaderFamilyOpenAI,
+		SyntheticClientHeadersProfile: constant.ClientHeaderFamilyClaude,
+		CLIVersionProfile:             "claude-2.1.306-linux-x64",
 	})
 
 	got, err := processHeaderOverride(info, c)
@@ -118,14 +119,12 @@ func TestSyntheticClientHeadersBlocksEveryLeak(t *testing.T) {
 	// be the synthesized one, never the caller's.
 	require.NotEmpty(t, got["user-agent"])
 	assert.NotContains(t, got["user-agent"], "MySecretInternalTool")
-	assert.Contains(t, got["user-agent"], "OpenAI/Python",
-		"the selected SDK profile must supply the client identity")
+	assert.Contains(t, got["user-agent"], "claude-cli/2.1.306",
+		"the selected version must supply the client identity")
 }
 
-// TestLegacySyntheticClientHeadersBoolStillApplies covers channels saved before
-// the profile could be chosen. Their stored setting is the bare bool, and reading
-// it as "off" would quietly drop the protection they were saved with.
-func TestLegacySyntheticClientHeadersBoolStillApplies(t *testing.T) {
+// A legacy family switch without a selected version cannot synthesize headers.
+func TestLegacySyntheticClientHeadersBoolRequiresVersion(t *testing.T) {
 	c := newHeaderOverrideTestContext(t)
 	info := wildcardPassthroughInfo(dto.ChannelSettings{SyntheticClientHeaders: true})
 
@@ -133,9 +132,9 @@ func TestLegacySyntheticClientHeadersBoolStillApplies(t *testing.T) {
 	require.NoError(t, err)
 
 	for name, value := range leakyClientHeaders {
-		assert.NotEqual(t, value, got[name], "legacy bool must still block %q", name)
+		assert.Equal(t, value, got[name], "without a version ordinary passthrough retains %q", name)
 	}
-	assert.Contains(t, got["user-agent"], "OpenAI/Python")
+	assert.Equal(t, leakyClientHeaders["user-agent"], got["user-agent"])
 }
 
 // TestSyntheticClientHeadersForcedFamilyOverridesChannelType is the reason the
@@ -146,6 +145,7 @@ func TestSyntheticClientHeadersForcedFamilyOverridesChannelType(t *testing.T) {
 	c := newHeaderOverrideTestContext(t)
 	info := newHeaderOverrideRelayInfo(dto.ChannelSettings{
 		SyntheticClientHeadersProfile: constant.ClientHeaderFamilyClaude,
+		CLIVersionProfile:             "claude-2.1.306-linux-x64",
 	})
 	require.Equal(t, constant.APITypeOpenAI, info.ChannelMeta.ApiType)
 
@@ -157,8 +157,8 @@ func TestSyntheticClientHeadersForcedFamilyOverridesChannelType(t *testing.T) {
 	assert.Equal(t, "2023-06-01", got["anthropic-version"])
 }
 
-// Unknown legacy values retain the former default without enabling passthrough.
-func TestSyntheticClientHeadersUnknownFamilyKeepsLegacyDefault(t *testing.T) {
+// Unknown legacy family values cannot synthesize a version that was not chosen.
+func TestSyntheticClientHeadersUnknownFamilyRequiresVersion(t *testing.T) {
 	c := newHeaderOverrideTestContext(t)
 	info := wildcardPassthroughInfo(dto.ChannelSettings{
 		SyntheticClientHeadersProfile: "claud",
@@ -168,10 +168,9 @@ func TestSyntheticClientHeadersUnknownFamilyKeepsLegacyDefault(t *testing.T) {
 	require.NoError(t, err)
 
 	for name, value := range leakyClientHeaders {
-		assert.NotEqual(t, value, got[name], "a typo'd family must not reopen %q", name)
+		assert.Equal(t, value, got[name], "without a version ordinary passthrough retains %q", name)
 	}
-	assert.Contains(t, got["user-agent"], "OpenAI/Python",
-		"unknown legacy values keep the former client profile")
+	assert.Equal(t, leakyClientHeaders["user-agent"], got["user-agent"])
 }
 
 // TestSyntheticClientHeadersBlocksClientHeaderPlaceholder closes the way back in:
@@ -181,7 +180,8 @@ func TestSyntheticClientHeadersUnknownFamilyKeepsLegacyDefault(t *testing.T) {
 func TestSyntheticClientHeadersBlocksClientHeaderPlaceholder(t *testing.T) {
 	c := newHeaderOverrideTestContext(t)
 	info := newHeaderOverrideRelayInfo(dto.ChannelSettings{
-		SyntheticClientHeadersProfile: constant.ClientHeaderFamilyOpenAI,
+		SyntheticClientHeadersProfile: constant.ClientHeaderFamilyCodex,
+		CLIVersionProfile:             "codex-0.163.0-linux-x64",
 	})
 	info.ChannelMeta.HeadersOverride = map[string]any{
 		"x-smuggled": "{client_header:x-auth-token}",
@@ -202,7 +202,8 @@ func TestSyntheticClientHeadersBlocksClientHeaderPlaceholder(t *testing.T) {
 func TestSyntheticClientHeadersKeepsStaticOverrides(t *testing.T) {
 	c := newHeaderOverrideTestContext(t)
 	info := newHeaderOverrideRelayInfo(dto.ChannelSettings{
-		SyntheticClientHeadersProfile: constant.ClientHeaderFamilyOpenAI,
+		SyntheticClientHeadersProfile: constant.ClientHeaderFamilyCodex,
+		CLIVersionProfile:             "codex-0.163.0-linux-x64",
 	})
 	info.ChannelMeta.HeadersOverride = map[string]any{
 		"x-upstream-tag": "my-static-value",
@@ -225,6 +226,11 @@ func TestLegacySyntheticClientHeadersRetainsChannelFamily(t *testing.T) {
 	got, err := processHeaderOverride(info, c)
 	require.NoError(t, err)
 
+	assert.Empty(t, got, "a legacy family alone cannot synthesize headers")
+	info.ChannelSetting.Normalize(info.ChannelMeta.ApiType)
+	info.ChannelSetting.CLIVersionProfile = "claude-2.1.306-linux-x64"
+	got, err = processHeaderOverride(info, c)
+	require.NoError(t, err)
 	assert.Contains(t, got["user-agent"], "claude-cli/")
 	assert.Equal(t, "2023-06-01", got["anthropic-version"])
 }
@@ -234,6 +240,7 @@ func TestMigratedClientProfileStaysFixedWhenChannelTypeChanges(t *testing.T) {
 	settings := dto.ChannelSettings{SyntheticClientHeadersProfile: dto.SyntheticClientHeadersProfileAuto}
 	settings.Normalize(constant.APITypeCodex)
 	require.Equal(t, constant.ClientHeaderFamilyCodex, settings.SyntheticClientHeadersProfile)
+	settings.CLIVersionProfile = "codex-0.163.0-linux-x64"
 	info := wildcardPassthroughInfo(settings)
 	info.ChannelMeta.ApiType = constant.APITypeAnthropic
 

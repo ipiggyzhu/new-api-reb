@@ -522,7 +522,7 @@ func newUpstreamValidationFixture(t *testing.T) *upstreamValidationFixture {
 	})
 	initModelListColumnNames(t)
 	db := setupErrorLogTestDB(t)
-	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.ChannelKeyEnvironment{}, &model.Ability{}))
 	common.LogConsumeEnabled, constant.CountToken = false, false
 	common.MemoryCacheEnabled = false
 	ratios := ratio_setting.GetModelRatioCopy()

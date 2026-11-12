@@ -119,9 +119,9 @@ export function useChannelMutateForm(props: UseChannelMutateFormParams) {
       }
       const payloadWithKeyMode =
         canEditSensitive &&
-        props.isMultiKeyChannel &&
         data.key?.trim() &&
-        data.key_mode
+        data.key_mode &&
+        (props.isMultiKeyChannel || data.key_mode === 'append')
           ? {
               ...payload,
               key_mode: data.key_mode,

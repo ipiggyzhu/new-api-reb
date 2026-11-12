@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"time"
 
@@ -49,19 +50,28 @@ type channelKeepaliveSummary struct {
 }
 
 type channelKeepaliveFailure struct {
-	ChannelId int    `json:"channel_id"`
-	Error     string `json:"error"`
+	ChannelId int `json:"channel_id"`
+	// KeyIndex is the failing key's index on a multi-key channel.
+	KeyIndex *int   `json:"key_index,omitempty"`
+	Error    string `json:"error"`
 }
 
-// findDueKeepaliveChannelIDs lists the enabled channels whose upstream keepalive
-// is due at now, judged against each channel's real-traffic activity record.
+// channelKeepaliveKey is one key named by its existing environment tag.
+type channelKeepaliveKey struct {
+	channelId int
+	keyTag    string
+}
+
+// findDueKeepalives lists, in channel id order, the keys of enabled channels
+// whose upstream keepalive is due at now, each judged against that key's own
+// real-traffic activity record. A key that is gone or disabled is never due.
 // The LIKE only narrows the rows to parse; the parsed settings decide, so a
 // stored `"upstream_keepalive_enabled":false` or different JSON spacing cannot
 // change the answer.
-func findDueKeepaliveChannelIDs(now int64) ([]int, error) {
+func findDueKeepalives(now int64) ([]channelKeepaliveKey, error) {
 	var channels []*model.Channel
 	err := model.DB.
-		Select("id", "settings").
+		Select("id", "type", "key", "channel_info", "setting", "settings").
 		Where("status = ?", common.ChannelStatusEnabled).
 		Where("settings LIKE ?", "%upstream_keepalive_enabled%").
 		Order("id asc").
@@ -69,96 +79,137 @@ func findDueKeepaliveChannelIDs(now int64) ([]int, error) {
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]int, 0, len(channels))
+	activities := service.ChannelKeyActivities(now)
+	var due []channelKeepaliveKey
 	for _, channel := range channels {
 		settings := channel.GetOtherSettings()
-		if settings.UpstreamKeepaliveDue(channel.Id, service.ChannelLastActiveAt(channel.Id, now), now) {
-			ids = append(ids, channel.Id)
+		keys := activities[channel.Id]
+		sort.Slice(keys, func(i, j int) bool { return keys[i].KeyTag < keys[j].KeyTag })
+		for _, key := range keys {
+			if index, _, _ := channel.KeyEnvironmentKey(key.KeyTag, ""); index >= 0 &&
+				settings.UpstreamKeepaliveDue(channel.Id, key.KeyTag, key.LastActive, key.LastKeepalive, now) {
+				due = append(due, channelKeepaliveKey{channelId: channel.Id, keyTag: key.KeyTag})
+			}
 		}
 	}
-	return ids, nil
+	return due, nil
 }
 
-// runChannelKeepalivePass sends every keepalive that is due, one channel at a
-// time. Failures are recorded and logged only: they never disable a channel and
-// the channel is retried after its normal interval.
+// runChannelKeepalivePass sends every keepalive that is due, one key at a time.
+// Failures are recorded and logged only: they never disable a channel or a key,
+// and the key is retried after its normal interval.
 func runChannelKeepalivePass(ctx context.Context) (channelKeepaliveSummary, error) {
 	summary := channelKeepaliveSummary{}
-	ids, err := findDueKeepaliveChannelIDs(common.GetTimestamp())
+	due, err := findDueKeepalives(common.GetTimestamp())
 	if err != nil {
 		return summary, err
 	}
-	for _, id := range ids {
+	for _, unit := range due {
 		if ctx.Err() != nil {
 			break
 		}
-		channel, err := model.GetChannelById(id, true)
+		channel, err := model.GetChannelById(unit.channelId, true)
 		if err != nil {
-			summary.recordFailure(id, err)
+			summary.recordFailure(unit.channelId, nil, err)
 			continue
 		}
-		// The channel may have been disabled or edited since the scan, or real
-		// traffic may have reached it while earlier channels were being sent.
+		// The channel may have been disabled or edited since the scan, the key
+		// removed or disabled, or real traffic may have reached the key while
+		// earlier keys were being sent.
 		now := common.GetTimestamp()
 		settings := channel.GetOtherSettings()
-		lastActive := service.ChannelLastActiveAt(channel.Id, now)
-		if channel.Status != common.ChannelStatusEnabled || !settings.UpstreamKeepaliveDue(channel.Id, lastActive, now) {
+		activity := service.ChannelKeyActivityAt(channel.Id, unit.keyTag, now)
+		index, key, _ := channel.KeyEnvironmentKey(unit.keyTag, "")
+		if channel.Status != common.ChannelStatusEnabled || index < 0 ||
+			!settings.UpstreamKeepaliveDue(channel.Id, unit.keyTag, activity.LastActive, activity.LastKeepalive, now) {
 			continue
 		}
+		var keyIndex *int
+		if channel.ChannelInfo.IsMultiKey {
+			keyIndex = &index
+		}
 		summary.Due++
-		// Stamp before sending. A failed keepalive then waits the same interval
-		// as a successful one, and a stamp that cannot be persisted means no
-		// send, so neither a crash nor a database outage turns into a burst of
-		// requests against the upstream every minute.
+		// Stamp before sending, so a failed keepalive waits the same interval as
+		// a successful one. The channel's stored stamp is the one the admin sees;
+		// one that cannot be persisted means no send.
+		service.StampChannelKeyKeepalive(channel.Id, unit.keyTag, now)
 		if err := model.MutateChannelSettings(channel.Id, func(stored *dto.ChannelOtherSettings) bool {
 			stored.UpstreamKeepaliveLastTime = now
 			return true
 		}); err != nil {
-			summary.recordFailure(channel.Id, err)
+			summary.recordFailure(channel.Id, keyIndex, err)
 			continue
 		}
-		if err := sendChannelKeepalive(ctx, channel); err != nil {
-			summary.recordFailure(channel.Id, err)
+		if err := sendChannelKeepalive(ctx, channel, key); err != nil {
+			summary.recordFailure(channel.Id, keyIndex, err)
 			continue
 		}
 		summary.Succeeded++
-		common.SysLog(fmt.Sprintf("channel keepalive succeeded: channel_id=%d", channel.Id))
+		common.SysLog(fmt.Sprintf("channel keepalive succeeded: %s", channelKeepaliveLabel(channel.Id, keyIndex)))
 	}
 	return summary, nil
 }
 
-func (s *channelKeepaliveSummary) recordFailure(channelId int, err error) {
+// channelKeepaliveLabel names a keepalive in the logs: "channel_id=3" for a
+// single-key channel, "channel_id=3 key_index=1" for one key of a multi-key
+// channel.
+func channelKeepaliveLabel(channelId int, keyIndex *int) string {
+	if keyIndex == nil {
+		return fmt.Sprintf("channel_id=%d", channelId)
+	}
+	return fmt.Sprintf("channel_id=%d key_index=%d", channelId, *keyIndex)
+}
+
+func (s *channelKeepaliveSummary) recordFailure(channelId int, keyIndex *int, err error) {
 	message := common.MaskSensitiveInfo(err.Error())
-	common.SysError(fmt.Sprintf("channel keepalive failed: channel_id=%d err=%s", channelId, message))
+	common.SysError(fmt.Sprintf("channel keepalive failed: %s err=%s", channelKeepaliveLabel(channelId, keyIndex), message))
 	if len(message) > channelKeepaliveErrorLimit {
 		message = message[:channelKeepaliveErrorLimit] + "..."
 	}
 	s.Failed++
-	s.Failures = append(s.Failures, channelKeepaliveFailure{ChannelId: channelId, Error: message})
+	s.Failures = append(s.Failures, channelKeepaliveFailure{ChannelId: channelId, KeyIndex: keyIndex, Error: message})
 }
 
 // sendChannelKeepalive sends one tiny request to the channel's upstream with
-// the channel's own key, through the same adaptor steps as a channel test.
+// one of its keys, through the same adaptor steps as a channel test.
 //
 // It is system traffic, so it deliberately leaves out everything a channel
 // test adds on top of the adaptor: no test user, no pricing or quota, no
 // consume log, no response-time update, and no verdict on the channel. The
 // relay controller is not involved, so nothing reaches channel scoring,
-// affinity or auto-disable either, and no concurrency slot is taken, so the
-// keepalive is not recorded as channel activity and cannot keep its own active
-// window open. The client profile does not apply: the
-// request goes out without synthesized client headers, TLS fingerprint or CLI
-// body shaping.
-func sendChannelKeepalive(ctx context.Context, channel *model.Channel) error {
+// affinity or auto-disable either, and no concurrency keyTag is taken, so the
+// keepalive is not recorded as key activity and cannot keep its own active
+// window open.
+//
+// To the upstream it is that key's own client: it wears the key's client
+// environment (the channel's headers, TLS fingerprint and seeds, with the
+// key's own CLI version and proxy laid over the channel's) and identity, and
+// on a channel whose real traffic is a Codex or Claude Code CLI it continues
+// the last real session on that key, with its model, user and token scope and
+// conversation seed, streams like the CLI does, and sends no output limit the
+// CLI would not send.
+func sendChannelKeepalive(ctx context.Context, channel *model.Channel, key string) error {
+	keyTag := model.ChannelKeyTag(key)
 	if lo.Contains(unsupportedTestChannelTypes, channel.Type) {
 		return fmt.Errorf("%s channels have no chat endpoint for a keepalive", constant.GetChannelTypeName(channel.Type))
 	}
-	// The test model, else the channel's first model, that takes a chat request.
-	// Embedding, rerank, image and compaction models are passed over: a chat
-	// request to one fails on every interval without keeping anything warm.
+	apiType, _ := common.ChannelType2APIType(channel.Type)
+	channelSetting := channel.GetSetting()
+	channelSetting.Normalize(apiType)
+	family := channelSetting.SyntheticClientHeadersProfile
+	cliProfile := (family == constant.ClientHeaderFamilyCodex || family == constant.ClientHeaderFamilyClaude) &&
+		(channelSetting.CLIVersionProfile != "" || channelSetting.KeyEnvironments)
+	session, continued := service.LastChannelCLISession(channel.Id, keyTag)
+	continued = continued && cliProfile
+
+	// Continue the key's last CLI model when it still serves chat. Otherwise
+	// use the test model, then the first chat model, passing over non-chat ones.
 	candidates := channel.GetModels()
 	if channel.TestModel != nil {
 		candidates = append([]string{*channel.TestModel}, candidates...)
+	}
+	if continued {
+		candidates = append([]string{session.ModelName}, candidates...)
 	}
 	modelName := ""
 	for _, candidate := range candidates {
@@ -179,71 +230,90 @@ func sendChannelKeepalive(ctx context.Context, channel *model.Channel) error {
 	defer cancel()
 
 	prompt := operation_setting.PickChannelTestPrompt() + "\n" + channelKeepaliveInstruction
+	// The CLIs always stream and never cap the output, so a CLI-profiled
+	// keepalive does neither. The ChatGPT Codex backend also refuses
+	// non-streaming requests (the reason the automatic channel test streams for
+	// Codex, commit 5f67d2a2).
+	isStream := cliProfile || channel.Type == constant.ChannelTypeCodex
+	var maxTokens *uint
+	if !cliProfile {
+		maxTokens = lo.ToPtr(uint(channelKeepaliveMaxTokens))
+	}
 	requestPath := "/v1/chat/completions"
 	relayFormat := types.RelayFormatOpenAI
-	isStream := false
 	var request dto.Request = &dto.GeneralOpenAIRequest{
 		Model:     modelName,
-		Stream:    lo.ToPtr(false),
+		Stream:    lo.ToPtr(isStream),
 		Messages:  []dto.Message{{Role: "user", Content: prompt}},
-		MaxTokens: lo.ToPtr(uint(channelKeepaliveMaxTokens)),
+		MaxTokens: maxTokens,
 	}
-	// Codex channels and codex models only exist on the Responses endpoint, as
-	// in the channel test. The ChatGPT Codex backend also refuses non-streaming
-	// requests (the reason the automatic channel test streams for Codex, commit
-	// 5f67d2a2), so that one channel type streams.
-	if channel.Type == constant.ChannelTypeCodex || strings.Contains(strings.ToLower(modelName), "codex") {
+	// Codex channels and codex models only exist on the Responses endpoint, and
+	// an OpenAI channel wearing the Codex profile is a Codex CLI upstream, as in
+	// the channel test.
+	if channel.Type == constant.ChannelTypeCodex || strings.Contains(strings.ToLower(modelName), "codex") ||
+		(channel.Type == constant.ChannelTypeOpenAI && family == constant.ClientHeaderFamilyCodex) {
 		input, err := common.Marshal([]dto.Message{{Role: "user", Content: prompt}})
 		if err != nil {
 			return err
 		}
-		isStream = channel.Type == constant.ChannelTypeCodex
 		requestPath = "/v1/responses"
 		relayFormat = types.RelayFormatOpenAIResponses
-		request = &dto.OpenAIResponsesRequest{
+		responsesRequest := &dto.OpenAIResponsesRequest{
 			Model:           modelName,
 			Input:           input,
 			Stream:          lo.ToPtr(isStream),
-			MaxOutputTokens: lo.ToPtr(uint(channelKeepaliveMaxTokens)),
+			MaxOutputTokens: maxTokens,
 		}
+		if continued && len(session.Reasoning) > 0 {
+			var reasoning dto.Reasoning
+			if err := common.Unmarshal(session.Reasoning, &reasoning); err == nil {
+				responsesRequest.Reasoning = &reasoning
+			}
+		}
+		request = responsesRequest
+	}
+	originalBody, err := common.Marshal(request)
+	if err != nil {
+		return err
 	}
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, requestPath, nil)
+	c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, requestPath, bytes.NewReader(originalBody))
 	c.Request.Header.Set("Content-Type", "application/json")
-	if !isStream {
+	// The CLI shaping reads the caller's own body to tell what the caller asked
+	// for (an output limit, an effort) from what conversion filled in.
+	if _, err := common.GetBodyStorage(c); err != nil {
+		return err
+	}
+	defer common.CleanupBodyStorage(c)
+	if cliProfile {
+		// Dress the synthetic request as the configured client, as the channel
+		// test does; the relay forwards these for channel-test requests.
+		applyTestClientHeaders(c.Request.Header, apiType, family, isStream)
+	} else if !isStream {
 		// The adaptor copies this request's Accept upstream; streaming fills in
 		// text/event-stream itself when it is absent.
 		c.Request.Header.Set("Accept", "application/json")
 	}
-	// A seeded pick spreads keepalives over a multi-key channel's enabled keys
-	// without advancing the polling cursor that orders real traffic.
-	common.SetContextKey(c, constant.ContextKeyChannelKeySeed, fmt.Sprintf("keepalive:%d", time.Now().UnixNano()))
-	if newAPIError := middleware.SetupContextForSelectedChannel(c, channel, modelName); newAPIError != nil {
+	if newAPIError := middleware.SetupContextForSelectedChannel(c, channel, modelName, key); newAPIError != nil {
 		return newAPIError
 	}
-	// Keepalive is system traffic and does not wear the channel's client profile.
-	// Clearing the profile on this request's copy of the settings makes every
-	// shaping step see "no profile"; the shaping code itself is untouched.
-	channelSetting := channel.GetSetting()
-	channelSetting.SyntheticClientHeadersProfile = ""
-	channelSetting.SyntheticClientHeaders = false
-	channelSetting.CLIVersionProfile = ""
-	channelSetting.TLSFingerprint = ""
-	channelSetting.ClientDeviceSeed = ""
-	channelSetting.ClientSessionSeed = ""
-	common.SetContextKey(c, constant.ContextKeyChannelSetting, channelSetting)
 
 	info, err := relaycommon.GenRelayInfo(c, relayFormat, request, nil)
 	if err != nil {
 		return err
 	}
-	// The channel-test flag gives the synthetic-request semantics the relay
-	// already implements for tests: no caller body or headers to pass through and
-	// no WebSocket upgrade probe. Nothing that scores, bills or disables a channel
-	// reads it here, because none of those run on this path.
+	// Reuse synthetic-request semantics without recording another real session.
+	// Keepalive still uses the selected key's HTTP or WebSocket transport; its
+	// attempts never persist a capability downgrade. Scoring and billing do not
+	// run on this path.
 	info.IsChannelTest = true
+	info.IsSystemKeepalive = true
+	if continued {
+		info.UserId, info.TokenId = session.UserId, session.TokenId
+		info.CLISessionSeed = session.Seed
+	}
 	// Nobody reads the response, so there is no one to keep alive with pings.
 	info.DisablePing = true
 	info.InitChannelMeta(c)
@@ -252,7 +322,6 @@ func sendChannelKeepalive(ctx context.Context, channel *model.Channel) error {
 	}
 	request.SetModelName(info.UpstreamModelName)
 
-	apiType, _ := common.ChannelType2APIType(channel.Type)
 	adaptor := relay.GetAdaptor(apiType)
 	if adaptor == nil {
 		return fmt.Errorf("invalid api type: %d, adaptor is nil", apiType)

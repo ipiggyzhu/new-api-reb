@@ -74,7 +74,7 @@ func TestBillingAndExistingCacheBreakpointsBoundary(t *testing.T) {
 	info.ChannelSetting.CLIVersionProfile = "claude-2.1.211-windows-x64"
 	withOriginalRequest(t, c, string(raw))
 	shaped := shapeClaudeMessagesBody(t, c, info, raw)
-	assert.Len(t, gjson.GetBytes(shaped, "system.#(cache_control)#").Array(), 5, "native caller cache layout is preserved even above the provider limit")
+	assert.Equal(t, map[string]string{"system.0.cache_control": "ephemeral 1h"}, claudeCacheBreakpoints(t, shaped), "only the opaque billing block preserves caller cache policy")
 	assert.Equal(t, string(shaped), string(shapeClaudeMessagesBody(t, c, info, shaped)))
 }
 

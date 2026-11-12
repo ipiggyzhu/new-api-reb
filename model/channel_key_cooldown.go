@@ -1,8 +1,6 @@
 package model
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
 	"sync"
 	"time"
 
@@ -16,10 +14,10 @@ import (
 // Only when every enabled key is cooling does the channel itself cool, through
 // the ordinary channel cooldown (MarkChannelKeyCooldownAndChannel).
 //
-// Entries are keyed by key index but also carry a fingerprint of the key text,
-// so editing the key list cannot leave a cooldown on whichever key moved into
-// a refused key's slot. The fingerprint lives only in this map; logs show the
-// index.
+// Entries are keyed by model and ChannelKeyTag, across channels. Reordering
+// keys or moving a key to another channel keeps its cooldown and strike count;
+// a replacement key never inherits the old index's state. Logs show the index,
+// never the tag or key.
 //
 // Per process, like channelCooldowns.
 const (
@@ -29,21 +27,15 @@ const (
 )
 
 type keyCooldownEntry struct {
-	until       time.Time
-	lastMark    time.Time
-	strikes     int
-	fingerprint uint64
+	until    time.Time
+	lastMark time.Time
+	strikes  int
 }
 
 var (
 	channelKeyCooldownLock sync.RWMutex
-	channelKeyCooldowns    = map[string]map[int]keyCooldownEntry{}
+	channelKeyCooldowns    = map[string]map[string]keyCooldownEntry{}
 )
-
-func channelKeyFingerprint(key string) uint64 {
-	sum := sha256.Sum256([]byte(key))
-	return binary.BigEndian.Uint64(sum[:8])
-}
 
 // MarkChannelKeyCooldown keeps key keyIndex of the channel out of selection for
 // modelName and returns the deadline in force. hint is the upstream's own
@@ -51,15 +43,15 @@ func channelKeyFingerprint(key string) uint64 {
 // doubling on each refusal up to 2 minutes, and starts over after 10 quiet
 // minutes. A later deadline already recorded is kept.
 func MarkChannelKeyCooldown(channelId int, modelName string, keyIndex int, key string, hint time.Duration, now time.Time) time.Time {
-	bucketKey := channelCooldownKey(channelId, modelName)
-	fingerprint := channelKeyFingerprint(key)
+	bucketKey := modelName
+	tag := ChannelKeyTag(key)
 
 	channelKeyCooldownLock.Lock()
 	defer channelKeyCooldownLock.Unlock()
 
 	bucket := channelKeyCooldowns[bucketKey]
 	if bucket == nil {
-		bucket = map[int]keyCooldownEntry{}
+		bucket = map[string]keyCooldownEntry{}
 		channelKeyCooldowns[bucketKey] = bucket
 	}
 	for index, entry := range bucket {
@@ -68,9 +60,13 @@ func MarkChannelKeyCooldown(channelId int, modelName string, keyIndex int, key s
 		}
 	}
 
-	entry, ok := bucket[keyIndex]
-	if !ok || entry.fingerprint != fingerprint || now.Sub(entry.lastMark) > keyCooldownStrikeReset {
-		entry = keyCooldownEntry{fingerprint: fingerprint}
+	entry, ok := bucket[tag]
+	if !ok {
+		entry = keyCooldownEntry{}
+	} else if now.Sub(entry.lastMark) > keyCooldownStrikeReset {
+		// Reset backoff strikes without shortening an upstream deadline that
+		// still applies to this key after a long quiet interval.
+		entry.strikes = 0
 	}
 	entry.strikes++
 	entry.lastMark = now
@@ -86,7 +82,7 @@ func MarkChannelKeyCooldown(channelId int, modelName string, keyIndex int, key s
 	if until := now.Add(wait); until.After(entry.until) {
 		entry.until = until
 	}
-	bucket[keyIndex] = entry
+	bucket[tag] = entry
 	return entry.until
 }
 
@@ -96,14 +92,17 @@ func channelKeyCoolingUntil(channelId int, modelName string, keys []string, inde
 	channelKeyCooldownLock.RLock()
 	defer channelKeyCooldownLock.RUnlock()
 
-	bucket := channelKeyCooldowns[channelCooldownKey(channelId, modelName)]
+	bucket := channelKeyCooldowns[modelName]
 	if len(bucket) == 0 {
 		return nil
 	}
 	var cooling map[int]time.Time
 	for _, index := range indexes {
-		entry, ok := bucket[index]
-		if !ok || !now.Before(entry.until) || index >= len(keys) || entry.fingerprint != channelKeyFingerprint(keys[index]) {
+		if index < 0 || index >= len(keys) {
+			continue
+		}
+		entry, ok := bucket[ChannelKeyTag(keys[index])]
+		if !ok || !now.Before(entry.until) {
 			continue
 		}
 		if cooling == nil {

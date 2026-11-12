@@ -93,6 +93,23 @@ type ChannelInfo struct {
 	MultiKeyDisabledTime   map[int]int64         `json:"multi_key_disabled_time,omitempty"`   // key禁用时间列表，key index -> time
 	MultiKeyPollingIndex   int                   `json:"multi_key_polling_index"`             // 多Key模式下轮询的key索引
 	MultiKeyMode           constant.MultiKeyMode `json:"multi_key_mode"`
+	// Legacy remote environment data is decoded for reconciliation into the
+	// channel_key_environments table. It is never a runtime environment source.
+	MultiKeyEnvs              map[string]MultiKeyEnv `json:"multi_key_envs,omitempty"`               // key fingerprint -> 该key的独立环境
+	MultiKeyOriginFingerprint string                 `json:"multi_key_origin_fingerprint,omitempty"` // 转为多Key前原单Key的指纹，该key沿用原身份
+}
+
+// MultiKeyEnv decodes the remote branch's legacy environment format. Runtime
+// environments are read only from ChannelKeyEnvironment.
+type MultiKeyEnv struct {
+	CLIVersionProfile string `json:"cli_version_profile,omitempty"`
+	Proxy             string `json:"proxy,omitempty"`
+}
+
+// KeyFingerprint is the legacy name of ChannelKeyTag. Both saved formats use
+// the same tag; all environment, activity and cooldown state uses that tag.
+func KeyFingerprint(key string) string {
+	return ChannelKeyTag(key)
 }
 
 type ChannelSortOptions struct {
@@ -218,6 +235,12 @@ func (c ChannelInfo) clone() ChannelInfo {
 		cloned.MultiKeyDisabledTime = make(map[int]int64, len(c.MultiKeyDisabledTime))
 		for index, disabledAt := range c.MultiKeyDisabledTime {
 			cloned.MultiKeyDisabledTime[index] = disabledAt
+		}
+	}
+	if c.MultiKeyEnvs != nil {
+		cloned.MultiKeyEnvs = make(map[string]MultiKeyEnv, len(c.MultiKeyEnvs))
+		for fingerprint, env := range c.MultiKeyEnvs {
+			cloned.MultiKeyEnvs[fingerprint] = env
 		}
 	}
 	return cloned
@@ -376,6 +399,13 @@ func (channel *Channel) GetNextEnabledKey(modelName string) (string, int, *types
 		// Unknown mode, default to first enabled key (or original key string)
 		return keys[candidateIdx[0]], candidateIdx[0], nil
 	}
+}
+
+// GetStickyEnabledKey is the legacy selector name. Initial placement uses the
+// existing selector; bound conversations are served by KeyEnvironmentKey and
+// never run this ranking again on a soft refusal.
+func (channel *Channel) GetStickyEnabledKey(seed string, modelName string) (string, int, *types.NewAPIError) {
+	return channel.GetEnabledKeyForSeed(seed, modelName)
 }
 
 func (channel *Channel) SaveChannelInfo() error {
@@ -755,6 +785,18 @@ func (channel *Channel) UpdateWith(hook func(tx *gorm.DB, saved *Channel) error)
 				}
 			}
 		}
+		// Drop the environments of keys that are no longer on the channel.
+		if len(channel.ChannelInfo.MultiKeyEnvs) > 0 {
+			present := make(map[string]bool, len(keys))
+			for _, key := range keys {
+				present[KeyFingerprint(key)] = true
+			}
+			for fingerprint := range channel.ChannelInfo.MultiKeyEnvs {
+				if !present[fingerprint] {
+					delete(channel.ChannelInfo.MultiKeyEnvs, fingerprint)
+				}
+			}
+		}
 	}
 	lock := channelSettingsLock(channel.Id)
 	lock.Lock()
@@ -873,8 +915,6 @@ func (channel *Channel) Delete() error {
 	}
 	return channel.DeleteAbilities()
 }
-
-var channelStatusLock sync.Mutex
 
 // channelPollingLocks stores locks for each channel.id to ensure thread-safe polling
 var channelPollingLocks sync.Map
@@ -1020,10 +1060,22 @@ func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
 }
 
 func UpdateChannelStatus(channelId int, usingKey string, status int, reason string) bool {
-	// Serialize the persisted read-modify-write in both cache modes. The database
-	// is authoritative; a failed read or save must not publish a cache mutation.
-	channelStatusLock.Lock()
-	defer channelStatusLock.Unlock()
+	// The admin's channel edit and multi-key management hold this channel's
+	// polling lock from their read to their write. Holding it here as well keeps
+	// either side from writing back a row read before the other's change: an
+	// edit re-enabling a key just disabled, or this save dropping a key's new
+	// environment. The save below writes the whole row, settings included, so
+	// the settings lock is held too: a keepalive stamp, a WebSocket probe result
+	// or a model sweep written meanwhile would otherwise be lost. Together they
+	// serialize this read-modify-write per channel in both cache modes, so status
+	// updates of different channels do not wait on each other. The database is
+	// authoritative; a failed read or save must not publish a cache mutation.
+	pollingLock := GetChannelPollingLock(channelId)
+	pollingLock.Lock()
+	defer pollingLock.Unlock()
+	settingsLock := channelSettingsLock(channelId)
+	settingsLock.Lock()
+	defer settingsLock.Unlock()
 
 	channel, err := GetChannelById(channelId, true)
 	if err != nil {
@@ -1049,10 +1101,7 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 
 	beforeStatus := channel.Status
 	if channel.ChannelInfo.IsMultiKey {
-		pollingLock := GetChannelPollingLock(channelId)
-		pollingLock.Lock()
 		handlerMultiKeyUpdate(channel, usingKey, status, reason)
-		pollingLock.Unlock()
 	} else {
 		info := channel.GetOtherInfo()
 		info["status_reason"] = reason

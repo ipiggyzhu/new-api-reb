@@ -277,7 +277,10 @@ func processHeaderOverride(info *common.RelayInfo, c *gin.Context) (map[string]s
 	if info.ChannelMeta != nil && !info.IsChannelTest {
 		settings := info.ChannelSetting
 		settings.Normalize(info.ChannelMeta.ApiType)
-		syntheticFamily = settings.SyntheticClientHeadersProfile
+		if version := service.LookupCLIVersionProfile(settings.CLIVersionProfile); version != nil &&
+			version.Family == settings.SyntheticClientHeadersProfile {
+			syntheticFamily = version.Family
+		}
 	}
 	syntheticHeaders := syntheticFamily != ""
 	clientHeaders := EffectiveClientHeaders
@@ -682,7 +685,10 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
 	}
-	fingerprint := service.ResolveTLSFingerprint(settings.TLSFingerprint, settings.SyntheticClientHeadersProfile)
+	fingerprint := ""
+	if settings.TLSFingerprint != "" {
+		fingerprint = service.ResolveTLSFingerprint(settings.TLSFingerprint, settings.SyntheticClientHeadersProfile)
+	}
 	if version != nil {
 		if req.URL.Scheme != "https" {
 			return nil, types.NewError(fmt.Errorf("CLI version profiles require HTTPS"), types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())

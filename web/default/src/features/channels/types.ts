@@ -130,6 +130,8 @@ export interface ChannelSettings {
   /** '' off, or an explicit client family; legacy 'auto' is normalized on read/save */
   synthetic_client_headers_profile?: string
   cli_version_profile?: string
+  key_environments?: boolean
+  key_environment_cache_ttl?: '' | '5m' | '1h'
   /**
    * Explicit TLS ClientHello id. '' means the fingerprint follows
    * synthetic_client_headers_profile (Claude Code / Codex headers bring that
@@ -388,6 +390,8 @@ export interface KeyStatus {
   disabled_time?: number
   reason?: string
   key_preview?: string
+  /** The key proxy password arrives masked. */
+  proxy?: string
   /** Version the key's environment wears (independent key environments) */
   cli_profile?: string
   /** False for a key the pool could not cover; it serves no traffic */
@@ -491,6 +495,7 @@ export interface MultiKeyManageParams {
     | 'delete_disabled_keys'
     | 'preview_key_environments'
     | 'reassign_key_environments'
+    | 'set_key_env'
   key_index?: number
   page?: number
   page_size?: number
@@ -499,6 +504,9 @@ export interface MultiKeyManageParams {
   unassigned?: boolean
   /** reassign_key_environments: confirmed leaving keys unassigned */
   allow_unassigned?: boolean
+  /** set_key_env: omitted keeps the value; empty clears it. */
+  cli_profile?: string
+  proxy?: string
 }
 
 export interface BatchDeleteParams {

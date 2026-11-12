@@ -21,9 +21,8 @@ import (
 )
 
 // A refusal cools the whole channel only when it has a single key. On a
-// multi-key channel a rate limit cools just the key that sent the request and
-// the channel stays selectable through its siblings; an overload leaves a
-// multi-key channel alone, as it always did.
+// multi-key channel a rate limit or routing fault cools just the key that sent
+// the request, and the channel stays selectable through its siblings.
 func TestApplyRefusalCooldownScopesMultiKeyRateLimitsToTheKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	originalDB, originalLogDB, originalCache := model.DB, model.LOG_DB, common.MemoryCacheEnabled
@@ -55,7 +54,7 @@ func TestApplyRefusalCooldownScopesMultiKeyRateLimitsToTheKey(t *testing.T) {
 		{name: "single key 429 cools the channel", id: 7101, err: rateLimited, wantChannelCooling: true},
 		{name: "single key 529 cools the channel", id: 7102, err: overloaded, wantChannelCooling: true},
 		{name: "multi key 429 cools only the key", id: 7103, multiKey: true, err: rateLimited, wantKeySkipped: true},
-		{name: "multi key 529 cools nothing", id: 7104, multiKey: true, err: overloaded},
+		{name: "multi key 529 cools only the key", id: 7104, multiKey: true, err: overloaded, wantKeySkipped: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

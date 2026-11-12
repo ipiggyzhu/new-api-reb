@@ -187,8 +187,18 @@ func planKeyEnvironments(keys []string, existing map[string]string, pool []*CLIV
 // key list that repeats a key, or names a key another channel holds, is
 // rejected; keys the pool cannot cover are rejected as a shortage unless
 // allowUnassigned confirms them.
-func ReconcileKeyEnvironments(tx *gorm.DB, channel *model.Channel, allowUnassigned bool) ([]KeyEnvironmentAssignment, error) {
-	return reconcileKeyEnvironments(tx, channel, allowUnassigned, false)
+func ReconcileKeyEnvironments(tx *gorm.DB, channel *model.Channel, allowUnassigned bool, updates ...KeyEnvironmentUpdate) ([]KeyEnvironmentAssignment, error) {
+	return reconcileKeyEnvironments(tx, channel, allowUnassigned, false, updates...)
+}
+
+// KeyEnvironmentUpdate changes one saved environment through the same
+// transaction and validation as every other reconciliation. Nil fields keep
+// their value; an empty profile leaves the key unassigned, an empty proxy
+// inherits the channel proxy. TTL remains a channel-wide pool choice.
+type KeyEnvironmentUpdate struct {
+	Index     int
+	ProfileId *string
+	Proxy     *string
 }
 
 // ReassignKeyEnvironments repacks every key of the channel onto the pool,
@@ -209,23 +219,34 @@ func PreviewKeyEnvironmentReassignment(tx *gorm.DB, channel *model.Channel) ([]K
 	return planKeyEnvironments(channelKeyList(channel), existing, pool, true)
 }
 
-func reconcileKeyEnvironments(tx *gorm.DB, channel *model.Channel, allowUnassigned bool, reassign bool) ([]KeyEnvironmentAssignment, error) {
+func reconcileKeyEnvironments(tx *gorm.DB, channel *model.Channel, allowUnassigned bool, reassign bool, updates ...KeyEnvironmentUpdate) ([]KeyEnvironmentAssignment, error) {
 	setting := channel.GetSetting()
 	existing, err := keyEnvironmentRows(tx, channel.Id)
 	if err != nil {
 		return nil, err
 	}
 	keys := channelKeyList(channel)
+	storedRows, err := model.LoadChannelKeyEnvironmentRows(tx, channel.Id)
+	if err != nil {
+		return nil, err
+	}
+	byTag := make(map[string]model.ChannelKeyEnvironment, len(storedRows))
+	for _, row := range storedRows {
+		byTag[row.KeyTag] = row
+	}
 
 	if !setting.KeyEnvironments {
+		if len(updates) > 0 {
+			return nil, fmt.Errorf("该渠道未开启独立 key 环境")
+		}
 		present := make(map[string]bool, len(keys))
 		for _, key := range keys {
 			present[model.ChannelKeyTag(key)] = true
 		}
 		kept := make([]model.ChannelKeyEnvironment, 0, len(existing))
-		for tag, profileId := range existing {
+		for tag := range existing {
 			if present[tag] {
-				kept = append(kept, keyEnvironmentRow(tag, profileId))
+				kept = append(kept, byTag[tag])
 			}
 		}
 		if len(kept) == len(existing) {
@@ -233,11 +254,65 @@ func reconcileKeyEnvironments(tx *gorm.DB, channel *model.Channel, allowUnassign
 		}
 		return nil, model.ReplaceChannelKeyEnvironmentRows(tx, channel.Id, kept)
 	}
+	// Import remote-format rows once. The table wins when both formats name
+	// the key. Saved legacy data stays inert until the switch is explicitly on.
+	for tag, env := range channel.ChannelInfo.MultiKeyEnvs {
+		if _, found := byTag[tag]; found {
+			continue
+		}
+		row := keyEnvironmentRow(tag, env.CLIVersionProfile)
+		row.Proxy = env.Proxy
+		byTag[tag] = row
+		existing[tag] = env.CLIVersionProfile
+	}
 
 	pool := KeyEnvironmentPool(setting.SyntheticClientHeadersProfile, setting.KeyEnvironmentCacheTTL)
 	plan, err := planKeyEnvironments(keys, existing, pool, reassign)
 	if err != nil {
 		return nil, err
+	}
+	if len(updates) > 0 {
+		// Editing one row must not assign other unassigned keys or re-enable
+		// this key merely because its proxy changed.
+		for i := range plan {
+			if previous, found := existing[plan[i].tag]; found {
+				plan[i].ProfileId = previous
+			}
+		}
+	}
+	for _, update := range updates {
+		if update.Index < 0 || update.Index >= len(keys) {
+			return nil, fmt.Errorf("密钥索引超出范围")
+		}
+		tag := model.ChannelKeyTag(keys[update.Index])
+		for i := range plan {
+			if plan[i].tag != tag {
+				continue
+			}
+			if update.ProfileId != nil {
+				id := strings.ToLower(strings.TrimSpace(*update.ProfileId))
+				if id != "" {
+					inPool := false
+					for _, profile := range pool {
+						inPool = inPool || profile.ID == id
+					}
+					if !inPool {
+						return nil, fmt.Errorf("CLI version must belong to the channel's key environment pool and cache mode")
+					}
+					for _, other := range plan {
+						if other.tag != tag && other.ProfileId == id {
+							return nil, fmt.Errorf("CLI version is already assigned to key #%d", other.Index+1)
+						}
+					}
+				}
+				plan[i].ProfileId = id
+			}
+			if update.Proxy != nil {
+				row := byTag[tag]
+				row.Proxy = strings.TrimSpace(*update.Proxy)
+				byTag[tag] = row
+			}
+		}
 	}
 
 	tags := make([]string, len(plan))
@@ -263,7 +338,7 @@ func reconcileKeyEnvironments(tx *gorm.DB, channel *model.Channel, allowUnassign
 
 	var unassigned []int
 	rows := make([]model.ChannelKeyEnvironment, 0, len(plan))
-	changed := len(plan) != len(existing)
+	changed := len(plan) != len(storedRows) || len(updates) > 0 || len(channel.ChannelInfo.MultiKeyEnvs) > 0
 	for _, assignment := range plan {
 		if assignment.ProfileId == "" {
 			unassigned = append(unassigned, assignment.Index)
@@ -271,7 +346,9 @@ func reconcileKeyEnvironments(tx *gorm.DB, channel *model.Channel, allowUnassign
 		if previous, ok := existing[assignment.tag]; !ok || previous != assignment.ProfileId {
 			changed = true
 		}
-		rows = append(rows, keyEnvironmentRow(assignment.tag, assignment.ProfileId))
+		row := keyEnvironmentRow(assignment.tag, assignment.ProfileId)
+		row.Proxy = byTag[assignment.tag].Proxy
+		rows = append(rows, row)
 	}
 	if len(unassigned) > 0 && !allowUnassigned {
 		versions := make([]string, len(pool))
@@ -283,7 +360,17 @@ func reconcileKeyEnvironments(tx *gorm.DB, channel *model.Channel, allowUnassign
 	if !changed {
 		return plan, nil
 	}
-	return plan, model.ReplaceChannelKeyEnvironmentRows(tx, channel.Id, rows)
+	if err := model.ReplaceChannelKeyEnvironmentRows(tx, channel.Id, rows); err != nil {
+		return nil, err
+	}
+	if len(channel.ChannelInfo.MultiKeyEnvs) > 0 || channel.ChannelInfo.MultiKeyOriginFingerprint != "" {
+		channel.ChannelInfo.MultiKeyEnvs = nil
+		channel.ChannelInfo.MultiKeyOriginFingerprint = ""
+		if err := tx.Model(channel).Update("channel_info", channel.ChannelInfo).Error; err != nil {
+			return nil, err
+		}
+	}
+	return plan, nil
 }
 
 func keyEnvironmentRows(tx *gorm.DB, channelId int) (map[string]string, error) {

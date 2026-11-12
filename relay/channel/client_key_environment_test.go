@@ -85,8 +85,7 @@ func TestKeyEnvironmentKeepsTheVersionHeadersFromGlobalOverrides(t *testing.T) {
 	info.ChannelSetting.CLIVersionProfile = ""
 	headers, err = processHeaderOverride(info, c)
 	require.NoError(t, err)
-	assert.Equal(t, "admin-ua", headers["user-agent"], "without a version profile the override behavior is unchanged")
-	assert.Equal(t, "admin-originator", headers["originator"])
+	assert.Empty(t, headers, "a family without a selected version synthesizes no headers, including global profile overrides")
 }
 
 // The default codex affinity rule pass_headers the caller's User-Agent and

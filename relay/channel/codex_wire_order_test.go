@@ -16,7 +16,7 @@ import (
 func TestCodexRequestOrderPreservesCapturedNestedObjects(t *testing.T) {
 	const original = `{"model":"gpt-6-astra","input":[{"type":"additional_tools","id":"at_1","role":"developer","tools":[{"type":"function","name":"read","description":"keep","strict":false,"parameters":{"type":"object","properties":{"z":{"type":"string"},"a":{"const":9007199254740993},"control\u0001":{"type":"string"}},"additionalProperties":false}}]},{"type":"message","id":"msg_1","role":"user","content":[{"type":"input_text","text":"keep <> input"}]},{"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"opaque-ciphertext"}],"tool_choice":"auto","parallel_tool_calls":true,"reasoning":{"effort":"xhigh","context":"all_turns"},"store":false,"stream":true,"include":["reasoning.encrypted_content"],"service_tier":"priority","prompt_cache_key":"original-session","text":{"verbosity":"low"},"client_metadata":{"x-codex-installation-id":"device","turn_id":"turn","thread_id":"thread","root_turn_id":"root","session_id":"session","x-codex-window-id":"window","x-codex-turn-metadata":"{\"installation_id\":\"device\",\"session_id\":\"session\",\"thread_id\":\"thread\",\"agent_name\":\"/root\",\"turn_id\":\"turn\"}"}}`
 	for _, converted := range []bool{false, true} {
-		c, info := cliTestRequest("codex")
+		c, info := versionedCLITestRequest("codex")
 		storage, err := common.CreateBodyStorage([]byte(original))
 		require.NoError(t, err)
 		c.Set(common.KeyBodyStorage, storage)
@@ -60,7 +60,7 @@ func TestCodexOrderTemplateDoesNotRestoreRejectedReasoningOrOverrides(t *testing
 }
 
 func TestCodexGeneratedMessagesUseCLIFieldOrder(t *testing.T) {
-	c, info := cliTestRequest("codex")
+	c, info := versionedCLITestRequest("codex")
 	const body = `{"model":"gpt-6-astra","input":[{"content":"keep","role":"user"}],"tools":[{"parameters":{"type":"object","properties":{"z":{"type":"string"},"a":{"type":"number"}}},"name":"read","type":"function"}],"reasoning":{"context":"all_turns","effort":"xhigh"}}`
 	_, reader, _, err := prepareCLIRequest(c, info, "https://upstream.test/v1/responses", strings.NewReader(body))
 	require.NoError(t, err)

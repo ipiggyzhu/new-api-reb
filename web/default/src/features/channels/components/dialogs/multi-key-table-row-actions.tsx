@@ -25,18 +25,25 @@ import type { MultiKeyConfirmAction } from '../../types'
 type MultiKeyTableRowActionsProps = {
   keyIndex: number
   status: number
-  canDelete: boolean
+  canEditSensitive: boolean
+  keyEnvironments: boolean
   onAction: (action: MultiKeyConfirmAction) => void
+  onEditEnvironment: () => void
 }
 
 export function MultiKeyTableRowActions({
   keyIndex,
   status,
-  canDelete,
+  canEditSensitive,
+  keyEnvironments,
   onAction,
+  onEditEnvironment,
 }: MultiKeyTableRowActionsProps) {
   const { t } = useTranslation()
   const isEnabled = status === 1
+  const noPermissionTitle = canEditSensitive
+    ? undefined
+    : t('No permission to perform this action')
 
   return (
     <div className='flex justify-end gap-2'>
@@ -57,17 +64,29 @@ export function MultiKeyTableRowActions({
           {t('Enable')}
         </Button>
       )}
+      {keyEnvironments && (
+        <Button
+          variant='outline'
+          size='sm'
+          onClick={() => {
+            if (!canEditSensitive) return
+            onEditEnvironment()
+          }}
+          disabled={!canEditSensitive}
+          title={noPermissionTitle}
+        >
+          {t('Edit Environment')}
+        </Button>
+      )}
       <Button
         variant='destructive'
         size='sm'
         onClick={() => {
-          if (!canDelete) return
+          if (!canEditSensitive) return
           onAction({ type: 'delete', keyIndex })
         }}
-        disabled={!canDelete}
-        title={
-          canDelete ? undefined : t('No permission to perform this action')
-        }
+        disabled={!canEditSensitive}
+        title={noPermissionTitle}
       >
         {t('Delete')}
       </Button>

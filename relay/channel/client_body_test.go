@@ -13,6 +13,7 @@ import (
 	appcommon "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
@@ -31,16 +32,30 @@ func cliTestRequest(profile string) (*gin.Context, *relaycommon.RelayInfo) {
 		UserId: 42, TokenId: 7, RequestId: "request-one", IsStream: true,
 		StartTime: time.UnixMilli(1700000000000),
 		ChannelMeta: &relaycommon.ChannelMeta{
-			ChannelId: 9, ApiType: constant.APITypeOpenAI,
+			ChannelId: 9, ApiType: constant.APITypeOpenAI, ApiKey: "cli-test-key",
 			ChannelSetting: dto.ChannelSettings{SyntheticClientHeadersProfile: profile},
 		},
 	}
+}
+
+// versionedCLITestRequest selects a captured version for tests that exercise
+// wire shaping. cliTestRequest leaves the version unset for gate regressions.
+func versionedCLITestRequest(profile string) (*gin.Context, *relaycommon.RelayInfo) {
+	c, info := cliTestRequest(profile)
+	switch profile {
+	case "claude":
+		info.ChannelSetting.CLIVersionProfile = "claude-2.1.282-windows-x64"
+	case "codex":
+		info.ChannelSetting.CLIVersionProfile = "codex-0.156.1-windows-x64"
+	}
+	return c, info
 }
 
 func TestCLIProfileOffAndUnrelatedEndpointsPreserveBytes(t *testing.T) {
 	for _, tc := range []struct{ profile, path string }{
 		{"", "/v1/messages"}, {"off", "/v1/responses"}, {"openai", "/v1/responses"},
 		{"gemini", "/v1/messages"}, {"generic", "/v1/messages"},
+		{"claude", "/v1/messages"}, {"codex", "/v1/responses"},
 		{"codex", "/v1/responses/compact"}, {"codex", "/v1/images/generations"},
 		{"claude", "/v1/chat/completions"}, {"codex", "/v1/messages"},
 	} {
@@ -58,7 +73,7 @@ func TestCLIProfileOffAndUnrelatedEndpointsPreserveBytes(t *testing.T) {
 }
 
 func TestClaudeCLIShapePreservesContentToolsAndExplicitParameters(t *testing.T) {
-	c, info := cliTestRequest("claude")
+	c, info := versionedCLITestRequest("claude")
 	info.IsStream = false
 	body := `{"model":"claude-opus-5-5","system":"tenant system","messages":[{"role":"user","content":"hello"}],"tools":[{"name":"Read","input_schema":{"type":"object","properties":{"n":{"const":9007199254740993}}}},{"name":"Bash","input_schema":{"type":"object","properties":{},"additionalProperties":true}},{"name":"tenant_tool","input_schema":{"type":"object"}}],"max_tokens":16,"temperature":0,"thinking":{"type":"disabled"},"metadata":{"user_id":"original-user","custom":"keep"}}`
 	url, reader, headers, err := prepareCLIRequest(c, info, "https://upstream.test/v1/messages?existing=1", strings.NewReader(body))
@@ -99,23 +114,23 @@ func TestClaudeCLIShapePreservesContentToolsAndExplicitParameters(t *testing.T) 
 	assert.Equal(t, headers, sameHeaders)
 }
 
-// Only the real Claude Code client's own breakpoints are kept; other senders'
-// cache_control is replaced (see client_body_cache_test.go).
+// Native clients use the selected profile's cache placement, while a model
+// outside its capture is never given unsupported adaptive thinking.
 func TestClaudeCLIHonorsCacheBreakpointsAndModelCapabilities(t *testing.T) {
 	c, info := nativeClaudeCodeRequest()
 	_, reader, _, err := prepareCLIRequest(c, info, "https://upstream.test/v1/messages", strings.NewReader(`{"model":"claude-3-haiku","system":[{"type":"text","text":"system","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"aW1hZ2U="}},{"type":"text","text":"hi"}]}],"tools":[{"name":"Read","cache_control":{"type":"ephemeral"},"input_schema":{"type":"object"}},{"name":"Bash","input_schema":{"type":"object"}}]}`))
 	require.NoError(t, err)
 	data, err := io.ReadAll(reader)
 	require.NoError(t, err)
-	assert.Equal(t, "1h", gjson.GetBytes(data, "system.0.cache_control.ttl").String())
-	assert.Equal(t, "Read", gjson.GetBytes(data, "tools.0.name").String(), "explicit cache boundary must not move")
-	assert.False(t, gjson.GetBytes(data, "messages.0.content.1.cache_control").Exists())
+	assert.Empty(t, gjson.GetBytes(data, "system.0.cache_control.ttl").String())
+	assert.Equal(t, "Bash", gjson.GetBytes(data, "tools.0.name").String(), "the selected profile owns tool order")
+	assert.Equal(t, "ephemeral", gjson.GetBytes(data, "messages.0.content.1.cache_control.type").String())
 	assert.Equal(t, "aW1hZ2U=", gjson.GetBytes(data, "messages.0.content.0.source.data").String())
 	assert.False(t, gjson.GetBytes(data, "thinking").Exists())
 }
 
 func TestCodexCLIShapeAndIsolatedMetadata(t *testing.T) {
-	c, info := cliTestRequest("codex")
+	c, info := versionedCLITestRequest("codex")
 	body := `{"model":"gpt-6-astra","instructions":"system instruction","input":[{"role":"user","content":"hello"},{"type":"function_call_output","call_id":"call_original","output":"result"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":{"n":{"const":9007199254740993}}}}},{"type":"namespace","name":"custom","tools":[{"type":"function","name":"run","strict":true,"parameters":{"type":"object"}},{"type":"custom","name":"patch","format":{"type":"grammar","definition":"start: /.+/","syntax":"lark"}}]}],"max_output_tokens":123,"parallel_tool_calls":true,"reasoning":{"effort":"low"},"store":true,"service_tier":"default","text":{"format":{"type":"json_object"}},"client_metadata":{"session_id":"untrusted-id","secret":"do-not-forward"}}`
 	_, reader, headers, err := prepareCLIRequest(c, info, "https://upstream.test/v1/responses", strings.NewReader(body))
 	require.NoError(t, err)
@@ -134,8 +149,8 @@ func TestCodexCLIShapeAndIsolatedMetadata(t *testing.T) {
 	assert.Equal(t, "call_original", gjson.GetBytes(data, "input.3.call_id").String())
 	assert.Equal(t, "result", gjson.GetBytes(data, "input.3.output").String())
 	assert.Equal(t, "123", gjson.GetBytes(data, "max_output_tokens").Raw)
-	assert.True(t, gjson.GetBytes(data, "parallel_tool_calls").Bool())
-	assert.True(t, gjson.GetBytes(data, "store").Bool())
+	assert.False(t, gjson.GetBytes(data, "parallel_tool_calls").Bool())
+	assert.False(t, gjson.GetBytes(data, "store").Bool())
 	assert.Equal(t, "low", gjson.GetBytes(data, "reasoning.effort").String())
 	assert.Equal(t, "default", gjson.GetBytes(data, "service_tier").String())
 	assert.Equal(t, "json_object", gjson.GetBytes(data, "text.format.type").String())
@@ -153,7 +168,7 @@ func TestCodexCLIShapeAndIsolatedMetadata(t *testing.T) {
 }
 
 func TestCLIIdentityStaysWithinTenantAndSession(t *testing.T) {
-	c, info := cliTestRequest("codex")
+	c, info := versionedCLITestRequest("codex")
 	_, _, first, err := prepareCLIRequest(c, info, "https://upstream.test/v1/responses", strings.NewReader(`{"input":"hello"}`))
 	require.NoError(t, err)
 	for _, tc := range []struct {
@@ -167,7 +182,7 @@ func TestCLIIdentityStaysWithinTenantAndSession(t *testing.T) {
 		{"different conversation", 42, "another-session", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			c, info := cliTestRequest("codex")
+			c, info := versionedCLITestRequest("codex")
 			info.UserId, info.RequestId = tc.user, "request-two"
 			c.Request.Header.Set("session-id", tc.session)
 			_, _, got, err := prepareCLIRequest(c, info, "https://upstream.test/v1/responses", strings.NewReader(`{"input":"hello"}`))
@@ -183,8 +198,10 @@ func TestCustomCLIIdentityRotationIsStableAndIndependent(t *testing.T) {
 	t.Cleanup(func() { appcommon.CryptoSecret = originalSecret })
 	for _, family := range []string{"claude", "codex"} {
 		t.Run(family, func(t *testing.T) {
+			_, fixtureInfo := versionedCLITestRequest(family)
 			settings := dto.ChannelSettings{
 				SyntheticClientHeadersProfile: family,
+				CLIVersionProfile:             fixtureInfo.ChannelSetting.CLIVersionProfile,
 				ClientDeviceSeed:              "device-profile-one", ClientSessionSeed: "session-profile-one",
 			}
 			// Exercise the persisted ChannelSettings representation, not just a
@@ -195,7 +212,7 @@ func TestCustomCLIIdentityRotationIsStableAndIndependent(t *testing.T) {
 			require.NoError(t, appcommon.Unmarshal(serialized, &stored))
 			stored.Normalize(constant.APITypeOpenAI)
 			capture := func(setting dto.ChannelSettings, user, channel int) (string, string) {
-				c, info := cliTestRequest(family)
+				c, info := versionedCLITestRequest(family)
 				info.ChannelSetting, info.UserId, info.ChannelId = setting, user, channel
 				path, body := "/v1/responses", `{"input":"hello"}`
 				if family == "claude" {
@@ -240,7 +257,7 @@ func TestCustomCLIIdentityRotationIsStableAndIndependent(t *testing.T) {
 				assert.NotEqual(t, session, otherSession)
 			}
 
-			defaults := dto.ChannelSettings{SyntheticClientHeadersProfile: family}
+			defaults := dto.ChannelSettings{SyntheticClientHeadersProfile: family, CLIVersionProfile: settings.CLIVersionProfile}
 			defaultDevice, defaultSession := capture(defaults, 42, 9)
 			stored.ClientDeviceSeed, stored.ClientSessionSeed = "", ""
 			resetDevice, resetSession := capture(stored, 42, 9)
@@ -252,14 +269,14 @@ func TestCustomCLIIdentityRotationIsStableAndIndependent(t *testing.T) {
 
 func TestCLIRejectsMalformedBodyBeforeSending(t *testing.T) {
 	for _, body := range []string{`null`, `[]`, `{`, `{"input":42}`, `{"input":[null]}`, `{"input":[{"role":"user","content":[null]}]}`, `{"input":"hello","tools":[null]}`, `{"input":"hello","tools":"invalid"}`} {
-		c, info := cliTestRequest("codex")
+		c, info := versionedCLITestRequest("codex")
 		_, _, _, err := prepareCLIRequest(c, info, "https://upstream.test/v1/responses", strings.NewReader(body))
 		require.Error(t, err)
 	}
 }
 
 func TestClaudeDeferredToolKeepsCapturedSchemaShape(t *testing.T) {
-	c, info := cliTestRequest("claude")
+	c, info := versionedCLITestRequest("claude")
 	input := `{"messages":[],"tools":[{"name":"DeferredToolPlaceholder","defer_loading":true,"input_schema":{"type":"object","properties":{}}}]}`
 	_, reader, _, err := prepareCLIRequest(c, info, "https://upstream.test/v1/messages", strings.NewReader(input))
 	require.NoError(t, err)
@@ -283,6 +300,10 @@ func (a cliTransportAdaptor) SetupRequestHeader(_ *gin.Context, header *http.Hea
 }
 
 func TestCLIHTTPTransportShapesPassthroughAndHonorsHeaderOverrides(t *testing.T) {
+	previous := appcommon.TLSInsecureSkipVerify
+	appcommon.TLSInsecureSkipVerify = true
+	service.ResetProxyClientCache()
+	t.Cleanup(func() { appcommon.TLSInsecureSkipVerify = previous; service.ResetProxyClientCache() })
 	service.InitHttpClient()
 	for _, channelTest := range []bool{false, true} {
 		t.Run("channelTest="+strconv.FormatBool(channelTest), func(t *testing.T) {
@@ -294,13 +315,13 @@ func TestCLIHTTPTransportShapesPassthroughAndHonorsHeaderOverrides(t *testing.T)
 				err    error
 			}
 			got := make(chan capture, 1)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				data, err := io.ReadAll(r.Body)
 				got <- capture{data, r.Header.Clone(), r.URL.RawQuery, r.ContentLength, err}
 				_, _ = w.Write([]byte(`{}`))
 			}))
 			defer server.Close()
-			c, info := cliTestRequest("claude")
+			c, info := versionedCLITestRequest("claude")
 			info.IsStream, info.IsChannelTest = false, channelTest
 			info.ChannelSetting.PassThroughBodyEnabled = true
 			info.UpstreamRequestBodySize = 1 // stale size from the conversion pipeline
@@ -311,7 +332,9 @@ func TestCLIHTTPTransportShapesPassthroughAndHonorsHeaderOverrides(t *testing.T)
 			received := <-got
 			require.NoError(t, received.err)
 			assert.Equal(t, int64(len(received.body)), received.length)
-			assert.Equal(t, "admin-beta", received.header.Get("anthropic-beta"))
+			version := service.LookupCLIVersionProfile(info.ChannelSetting.CLIVersionProfile)
+			require.NotNil(t, version)
+			assert.Equal(t, service.CoherentAnthropicBeta(version.Headers["anthropic-beta"], false), received.header.Get("anthropic-beta"))
 			assert.Equal(t, "Bearer channel-test-key", received.header.Get("Authorization"))
 			assert.Equal(t, "beta=true", received.query)
 			assert.Equal(t, "instructions", gjson.GetBytes(received.body, "system.0.text").String())
@@ -321,6 +344,10 @@ func TestCLIHTTPTransportShapesPassthroughAndHonorsHeaderOverrides(t *testing.T)
 }
 
 func TestCLIWebsocketUsesSameBodyAndIdentityAsHTTPFallback(t *testing.T) {
+	previous := appcommon.TLSInsecureSkipVerify
+	appcommon.TLSInsecureSkipVerify = true
+	service.ResetProxyClientCache()
+	t.Cleanup(func() { appcommon.TLSInsecureSkipVerify = previous; service.ResetProxyClientCache() })
 	service.InitHttpClient()
 	for _, upgrade := range []bool{true, false} {
 		t.Run("upgrade="+strconv.FormatBool(upgrade), func(t *testing.T) {
@@ -330,11 +357,11 @@ func TestCLIWebsocketUsesSameBodyAndIdentityAsHTTPFallback(t *testing.T) {
 				err    error
 			}
 			got := make(chan capture, 2)
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if websocket.IsWebSocketUpgrade(r) {
 					if !upgrade {
 						got <- capture{header: r.Header.Clone()}
-						w.WriteHeader(http.StatusBadRequest)
+						w.WriteHeader(http.StatusNotFound)
 						return
 					}
 					conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
@@ -353,7 +380,10 @@ func TestCLIWebsocketUsesSameBodyAndIdentityAsHTTPFallback(t *testing.T) {
 				_, _ = w.Write([]byte(`{}`))
 			}))
 			defer server.Close()
-			c, info := cliTestRequest("codex")
+			c, info := versionedCLITestRequest("codex")
+			info.ChannelId = 0 // this transport fixture has no persisted channel
+			info.ChannelSetting.KeyEnvironments = true
+			appcommon.SetContextKey(c, constant.ContextKeyChannelKeyTag, model.ChannelKeyTag(info.ApiKey))
 			info.IsStream = false
 			a := cliTransportAdaptor{url: server.URL + "/v1/responses"}
 			attempt, err := TryResponsesWebsocket(a, c, info, strings.NewReader(`{"input":"hi","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}`))
@@ -380,4 +410,83 @@ func TestCLIWebsocketUsesSameBodyAndIdentityAsHTTPFallback(t *testing.T) {
 			assert.Equal(t, "Bearer channel-test-key", received.header.Get("Authorization"))
 		})
 	}
+}
+
+// The upstream keepalive continues the last real CLI session on a key. A real
+// request records its model, user, token and conversation seed; a synthesized
+// request that carries them back must wear exactly the client identity the
+// real one wore, as a new turn, and must not itself become the recorded
+// session.
+func TestCLISessionContinuationReusesIdentity(t *testing.T) {
+	for _, family := range []string{"codex", "claude"} {
+		t.Run(family, func(t *testing.T) {
+			channelId := 9001
+			t.Cleanup(func() { service.ForgetChannelKeysForTest(channelId) })
+			path, body := "/v1/responses", `{"model":"gpt-6.1-sol","input":"hello","reasoning":{"effort":"xhigh"}}`
+			if family == "claude" {
+				path, body = "/v1/messages", `{"model":"claude-opus-5","messages":[{"role":"user","content":"hello"}]}`
+			}
+			capture := func(c *gin.Context, info *relaycommon.RelayInfo) (device, session, turn string) {
+				_, reader, headers, err := prepareCLIRequest(c, info, "https://upstream.test"+path, strings.NewReader(body))
+				require.NoError(t, err)
+				data, err := io.ReadAll(reader)
+				require.NoError(t, err)
+				if family == "claude" {
+					identity := gjson.Parse(gjson.GetBytes(data, "metadata.user_id").String())
+					return identity.Get("device_id").String(), headers.Get("X-Claude-Code-Session-Id"), ""
+				}
+				return gjson.GetBytes(data, "client_metadata.x-codex-installation-id").String(), headers.Get("session-id"),
+					gjson.GetBytes(data, "client_metadata.turn_id").String()
+			}
+
+			c, info := versionedCLITestRequest(family)
+			info.ChannelId, info.OriginModelName = channelId, "requested-model"
+			info.ChannelSetting.ClientDeviceSeed, info.ChannelSetting.ClientSessionSeed = "device-a", "session-a"
+			realDevice, realSession, realTurn := capture(c, info)
+			recorded, ok := service.LastChannelCLISession(channelId, model.ChannelKeyTag("cli-test-key"))
+			require.True(t, ok)
+			assert.Equal(t, service.ChannelCLISession{
+				ModelName: "requested-model", UserId: 42, TokenId: 7, Seed: "caller-session",
+				Reasoning: recorded.Reasoning,
+			}, recorded)
+			if family == "codex" {
+				assert.JSONEq(t, `{"effort":"xhigh"}`, string(recorded.Reasoning))
+			}
+			_, otherKey := service.LastChannelCLISession(channelId, model.ChannelKeyTag("other-key"))
+			assert.False(t, otherKey, "the session belongs to the key that carried it")
+
+			c, info = versionedCLITestRequest(family)
+			c.Request.Header.Del("session-id")
+			info.ChannelId, info.RequestId, info.IsChannelTest = channelId, "keepalive-turn", true
+			info.ChannelSetting.ClientDeviceSeed, info.ChannelSetting.ClientSessionSeed = "device-a", "session-a"
+			info.UserId, info.TokenId, info.CLISessionSeed = recorded.UserId, recorded.TokenId, recorded.Seed
+			device, session, turn := capture(c, info)
+			assert.Equal(t, realDevice, device)
+			assert.Equal(t, realSession, session)
+			if family == "codex" {
+				assert.NotEqual(t, realTurn, turn, "the keepalive is a new turn of the session")
+			}
+			again, ok := service.LastChannelCLISession(channelId, model.ChannelKeyTag("cli-test-key"))
+			require.True(t, ok)
+			assert.Equal(t, recorded, again, "a synthesized request is not a real session")
+		})
+	}
+}
+
+// Off retains the existing tenant/index identity; on scopes the device to
+// the stable key tag. Re-indexing then keeps the device and another key differs.
+func TestCLIIdentityUsesKeyTagOnlyWhenEnvironmentsAreOn(t *testing.T) {
+	device := func(keyTag string, enabled bool, index int) string {
+		c, info := versionedCLITestRequest("claude")
+		appcommon.SetContextKey(c, constant.ContextKeyChannelKeyTag, keyTag)
+		info.ChannelSetting.KeyEnvironments = enabled
+		info.ChannelSetting.ClientDeviceSeed = "device-a"
+		info.ChannelMultiKeyIndex = index
+		identity := requestCLIIdentity(c, info, "claude", nil)
+		return identity.device
+	}
+	assert.Equal(t, appcommon.GenerateHMACWithKey([]byte("device-a"), "cli:claude:9:0:42:7:device"), device("", false, 0))
+	assert.Equal(t, device("a", false, 0), device("b", false, 0), "saved tags have no effect with the switch off")
+	assert.Equal(t, device("a", true, 0), device("a", true, 2), "a key's device survives re-indexing")
+	assert.NotEqual(t, device("a", true, 0), device("b", true, 0))
 }

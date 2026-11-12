@@ -17,12 +17,20 @@ import (
 )
 
 func TestResponsesTransportPreservesEffortAndHistoryWithoutCompatibility(t *testing.T) {
+	previous := appcommon.TLSInsecureSkipVerify
+	appcommon.TLSInsecureSkipVerify = true
 	service.InitHttpClient()
-	for _, tc := range []struct{ name, profile, transport, effort string }{
-		{"HTTP passthrough", "", "http", "xhigh"},
-		{"HTTP Codex profile", "codex", "http", "xhigh"},
-		{"WebSocket Codex profile", "codex", "ws", "max"},
-		{"WebSocket HTTP fallback", "codex", "fallback", "low"},
+	service.ResetProxyClientCache()
+	t.Cleanup(func() { appcommon.TLSInsecureSkipVerify = previous; service.ResetProxyClientCache() })
+	for _, tc := range []struct {
+		name, profile, transport, effort string
+		versioned                        bool
+	}{
+		{"HTTP passthrough", "", "http", "xhigh", false},
+		{"HTTP Codex family without version", "codex", "http", "xhigh", false},
+		{"HTTP Codex profile", "codex", "http", "xhigh", true},
+		{"WebSocket Codex profile", "codex", "ws", "max", true},
+		{"WebSocket HTTP fallback", "codex", "fallback", "low", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			type capture struct {
@@ -32,7 +40,7 @@ func TestResponsesTransportPreservesEffortAndHistoryWithoutCompatibility(t *test
 			}
 			captures := make(chan capture, 1)
 			const reply = `{"type":"response.completed","response":{"id":"test-response","reasoning":{"effort":"low"},"output":[]}}`
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if websocket.IsWebSocketUpgrade(r) {
 					if tc.transport == "fallback" {
 						w.WriteHeader(http.StatusBadRequest)
@@ -55,6 +63,9 @@ func TestResponsesTransportPreservesEffortAndHistoryWithoutCompatibility(t *test
 			}))
 			defer server.Close()
 			c, info := cliTestRequest(tc.profile)
+			if tc.versioned {
+				info.ChannelSetting.CLIVersionProfile = "codex-0.163.0-linux-x64"
+			}
 			info.IsStream = false
 			info.ChannelSetting.PassThroughBodyEnabled = true
 			require.False(t, info.ChannelSetting.ResponsesReasoningFallback)
@@ -84,10 +95,14 @@ func TestResponsesTransportPreservesEffortAndHistoryWithoutCompatibility(t *test
 			assert.JSONEq(t, gjson.Get(body, "reasoning").Raw, gjson.GetBytes(got.body, "reasoning").Raw)
 			assert.JSONEq(t, gjson.Get(body, "input").Raw, gjson.GetBytes(got.body, "input").Raw)
 			assert.Contains(t, string(got.body), "9007199254740993")
-			assert.JSONEq(t, `{"reasoning_effort":"max","turn_id":"override-turn"}`, got.header.Get("x-codex-turn-metadata"))
 			metadataEffort := "ultra"
-			if tc.profile == "codex" {
+			if tc.versioned {
 				metadataEffort = tc.effort // The client profile synthesizes metadata from the request.
+				assert.JSONEq(t, gjson.GetBytes(got.body, "client_metadata.x-codex-turn-metadata").String(), got.header.Get("x-codex-turn-metadata"))
+				assert.NotEqual(t, "override-turn", gjson.Get(got.header.Get("x-codex-turn-metadata"), "turn_id").String())
+			} else {
+				assert.Equal(t, body, string(got.body))
+				assert.JSONEq(t, `{"reasoning_effort":"max","turn_id":"override-turn"}`, got.header.Get("x-codex-turn-metadata"))
 			}
 			assert.Equal(t, metadataEffort, gjson.Get(gjson.GetBytes(got.body, "client_metadata.x-codex-turn-metadata").String(), "reasoning_effort").String())
 		})
@@ -121,13 +136,17 @@ func TestCLIRequestSampleContractAndTLSOnlyOverride(t *testing.T) {
 			if family == "codex" {
 				path, input = "/v1/responses", `{"instructions":"keep prompt","input":"hi","tools":[{"type":"function","name":"custom","parameters":{"type":"object","properties":{"v":{"type":"string"}}}}]}`
 			}
-			var baseline capture
 			for _, preset := range []struct{ id, runtime string }{
 				{"", "v26.3.0"}, {"claude-node-22.14.0", "v22.14.0"}, {"claude-node-24.19.0", "v24.19.0"},
 			} {
-				c, info := cliTestRequest(family)
+				c, info := versionedCLITestRequest(family)
 				info.ChannelSetting.TLSFingerprint = preset.id
 				resp, err := DoApiRequest(cliTransportAdaptor{url: server.URL + path}, c, info, strings.NewReader(input))
+				if preset.id != "" {
+					require.ErrorContains(t, err, "already binds TLS")
+					assert.Nil(t, resp, "a conflicting TLS override must fail before sending")
+					continue
+				}
 				require.NoError(t, err)
 				require.NoError(t, resp.Body.Close())
 				received := <-got
@@ -144,7 +163,7 @@ func TestCLIRequestSampleContractAndTLSOnlyOverride(t *testing.T) {
 						"X-Stainless-Retry-Count": "0", "X-Stainless-Timeout": "600",
 						"anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true",
 						"x-app": "cli", "Connection": "keep-alive", "Accept-Encoding": "gzip, deflate, br, zstd",
-						"anthropic-beta": claudeCodeBeta,
+						"anthropic-beta": service.LookupCLIVersionProfile(info.ChannelSetting.CLIVersionProfile).Headers["anthropic-beta"],
 					} {
 						assert.Equal(t, want, received.header.Get(key), key)
 					}
@@ -187,24 +206,20 @@ func TestCLIRequestSampleContractAndTLSOnlyOverride(t *testing.T) {
 						assert.False(t, strings.HasPrefix(strings.ToLower(key), "x-stainless-"), key)
 					}
 				}
-				if preset.id == "" {
-					baseline = received
-				} else {
-					assert.Equal(t, baseline.body, received.body, "TLS selection must not change prompt/tools/identity/cache keys")
-					if family == "claude" {
-						received.header.Set("X-Stainless-Runtime-Version", "v26.3.0")
-					}
-					assert.Equal(t, baseline.header, received.header, "only existing runtime declarations may change")
-				}
 			}
 		})
 	}
 
 	// A stale, even invalid, TLS selection must not enter the custom transport
 	// when synthesis is off; request bytes retain the ordinary relay path.
-	for _, profile := range []string{"", "off"} {
-		c, info := cliTestRequest(profile)
-		info.ChannelSetting.TLSFingerprint = "stale-unknown-preset"
+	for _, tc := range []struct{ family, tls string }{
+		{"", "stale-unknown-preset"}, {"off", "stale-unknown-preset"},
+		{"claude", ""}, {"codex", ""},
+		{"claude", "claude-node-22.14.0"}, {"claude", "claude-node-24.19.0"},
+		{"codex", "claude-node-22.14.0"}, {"codex", "claude-node-24.19.0"},
+	} {
+		c, info := cliTestRequest(tc.family)
+		info.ChannelSetting.TLSFingerprint = tc.tls
 		info.ChannelSetting.ClientDeviceSeed = "stale-device"
 		info.ChannelSetting.ClientSessionSeed = "stale-session"
 		input := "{ \"input\": \"unchanged\" }\n"
@@ -231,10 +246,20 @@ func TestCLIRuntimeHeadersRespectAdminOverrides(t *testing.T) {
 		info.ChannelSetting.TLSFingerprint = "claude-node-22.14.0"
 		headers, err := processHeaderOverride(info, c)
 		require.NoError(t, err)
-		assert.Equal(t, "admin-runtime", headers["x-stainless-runtime-version"])
+		if channelTest {
+			assert.Equal(t, "admin-runtime", headers["x-stainless-runtime-version"])
+		} else {
+			assert.Empty(t, headers["x-stainless-runtime-version"], "a family without a version cannot synthesize runtime headers")
+		}
 		info.HeadersOverride = map[string]any{"x-stainless-runtime-version": "channel-runtime"}
 		headers, err = processHeaderOverride(info, c)
 		require.NoError(t, err)
 		assert.Equal(t, "channel-runtime", headers["x-stainless-runtime-version"])
+
+		info.ChannelSetting.TLSFingerprint = ""
+		info.ChannelSetting.CLIVersionProfile = "claude-2.1.306-linux-x64"
+		headers, err = processHeaderOverride(info, c)
+		require.NoError(t, err)
+		assert.Equal(t, "v26.3.0", headers["x-stainless-runtime-version"], "selected versions own runtime headers after global and channel overrides")
 	}
 }

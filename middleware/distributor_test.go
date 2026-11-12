@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/types"
@@ -139,6 +141,75 @@ func TestDistributePassesWithEnabledSingleKeyChannel(t *testing.T) {
 	require.False(t, c.IsAborted())
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "sk-test", common.GetContextKeyString(c, constant.ContextKeyChannelKey))
+}
+
+// Each key of a multi-key CLI channel goes out in its own environment: its own
+// CLI version and proxy where it has them, the channel's where it does not, and
+// a conversation is bound to the key it is pinned to. A retry onto a single-key
+// channel keeps nothing of the key it left: not its index, identity slot or
+// environment.
+func TestSetupContextForSelectedChannelBindsTheKeysEnvironment(t *testing.T) {
+	db := setupDistributorTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.ChannelKeyEnvironment{}))
+	multi := &model.Channel{
+		Id: 1210, Type: constant.ChannelTypeOpenAI, Key: "key-a\nkey-b", Status: common.ChannelStatusEnabled,
+		ChannelInfo: model.ChannelInfo{
+			IsMultiKey: true, MultiKeyMode: constant.MultiKeyModeRandom,
+		},
+	}
+	multi.SetSetting(dto.ChannelSettings{SyntheticClientHeadersProfile: constant.ClientHeaderFamilyCodex, KeyEnvironments: true, Proxy: "http://channel-proxy:8080"})
+	profiles := []string{"codex-0.163.0-linux-x64", "codex-0.160.0-windows-x64"}
+	for i, key := range multi.GetKeys() {
+		row := model.ChannelKeyEnvironment{ChannelId: multi.Id, KeyTag: model.ChannelKeyTag(key), ProfileId: &profiles[i]}
+		if i == 1 {
+			row.Proxy = "socks5://proxy-b:1080"
+		}
+		require.NoError(t, db.Create(&row).Error)
+	}
+	single := &model.Channel{Id: 1211, Type: constant.ChannelTypeOpenAI, Key: "key-single", Status: common.ChannelStatusEnabled}
+	conversations := map[string]string{}
+	for i := 0; len(conversations) < 2 && i < 32; i++ {
+		seed := fmt.Sprintf("conversation-%d", i)
+		if key, _, _ := multi.GetStickyEnabledKey(seed, "gpt-6.1-sol"); conversations[key] == "" {
+			conversations[key] = seed
+		}
+	}
+	require.Len(t, conversations, 2)
+	type binding struct {
+		key        string
+		index      int
+		multiKey   bool
+		slot       string
+		cliVersion string
+		proxy      string
+	}
+	bound := func(c *gin.Context) binding {
+		setting, ok := common.GetContextKeyType[dto.ChannelSettings](c, constant.ContextKeyChannelSetting)
+		require.True(t, ok)
+		return binding{
+			key:        common.GetContextKeyString(c, constant.ContextKeyChannelKey),
+			index:      common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex),
+			multiKey:   common.GetContextKeyBool(c, constant.ContextKeyChannelIsMultiKey),
+			slot:       common.GetContextKeyString(c, constant.ContextKeyChannelKeyTag),
+			cliVersion: setting.CLIVersionProfile,
+			proxy:      setting.Proxy,
+		}
+	}
+
+	var c *gin.Context
+	for _, want := range []binding{
+		{key: "key-a", index: 0, multiKey: true, slot: model.ChannelKeyTag("key-a"), cliVersion: profiles[0], proxy: "http://channel-proxy:8080"},
+		{key: "key-b", index: 1, multiKey: true, slot: model.ChannelKeyTag("key-b"), cliVersion: profiles[1], proxy: "socks5://proxy-b:1080"},
+	} {
+		c, _ = newJSONTestContext(t, http.MethodPost, "/v1/responses", `{"model":"gpt-6.1-sol"}`)
+		c.Request.Header.Set("session-id", conversations[want.key])
+		require.Nil(t, SetupContextForSelectedChannel(c, multi, "gpt-6.1-sol"))
+		assert.Equal(t, want, bound(c))
+	}
+	assert.Equal(t, "http://channel-proxy:8080", multi.GetSetting().Proxy, "a key's environment never leaks into the channel")
+
+	require.Nil(t, SetupContextForSelectedChannel(c, single, "gpt-6.1-sol"))
+	assert.Equal(t, binding{key: "key-single", index: 0, multiKey: false, slot: ""}, bound(c))
 }
 
 // Requests that skip channel selection (task fetch style endpoints) reach

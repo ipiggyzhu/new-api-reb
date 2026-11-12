@@ -33,18 +33,23 @@ const (
 
 // assertProfileBillingLeads checks a real Claude Code client's system under a
 // profile whose client sends a billing block: the profile's block leads, bare,
-// and everything the client sent follows unchanged, its breakpoints included.
+// while system content and attributes other than cache policy are preserved.
 func assertProfileBillingLeads(t *testing.T, version string, sent string, shaped []byte) {
 	t.Helper()
 	system := gjson.GetBytes(shaped, "system").Array()
 	require.NotEmpty(t, system)
 	assert.False(t, system[0].Get("cache_control").Exists(), "the billing block carries no breakpoint")
 	assert.True(t, strings.HasPrefix(system[0].Get("text").String(), "x-anthropic-billing-header: cc_version="+version+"."), system[0].Raw)
-	rest := make([]string, 0, len(system)-1)
-	for _, block := range system[1:] {
-		rest = append(rest, block.Raw)
+	original := gjson.Get(sent, "system").Array()
+	require.Len(t, system, len(original)+1)
+	for i, block := range original {
+		var before, after cliObject
+		require.NoError(t, appcommon.UnmarshalJsonStr(block.Raw, &before))
+		require.NoError(t, appcommon.UnmarshalJsonStr(system[i+1].Raw, &after))
+		delete(before, "cache_control")
+		delete(after, "cache_control")
+		assert.JSONEq(t, string(cliField(before)), string(cliField(after)))
 	}
-	assert.JSONEq(t, gjson.Get(sent, "system").Raw, "["+strings.Join(rest, ",")+"]")
 }
 
 // withOriginalRequest stores the caller's own request the way the relay does,
@@ -173,9 +178,8 @@ func TestClaudeVersionProfileKeepsCallerLimitAndContract(t *testing.T) {
 	})
 	t.Run("model outside the capture", func(t *testing.T) {
 		request := `{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"hi"}]}`
-		converted, _, _, _ := convertAndShapeOpenAIRequest(t, "claude", request)
 		shaped, _, _ := shapeVersionedClaudeRequest(t, profile, types.RelayFormatOpenAI, request)
-		assert.Equal(t, gjson.GetBytes(converted, "max_tokens").Raw, gjson.GetBytes(shaped, "max_tokens").Raw)
+		assert.Equal(t, "128000", gjson.GetBytes(shaped, "max_tokens").Raw, "an absent caller limit uses the profile default on every model")
 		assert.False(t, gjson.GetBytes(shaped, "thinking").Exists())
 		assert.False(t, gjson.GetBytes(shaped, "output_config").Exists())
 		assert.Equal(t, claudeCode2306BillingHi, gjson.GetBytes(shaped, "system.0").Raw, "the billing block is client identity, not model-dependent")
@@ -369,11 +373,8 @@ func TestClaudeVersionProfileDecidesBillingBlock(t *testing.T) {
 						}
 						if tc.body == "multiple" {
 							wantCache := map[string]string{"system.1.cache_control": "ephemeral 1h"}
-							if native {
-								wantCache["system.2.cache_control"] = "ephemeral"
-							}
 							assert.Equal(t, wantCache, claudeCacheBreakpoints(t, shaped),
-								"a preserved billing breakpoint counts toward the caller's cache layout")
+								"only the opaque billing block retains caller cache settings")
 						}
 					}
 				}
@@ -387,10 +388,12 @@ func TestClaudeVersionProfileDecidesBillingBlock(t *testing.T) {
 	t.Run("no profile keeps the caller's block", func(t *testing.T) {
 		request := `{"model":"claude-sonnet-4-5","max_tokens":512,"system":` + bodies["leading"] + `,"messages":[{"role":"user","content":"Say ok."}]}`
 		c, info := nativeClaudeCodeRequest()
+		info.ChannelSetting.CLIVersionProfile = ""
 		withOriginalRequest(t, c, request)
-		assert.JSONEq(t, bodies["leading"], gjson.GetBytes(shapeClaudeMessagesBody(t, c, info, []byte(request)), "system").Raw)
+		assert.Equal(t, request, string(shapeClaudeMessagesBody(t, c, info, []byte(request))))
 
 		c, info = nativeClaudeCodeRequest()
+		info.ChannelSetting.CLIVersionProfile = ""
 		c.Request.Header.Set("User-Agent", "Anthropic/Python 0.60.0")
 		withOriginalRequest(t, c, request)
 		assert.Equal(t, gjson.Get(callerBilling, "text").String(),
@@ -398,11 +401,8 @@ func TestClaudeVersionProfileDecidesBillingBlock(t *testing.T) {
 	})
 }
 
-// The outgoing beta set agrees with the final body even where the real
-// client's own breakpoints differ from the profile's TTL mode: header layer
-// only, the native body's breakpoints reach upstream as sent. A shaped body's
-// beta follows the profile's placement, not the caller's stripped 1h, and an
-// admin beta override passes through the same rule.
+// The outgoing beta set follows the profile's final cache policy, even when
+// native clients or administrator overrides try to supply another TTL.
 func TestClaudeVersionProfileBetaFollowsFinalBodyTTL(t *testing.T) {
 	server, captures := cliTLSUpstream(t)
 	withHour := withClientCache.Replace(strings.Replace(claudeCodeCachedRequest, "@extra", "", 1))
@@ -416,15 +416,15 @@ func TestClaudeVersionProfileBetaFollowsFinalBodyTTL(t *testing.T) {
 		name, profile, body, adminBeta string
 		sdk, hourTTL                   bool
 	}{
-		{"default profile, client sends 1h", "claude-2.1.306-linux-x64", withHour, "", false, true},
-		{"1h profile, client sends only 5m", "claude-2.1.306-linux-x64-1h", onlyDefault, "", false, false},
+		{"default profile, client sends 1h", "claude-2.1.306-linux-x64", withHour, "", false, false},
+		{"1h profile, client sends only 5m", "claude-2.1.306-linux-x64-1h", onlyDefault, "", false, true},
 		{"1h profile, profile places 1h", "claude-2.1.306-linux-x64-1h", uncached, "", false, true},
 		{"default profile, profile places 5m", "claude-2.1.306-linux-x64", uncached, "", false, false},
 		{"shaped SDK 1h under default profile", "claude-2.1.306-linux-x64", sdkHour, "", true, false},
 		{"shaped SDK under 1h profile", "claude-2.1.306-linux-x64-1h", sdkHour, "", true, true},
 		{"admin beta with 1h token, 5m body", "claude-2.1.306-linux-x64", onlyDefault, claudeCode2306Beta + ",extended-cache-ttl-2025-04-11", false, false},
 		{"admin beta without 1h token, 1h body", "claude-2.1.306-linux-x64-1h", withHour, claudeCode2306Beta, false, true},
-		{"default profile, client's 1h inside a document", "claude-2.1.306-linux-x64", documentHour, "", false, true},
+		{"default profile, client's 1h inside a document", "claude-2.1.306-linux-x64", documentHour, "", false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -449,7 +449,10 @@ func TestClaudeVersionProfileBetaFollowsFinalBodyTTL(t *testing.T) {
 			assert.Equal(t, tc.hourTTL, claudeBodyHasHourTTL(got.body), "the beta must describe the body that was sent")
 			if !tc.sdk && tc.body != uncached {
 				assertProfileBillingLeads(t, "2.1.306", tc.body, got.body)
-				assert.JSONEq(t, gjson.Get(tc.body, "messages").Raw, gjson.GetBytes(got.body, "messages").Raw)
+				assert.Len(t, gjson.GetBytes(got.body, "messages").Array(), len(gjson.Get(tc.body, "messages").Array()))
+				for _, path := range []string{"messages.0.content.0.text", "messages.1.content.0.input", "messages.2.content.0.content.0.text", "messages.0.content.0.source.content.0.text"} {
+					assert.Equal(t, gjson.Get(tc.body, path).Raw, gjson.GetBytes(got.body, path).Raw, path)
+				}
 			}
 		})
 	}
@@ -491,7 +494,7 @@ func TestCodexVersionProfileOmitsUncapturedInstructionsKey(t *testing.T) {
 		{"0.163 moves instructions", "codex-0.163.0-linux-x64", `"system instruction"`, ""},
 		{"0.163 adaptor default", "codex-0.163.0-linux-x64", `""`, ""},
 		{"0.150 captures the key", "codex-0.150.0-windows-x64", `"system instruction"`, `"system instruction"`},
-		{"unversioned keeps the empty field", "", `"system instruction"`, `""`},
+		{"unversioned keeps caller instructions", "", `"system instruction"`, `"system instruction"`},
 		{"unversioned adaptor default", "", `""`, `""`},
 	}
 	for _, tc := range cases {
@@ -504,6 +507,9 @@ func TestCodexVersionProfileOmitsUncapturedInstructionsKey(t *testing.T) {
 			shaped, err := io.ReadAll(reader)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, gjson.GetBytes(shaped, "instructions").Raw)
+			if tc.version == "" {
+				assert.Equal(t, body, string(shaped), "without a version every byte is preserved")
+			}
 			if tc.instructions != `""` && tc.want != `"system instruction"` {
 				assert.Equal(t, "system instruction", gjson.GetBytes(shaped, `input.#(role=="developer").content.0.text`).String())
 			}
@@ -520,6 +526,7 @@ func TestUnversionedClaudeShapingSynthesizesNothing(t *testing.T) {
 	request := `{"model":"claude-opus-5-5","temperature":0.3,"reasoning_effort":"low",
 		"messages":[{"role":"system","content":[{"type":"text","text":"stable"},{"type":"text","text":"dynamic"}]},{"role":"user","content":"Say ok."}]}`
 	converted, _, c, info := convertAndShapeOpenAIRequest(t, "claude", request)
+	info.ChannelSetting.CLIVersionProfile = ""
 	withOriginalRequest(t, c, request)
 	resp, err := DoApiRequest(cliTransportAdaptor{url: server.URL + "/v1/messages"}, c, info, strings.NewReader(string(converted)))
 	require.NoError(t, err)
@@ -531,6 +538,7 @@ func TestUnversionedClaudeShapingSynthesizesNothing(t *testing.T) {
 		assert.Equal(t, gjson.GetBytes(converted, field).Raw, gjson.GetBytes(got.body, field).Raw, field)
 	}
 	assert.Equal(t, `{"type":"enabled","budget_tokens":1280}`, gjson.GetBytes(got.body, "thinking").Raw)
-	assert.Equal(t, `{"effort":"medium"}`, gjson.GetBytes(got.body, "output_config").Raw)
-	assert.Equal(t, claudeCodeBeta, got.header.Get("anthropic-beta"))
+	assert.Equal(t, string(converted), string(got.body), "the profile gate preserves conversion output byte for byte")
+	assert.Equal(t, "caller-beta-must-not-leak", got.header.Get("anthropic-beta"), "without a version the adaptor's header remains unchanged")
+	assert.Empty(t, got.header.Get("X-Claude-Code-Session-Id"))
 }

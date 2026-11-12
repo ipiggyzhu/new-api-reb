@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -69,6 +71,8 @@ func clearChannelInfo(channel *model.Channel) {
 	if channel.ChannelInfo.IsMultiKey {
 		channel.ChannelInfo.MultiKeyDisabledReason = nil
 		channel.ChannelInfo.MultiKeyDisabledTime = nil
+		// 各密钥的环境里有代理密码，只经多密钥管理脱敏后返回
+		channel.ChannelInfo.MultiKeyEnvs = nil
 	}
 }
 
@@ -739,6 +743,9 @@ func AddChannel(c *gin.Context) {
 	}
 
 	addChannelRequest.Channel.CreatedTime = common.GetTimestamp()
+	// 各密钥的独立环境只能在建好的渠道上经校验逐个设置；新渠道也没有转换前的原密钥
+	addChannelRequest.Channel.ChannelInfo.MultiKeyEnvs = nil
+	addChannelRequest.Channel.ChannelInfo.MultiKeyOriginFingerprint = ""
 	keys := make([]string, 0)
 	switch addChannelRequest.Mode {
 	case "multi_to_single":
@@ -1068,6 +1075,13 @@ func UpdateChannel(c *gin.Context) {
 	}
 	clearChannelReadOnlyFields(&channel, requestData)
 
+	// Serialize this channel's entire read-modify-write with key management
+	// and automatic status changes. Cache rebuilds run after releasing it.
+	lock := model.GetChannelPollingLock(channel.Id)
+	lock.Lock()
+	unlock := sync.OnceFunc(lock.Unlock)
+	defer unlock()
+
 	// Preserve existing ChannelInfo to ensure multi-key channels keep correct state even if the client does not send ChannelInfo in the request.
 	originChannel, err := model.GetChannelById(channel.Id, true)
 	if err != nil {
@@ -1177,7 +1191,141 @@ func UpdateChannel(c *gin.Context) {
 				channel.Key = strings.Join(allKeys, "\n")
 			}
 		case "replace":
-			// 覆盖模式：直接使用新密钥（默认行为，不需要特殊处理）
+			// 覆盖模式：直接使用新密钥。Vertex 的 JSON 密钥按新建渠道时的格式存；
+			// 重新上传的凭证与已有密钥内容相同时沿用已有密钥的原文，
+			// 不论原文的字段顺序如何，该密钥的状态和环境都保留。
+			if channel.Type == constant.ChannelTypeVertexAi && channel.GetOtherSettings().VertexKeyType != dto.VertexKeyTypeAPIKey && channel.Key != "" {
+				trimmed := strings.TrimSpace(channel.Key)
+				var newKeys []string
+				if strings.HasPrefix(trimmed, "[") {
+					array, err := getVertexArrayKeys(trimmed)
+					if err != nil {
+						c.JSON(http.StatusOK, gin.H{
+							"success": false,
+							"message": "覆盖密钥解析失败: " + err.Error(),
+						})
+						return
+					}
+					newKeys = array
+				} else if strings.HasPrefix(trimmed, "{") {
+					// 单个 JSON 密钥
+					if array, err := getVertexArrayKeys("[" + trimmed + "]"); err == nil {
+						newKeys = array
+					}
+				}
+				if len(newKeys) > 0 {
+					// 含换行的原文不能按行存回，不沿用
+					originals := make(map[string]string)
+					for _, original := range originChannel.GetKeys() {
+						original = strings.TrimSpace(original)
+						canonical, err := getVertexArrayKeys("[" + original + "]")
+						if err == nil && len(canonical) == 1 && !strings.Contains(original, "\n") {
+							originals[canonical[0]] = original
+						}
+					}
+					for i, key := range newKeys {
+						if original, ok := originals[key]; ok {
+							newKeys[i] = original
+						}
+					}
+					channel.Key = strings.Join(newKeys, "\n")
+				}
+			}
+		}
+	} else if channel.KeyMode != nil && *channel.KeyMode == "append" && channel.Key != "" {
+		// 单密钥渠道追加密钥即转为多密钥：原密钥留在首位，并沿用它原来的上游身份。
+		// Codex 的 OAuth JSON 和 Vertex 的 JSON 密钥不按行拆分，不支持转换。
+		// 请求没带 type 时渠道类型不变，按原类型判断。
+		channelType := channel.Type
+		if channelType == 0 {
+			channelType = originChannel.Type
+		}
+		if channelType == constant.ChannelTypeCodex || channelType == constant.ChannelTypeVertexAi {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "该渠道类型不支持追加密钥转为多密钥",
+			})
+			return
+		}
+		originKey := strings.TrimSpace(originChannel.Key)
+		keys := make([]string, 0)
+		seen := make(map[string]bool)
+		for _, key := range append([]string{originKey}, strings.Split(channel.Key, "\n")...) {
+			key = strings.TrimSpace(key)
+			if key == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			keys = append(keys, key)
+		}
+		if len(keys) < 2 {
+			// 没有新密钥：原密钥保持不变
+			channel.Key = ""
+		} else {
+			channel.Key = strings.Join(keys, "\n")
+			channel.ChannelInfo.IsMultiKey = true
+			channel.ChannelInfo.MultiKeyOriginFingerprint = model.KeyFingerprint(originKey)
+			if channel.ChannelInfo.MultiKeyMode == "" {
+				channel.ChannelInfo.MultiKeyMode = constant.MultiKeyModeRandom
+			}
+		}
+	}
+
+	// 保存后渠道上的密钥
+	keys := originChannel.GetKeys()
+	if channel.Key != "" {
+		keys = channel.GetKeys()
+	}
+	// 覆盖多密钥渠道的密钥时，按序号存的启用状态、禁用原因和时间要跟着密钥走：
+	// 仍在新列表里的密钥保留原状态，新密钥从启用开始，不继承旧列表同一序号的状态。
+	// 重复的密钥按出现的先后一一对应。
+	if originChannel.ChannelInfo.IsMultiKey && channel.Key != "" && (channel.KeyMode == nil || *channel.KeyMode != "append") {
+		oldIndexes := make(map[string][]int)
+		for i, key := range originChannel.GetKeys() {
+			oldIndexes[strings.TrimSpace(key)] = append(oldIndexes[strings.TrimSpace(key)], i)
+		}
+		origin := originChannel.ChannelInfo
+		channel.ChannelInfo.MultiKeyStatusList = make(map[int]int)
+		channel.ChannelInfo.MultiKeyDisabledTime = make(map[int]int64)
+		channel.ChannelInfo.MultiKeyDisabledReason = make(map[int]string)
+		for i, key := range keys {
+			indexes := oldIndexes[strings.TrimSpace(key)]
+			if len(indexes) == 0 {
+				continue
+			}
+			old := indexes[0]
+			oldIndexes[strings.TrimSpace(key)] = indexes[1:]
+			if status, ok := origin.MultiKeyStatusList[old]; ok {
+				channel.ChannelInfo.MultiKeyStatusList[i] = status
+			}
+			if disabledTime, ok := origin.MultiKeyDisabledTime[old]; ok {
+				channel.ChannelInfo.MultiKeyDisabledTime[i] = disabledTime
+			}
+			if reason, ok := origin.MultiKeyDisabledReason[old]; ok {
+				channel.ChannelInfo.MultiKeyDisabledReason[i] = reason
+			}
+		}
+	}
+	// 各密钥的独立环境叠加在渠道设置之上，渠道设置改动后也必须仍然成立。
+	// 只校验保存后仍在渠道上的密钥，被换掉的密钥的环境会随之丢弃。
+	effectiveSetting := originChannel.GetSetting()
+	if channel.Setting != nil {
+		effectiveSetting = channel.GetSetting()
+	}
+	for _, key := range keys {
+		if !effectiveSetting.KeyEnvironments {
+			break
+		}
+		env, ok := channel.ChannelInfo.MultiKeyEnvs[model.KeyFingerprint(key)]
+		if !ok {
+			continue
+		}
+		if err := validateMultiKeyEnv(effectiveSetting, env); err != nil {
+			c.JSON(http.StatusOK, gin.H{
+				"success": false,
+				"message": "有密钥的独立环境与新的渠道设置冲突，请先在多密钥管理中修改：" + err.Error(),
+			})
+			return
 		}
 	}
 	if err := ensureKeyEnvironmentSeeds(&channel.Channel, originChannel); err != nil {
@@ -1186,6 +1334,7 @@ func UpdateChannel(c *gin.Context) {
 	}
 	keysChanged := channel.Key != "" && channel.Key != originChannel.Key
 	err = channel.UpdateWith(keyEnvironmentSaveHook(channel.AllowUnassigned, keysChanged))
+	unlock()
 	if err != nil {
 		if respondKeyEnvironmentError(c, err) {
 			return
@@ -1565,8 +1714,8 @@ func CopyChannel(c *gin.Context) {
 // MultiKeyManageRequest represents the request for multi-key management operations
 type MultiKeyManageRequest struct {
 	ChannelId int    `json:"channel_id"`
-	Action    string `json:"action"`              // "disable_key", "enable_key", "delete_key", "delete_disabled_keys", "get_key_status"
-	KeyIndex  *int   `json:"key_index,omitempty"` // for disable_key, enable_key, and delete_key actions
+	Action    string `json:"action"`              // "disable_key", "enable_key", "delete_key", "delete_disabled_keys", "get_key_status", "set_key_env"
+	KeyIndex  *int   `json:"key_index,omitempty"` // for disable_key, enable_key, delete_key and set_key_env actions
 	Page      int    `json:"page,omitempty"`      // for get_key_status pagination
 	PageSize  int    `json:"page_size,omitempty"` // for get_key_status pagination
 	Status    *int   `json:"status,omitempty"`    // for get_key_status filtering: 1=enabled, 2=manual_disabled, 3=auto_disabled, nil=all
@@ -1574,6 +1723,9 @@ type MultiKeyManageRequest struct {
 	Unassigned bool `json:"unassigned,omitempty"`
 	// AllowUnassigned confirms a reassign_key_environments that leaves keys unassigned.
 	AllowUnassigned bool `json:"allow_unassigned,omitempty"`
+	// set_key_env uses the published local profile name; nil keeps a value.
+	CLIProfile *string `json:"cli_profile,omitempty"`
+	Proxy      *string `json:"proxy,omitempty"`
 }
 
 // MultiKeyStatusResponse represents the response for key status query
@@ -1602,6 +1754,7 @@ type KeyStatus struct {
 	// false for a key the pool could not cover, which serves no traffic.
 	CLIProfile     string `json:"cli_profile,omitempty"`
 	KeyEnvAssigned bool   `json:"key_env_assigned"`
+	Proxy          string `json:"proxy,omitempty"`
 }
 
 // ManageMultiKeys handles multi-key management operations
@@ -1612,6 +1765,12 @@ func ManageMultiKeys(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+
+	// 从读取渠道到写回都持有该渠道的锁，与编辑渠道和自动禁用互斥：
+	// 期间被禁用的密钥不会被这里读到的旧数据重新启用，这里的修改也不会被对方覆盖。
+	lock := model.GetChannelPollingLock(request.ChannelId)
+	lock.Lock()
+	defer lock.Unlock()
 
 	channel, err := model.GetChannelById(request.ChannelId, true)
 	if err != nil {
@@ -1645,10 +1804,6 @@ func ManageMultiKeys(c *gin.Context) {
 		})
 	}
 
-	lock := model.GetChannelPollingLock(channel.Id)
-	lock.Lock()
-	defer lock.Unlock()
-
 	switch request.Action {
 	case "get_key_status":
 		keys := channel.GetKeys()
@@ -1666,7 +1821,7 @@ func ManageMultiKeys(c *gin.Context) {
 		// Statistics for all keys (unchanged by filtering)
 		var enabledCount, manualDisabledCount, autoDisabledCount int
 		keyEnvironments := channel.GetSetting().KeyEnvironments
-		var keyProfiles map[int]string
+		var keyProfiles map[int]model.ChannelKeyEnvironment
 		unassignedCount := 0
 		if keyEnvironments {
 			keyProfiles, err = keyEnvironmentStatus(channel, keys)
@@ -1722,7 +1877,14 @@ func ManageMultiKeys(c *gin.Context) {
 				KeyPreview:   keyPreview,
 			}
 			if keyEnvironments {
-				keyStatus.CLIProfile = keyProfiles[i]
+				row := keyProfiles[i]
+				if row.ProfileId != nil {
+					keyStatus.CLIProfile = *row.ProfileId
+				}
+				keyStatus.Proxy = row.Proxy
+				if parsed, err := url.Parse(row.Proxy); err == nil {
+					keyStatus.Proxy = parsed.Redacted()
+				}
 				keyStatus.KeyEnvAssigned = keyStatus.CLIProfile != ""
 				if !keyStatus.KeyEnvAssigned {
 					unassignedCount++
@@ -2095,6 +2257,49 @@ func ManageMultiKeys(c *gin.Context) {
 		})
 		return
 
+	case "set_key_env":
+		if !channel.GetSetting().KeyEnvironments {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "该渠道未开启独立 key 环境"})
+			return
+		}
+		if request.KeyIndex == nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "未指定要设置的密钥索引"})
+			return
+		}
+		keys := channel.GetKeys()
+		index := *request.KeyIndex
+		if index < 0 || index >= len(keys) {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": "密钥索引超出范围"})
+			return
+		}
+		env := model.MultiKeyEnv{}
+		if request.CLIProfile != nil {
+			env.CLIVersionProfile = strings.ToLower(strings.TrimSpace(*request.CLIProfile))
+		}
+		if request.Proxy != nil {
+			env.Proxy = strings.TrimSpace(*request.Proxy)
+		}
+		if err := validateMultiKeyEnv(channel.GetSetting(), env); err != nil {
+			c.JSON(http.StatusOK, gin.H{"success": false, "message": err.Error()})
+			return
+		}
+		_, err = model.ReassignChannelKeyEnvironments(channel.Id, func(tx *gorm.DB) (any, error) {
+			return service.ReconcileKeyEnvironments(tx, channel, true, service.KeyEnvironmentUpdate{
+				Index: index, ProfileId: request.CLIProfile, Proxy: request.Proxy,
+			})
+		})
+		if err != nil {
+			if respondKeyEnvironmentError(c, err) {
+				return
+			}
+			common.ApiError(c, err)
+			return
+		}
+		model.InitChannelCache()
+		service.ResetProxyClientCache()
+		c.JSON(http.StatusOK, gin.H{"success": true, "message": "密钥环境已更新"})
+		return
+
 	case "preview_key_environments", "reassign_key_environments":
 		if !channel.GetSetting().KeyEnvironments {
 			c.JSON(http.StatusOK, gin.H{
@@ -2139,7 +2344,35 @@ func ManageMultiKeys(c *gin.Context) {
 }
 
 func multiKeyActionRequiresSensitiveWrite(action string) bool {
-	return action == "delete_key" || action == "delete_disabled_keys" || action == "reassign_key_environments"
+	return action == "delete_key" || action == "delete_disabled_keys" || action == "reassign_key_environments" || action == "set_key_env"
+}
+
+// validateMultiKeyEnv checks a key override against its channel family and
+// transport. Pool membership and uniqueness are enforced by Reconcile.
+func validateMultiKeyEnv(setting dto.ChannelSettings, env model.MultiKeyEnv) error {
+	if env.CLIVersionProfile != "" {
+		if setting.SyntheticClientHeadersProfile == "" {
+			return fmt.Errorf("渠道未启用客户端模拟，不能按密钥设置 CLI 版本")
+		}
+		if _, err := service.ResolveCLIVersionProfile(env.CLIVersionProfile, setting.SyntheticClientHeadersProfile, setting.TLSFingerprint, setting.WebsocketTransport, setting.KeyEnvironments); err != nil {
+			return err
+		}
+	}
+	if env.Proxy != "" {
+		parsed, err := url.Parse(env.Proxy)
+		if err != nil {
+			return fmt.Errorf("代理地址格式错误：%v", err)
+		}
+		switch parsed.Scheme {
+		case "http", "https", "socks5", "socks5h":
+		default:
+			return fmt.Errorf("代理仅支持 http、https、socks5、socks5h 协议")
+		}
+		if parsed.Host == "" {
+			return fmt.Errorf("代理地址缺少主机和端口")
+		}
+	}
+	return nil
 }
 
 // OllamaPullModel 拉取 Ollama 模型

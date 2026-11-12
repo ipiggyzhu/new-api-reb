@@ -16,7 +16,7 @@ func clearKeyCooldowns(t *testing.T, channelId int, modelNames ...string) {
 		channelKeyCooldownLock.Lock()
 		defer channelKeyCooldownLock.Unlock()
 		for _, modelName := range modelNames {
-			delete(channelKeyCooldowns, channelCooldownKey(channelId, modelName))
+			delete(channelKeyCooldowns, modelName)
 			channelCooldowns.Delete(channelCooldownKey(channelId, modelName))
 		}
 	})
@@ -70,6 +70,8 @@ func TestMarkChannelKeyCooldownBacksOffAndHonorsHint(t *testing.T) {
 	assert.Equal(t, now.Add(45*time.Minute), hinted, "the upstream's own retry-after wins")
 	shorter := MarkChannelKeyCooldown(channelId, modelName, 1, "sk-b", time.Second, now.Add(time.Second))
 	assert.Equal(t, hinted, shorter, "a later deadline already recorded is kept")
+	assert.Equal(t, hinted, MarkChannelKeyCooldown(channelId, modelName, 1, "sk-b", time.Second,
+		now.Add(keyCooldownStrikeReset+time.Minute)), "resetting strikes must not shorten the upstream's longer deadline")
 
 	quietLater := now.Add(keyCooldownStrikeReset + 3*time.Minute)
 	assert.Equal(t, quietLater.Add(10*time.Second), MarkChannelKeyCooldown(channelId, modelName, 0, "sk-a", 0, quietLater),
@@ -113,9 +115,9 @@ func TestKeySelectionSkipsCoolingKeys(t *testing.T) {
 
 	// Windows end: the pinned key takes its conversation back.
 	channelKeyCooldownLock.Lock()
-	for index, entry := range channelKeyCooldowns[channelCooldownKey(channel.Id, modelName)] {
+	for index, entry := range channelKeyCooldowns[modelName] {
 		entry.until = time.Now().Add(-time.Second)
-		channelKeyCooldowns[channelCooldownKey(channel.Id, modelName)][index] = entry
+		channelKeyCooldowns[modelName][index] = entry
 	}
 	channelKeyCooldownLock.Unlock()
 	_, recovered, apiErr := channel.GetEnabledKeyForSeed(seed, modelName)
@@ -137,6 +139,36 @@ func TestKeyCooldownIgnoresAnEditedKeySlot(t *testing.T) {
 	channel.Key = "sk-a\nsk-new\nsk-c"
 	channel.Keys = nil
 	assert.Contains(t, pollKeyIndexes(t, channel, modelName, 3), 1)
+}
+
+// The refusal belongs to the real key across reorder and transfer, while a
+// new key at the same index and the same key on another model stay usable.
+func TestKeyCooldownFollowsKeyAcrossChannelsAndReordering(t *testing.T) {
+	const modelName, otherModel = "cooldown-transfer", "cooldown-transfer-other"
+	channel := &Channel{Id: 900202, Key: "sk-a\nsk-b", ChannelInfo: ChannelInfo{IsMultiKey: true}}
+	clearKeyCooldowns(t, channel.Id, modelName, otherModel)
+	now := time.Now()
+	deadline := MarkChannelKeyCooldown(channel.Id, modelName, 1, "sk-b", 45*time.Minute, now)
+
+	channel.Key, channel.Keys = "sk-b\nsk-a", nil
+	index, key, until := channel.KeyEnvironmentKey(ChannelKeyTag("sk-b"), modelName)
+	assert.Equal(t, 0, index)
+	assert.Equal(t, "sk-b", key)
+	assert.Equal(t, deadline, until)
+
+	moved := &Channel{Id: 900203, Key: "sk-new\nsk-b", ChannelInfo: ChannelInfo{IsMultiKey: true}}
+	index, key, until = moved.KeyEnvironmentKey(ChannelKeyTag("sk-b"), modelName)
+	assert.Equal(t, 1, index)
+	assert.Equal(t, "sk-b", key)
+	assert.Equal(t, deadline, until)
+	assert.Equal(t, deadline, MarkChannelKeyCooldown(moved.Id, modelName, 1, "sk-b", time.Second, now.Add(time.Second)))
+
+	index, key, until = moved.KeyEnvironmentKey(ChannelKeyTag("sk-new"), modelName)
+	assert.Equal(t, 0, index)
+	assert.Equal(t, "sk-new", key)
+	assert.True(t, until.IsZero(), "a replacement key cannot inherit the old slot's refusal")
+	_, _, until = moved.KeyEnvironmentKey(ChannelKeyTag("sk-b"), otherModel)
+	assert.True(t, until.IsZero(), "cooldown is scoped to the refused model")
 }
 
 // The channel itself cools only when every enabled key is cooling, and only

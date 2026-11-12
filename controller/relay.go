@@ -613,9 +613,8 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 // modelName. On a single-key channel the whole channel sits out of selection
 // until the window ends. Not on a multi-key channel: there the refusal came
 // from one key, and cooling the channel would also hide the keys that still
-// have quota, so a rate limit cools only the key that was refused, and the
-// channel cools only once every enabled key is cooling. An overload (529) is
-// not key-scoped and leaves a multi-key channel alone, as before.
+// have quota. Rate limits and routing faults cool only the refused key; the
+// channel cools only once every enabled key is cooling.
 func applyRefusalCooldown(c *gin.Context, channel *model.Channel, modelName string, apiErr *types.NewAPIError) {
 	if !channel.ChannelInfo.IsMultiKey {
 		cooldown := service.ChannelCooldownFor(apiErr)
@@ -629,7 +628,10 @@ func applyRefusalCooldown(c *gin.Context, channel *model.Channel, modelName stri
 	}
 	hint, keyScoped := service.KeyRateLimitCooldownHint(apiErr)
 	if !keyScoped {
-		return
+		hint = service.ChannelKeyCooldownFor(apiErr)
+		if hint <= 0 {
+			return
+		}
 	}
 	// The first attempt's channel is a stub rebuilt from the context, so the key
 	// list and statuses come from the cache.

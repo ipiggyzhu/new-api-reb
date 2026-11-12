@@ -136,23 +136,20 @@ func respondKeyEnvironmentError(c *gin.Context, err error) bool {
 	return true
 }
 
-// keyEnvironmentStatus is the per-key environment shown in the multi-key
-// dialog: the assigned profile id by key index, read from the table rather
-// than the cache so a save is visible at once.
-func keyEnvironmentStatus(channel *model.Channel, keys []string) (map[int]string, error) {
+// keyEnvironmentStatus reads saved rows by index for the admin dialog. Raw
+// proxies stay internal; the response builder masks their credentials.
+func keyEnvironmentStatus(channel *model.Channel, keys []string) (map[int]model.ChannelKeyEnvironment, error) {
 	rows, err := model.LoadChannelKeyEnvironmentRows(model.DB, channel.Id)
 	if err != nil {
 		return nil, err
 	}
-	byTag := make(map[string]string, len(rows))
+	byTag := make(map[string]model.ChannelKeyEnvironment, len(rows))
 	for _, row := range rows {
-		if row.ProfileId != nil {
-			byTag[row.KeyTag] = *row.ProfileId
-		}
+		byTag[row.KeyTag] = row
 	}
-	profiles := make(map[int]string, len(keys))
+	environments := make(map[int]model.ChannelKeyEnvironment, len(keys))
 	for i, key := range keys {
-		profiles[i] = byTag[model.ChannelKeyTag(key)]
+		environments[i] = byTag[model.ChannelKeyTag(key)]
 	}
-	return profiles, nil
+	return environments, nil
 }

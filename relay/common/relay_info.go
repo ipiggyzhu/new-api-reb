@@ -157,11 +157,17 @@ type RelayInfo struct {
 	SubscriptionAmountUsedAfterPreConsume int64
 	IsClaudeBetaQuery                     bool // /v1/messages?beta=true
 	IsChannelTest                         bool // channel test request
+	IsSystemKeepalive                     bool // system traffic that uses the selected transport
 	RetryIndex                            int
 	LastError                             *types.NewAPIError
 	RuntimeHeadersOverride                map[string]interface{}
 	UseRuntimeHeadersOverride             bool
 	ParamOverrideAudit                    []string
+
+	// CLISessionSeed is the conversation a synthesized CLI request continues.
+	// The upstream keepalive sets it to the last real request's seed so its
+	// client identity is that session's instead of a new one.
+	CLISessionSeed string
 
 	// UpstreamRequestBodySize is the byte size of the marshaled upstream request
 	// body. It is set when the body is wrapped in a BodyStorage (see

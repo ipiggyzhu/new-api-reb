@@ -903,6 +903,9 @@ export function ChannelMutateDrawer({
   const isChannelDetailLoading = isEditing && isChannelLoading
   const supportsMultiKeyAddMode =
     currentType !== 57 && !(currentType === 41 && vertexKeyType === 'api_key')
+  // Converting a single-key channel splits the added keys by line, which a Codex
+  // OAuth JSON or Vertex key cannot take, so the backend rejects both types
+  const supportsKeyConversion = currentType !== 57 && currentType !== 41
   const addModeOptions = useMemo(
     () =>
       supportsMultiKeyAddMode
@@ -1375,6 +1378,16 @@ export function ChannelMutateDrawer({
       })
     }
   }, [form, isEditing, multiKeyMode, supportsMultiKeyAddMode])
+
+  useEffect(() => {
+    if (!isEditing || isMultiKeyChannel || supportsKeyConversion) return
+    if (keyMode === 'append') {
+      form.setValue('key_mode', 'replace', {
+        shouldDirty: true,
+        shouldValidate: true,
+      })
+    }
+  }, [form, isEditing, isMultiKeyChannel, keyMode, supportsKeyConversion])
 
   // Validate base_url - warn if it ends with /v1
   useEffect(() => {
@@ -2962,7 +2975,7 @@ export function ChannelMutateDrawer({
                                         <FormControl>
                                           <SelectTrigger
                                             size='sm'
-                                            className='w-full sm:w-56'
+                                            className='w-full sm:w-[28rem]'
                                           >
                                             <SelectValue />
                                           </SelectTrigger>
@@ -2992,10 +3005,18 @@ export function ChannelMutateDrawer({
                                 control={form.control}
                                 name='key'
                                 render={({ field }) => {
+                                  // Appending to a single-key channel turns it
+                                  // into a multi-key one
+                                  const convertsToMultiKey =
+                                    isEditing &&
+                                    !isMultiKeyChannel &&
+                                    keyMode === 'append'
                                   let keyPlaceholder = t(
                                     getKeyPromptForType(currentType)
                                   )
-                                  if (isEditing) {
+                                  if (convertsToMultiKey) {
+                                    keyPlaceholder = t('Enter one key per line')
+                                  } else if (isEditing) {
                                     keyPlaceholder = t(
                                       'Leave empty to keep existing key'
                                     )
@@ -3025,16 +3046,37 @@ export function ChannelMutateDrawer({
                                     keyPlaceholder = t(
                                       'Enter key, format: AccessKey|SecretAccessKey|Region'
                                     )
+                                  } else if (
+                                    multiKeyMode === 'multi_to_single'
+                                  ) {
+                                    keyPlaceholder = t('Enter one key per line')
                                   } else if (isBatchMode) {
                                     keyPlaceholder = t(
                                       'Enter one key per line for batch creation'
                                     )
                                   }
 
+                                  // A single-key channel stores a multi-line
+                                  // value as one key; JSON keys span lines
+                                  // legitimately
+                                  const trimmedKey = field.value.trim()
+                                  const replacesWithMultipleKeys =
+                                    !isMultiKeyChannel &&
+                                    keyMode === 'replace' &&
+                                    !trimmedKey.startsWith('{') &&
+                                    !trimmedKey.startsWith('[') &&
+                                    trimmedKey
+                                      .split('\n')
+                                      .filter((line) => line.trim()).length > 1
+
                                   let keyDescription: ReactNode = t(
                                     FIELD_DESCRIPTIONS.KEY
                                   )
-                                  if (isEditing) {
+                                  if (convertsToMultiKey) {
+                                    keyDescription = t(
+                                      'The current key stays first; new keys are added after it.'
+                                    )
+                                  } else if (isEditing) {
                                     let keyModeDescription = t(
                                       'Append mode: New keys will be added to the end of the existing key list'
                                     )
@@ -3053,7 +3095,24 @@ export function ChannelMutateDrawer({
                                             {keyModeDescription}
                                           </span>
                                         )}
+                                        {replacesWithMultipleKeys && (
+                                          <span className='text-warning mt-1 block'>
+                                            {supportsKeyConversion
+                                              ? t(
+                                                  'These lines will be saved as one key; to add them separately, choose "Append keys (convert to multi-key)".'
+                                                )
+                                              : t(
+                                                  'These lines will be saved as one key.'
+                                                )}
+                                          </span>
+                                        )}
                                       </>
+                                    )
+                                  } else if (
+                                    multiKeyMode === 'multi_to_single'
+                                  ) {
+                                    keyDescription = t(
+                                      'Enter one API key per line. All keys go into this one channel.'
                                     )
                                   } else if (isBatchMode) {
                                     keyDescription = t(
@@ -3195,63 +3254,89 @@ export function ChannelMutateDrawer({
                                 </div>
                               )}
 
-                              {isEditing && isMultiKeyChannel && (
-                                <FormField
-                                  control={form.control}
-                                  name='key_mode'
-                                  render={({ field }) => (
-                                    <FormItem>
-                                      <FormLabel>
-                                        {t('Key Update Mode')}
-                                      </FormLabel>
-                                      <Select
-                                        items={[
-                                          {
-                                            value: 'append',
-                                            label: t('Append to existing keys'),
-                                          },
-                                          {
-                                            value: 'replace',
-                                            label: t(
-                                              'Replace all existing keys'
-                                            ),
-                                          },
-                                        ]}
-                                        onValueChange={field.onChange}
-                                        value={field.value}
-                                      >
-                                        <FormControl>
-                                          <SelectTrigger>
-                                            <SelectValue />
-                                          </SelectTrigger>
-                                        </FormControl>
-                                        <SelectContent
-                                          alignItemWithTrigger={false}
-                                        >
-                                          <SelectGroup>
-                                            <SelectItem value='append'>
-                                              {t('Append to existing keys')}
-                                            </SelectItem>
-                                            <SelectItem value='replace'>
-                                              {t('Replace all existing keys')}
-                                            </SelectItem>
-                                          </SelectGroup>
-                                        </SelectContent>
-                                      </Select>
-                                      <FormDescription>
-                                        {field.value === 'replace'
-                                          ? t(
-                                              'Replace mode: Will completely replace all existing keys'
-                                            )
-                                          : t(
-                                              'Append mode: New keys will be added to the end of the existing key list'
-                                            )}
-                                      </FormDescription>
-                                      <FormMessage />
-                                    </FormItem>
-                                  )}
-                                />
-                              )}
+                              {isEditing &&
+                                (isMultiKeyChannel ||
+                                  supportsKeyConversion) && (
+                                  <FormField
+                                    control={form.control}
+                                    name='key_mode'
+                                    render={({ field }) => {
+                                      const keyModeOptions = isMultiKeyChannel
+                                        ? [
+                                            {
+                                              value: 'append',
+                                              label: t(
+                                                'Append to existing keys'
+                                              ),
+                                            },
+                                            {
+                                              value: 'replace',
+                                              label: t(
+                                                'Replace all existing keys'
+                                              ),
+                                            },
+                                          ]
+                                        : [
+                                            {
+                                              value: 'replace',
+                                              label: t('Replace the key'),
+                                            },
+                                            {
+                                              value: 'append',
+                                              label: t(
+                                                'Append keys (convert to multi-key)'
+                                              ),
+                                            },
+                                          ]
+                                      return (
+                                        <FormItem>
+                                          <FormLabel>
+                                            {t('Key Update Mode')}
+                                          </FormLabel>
+                                          <Select
+                                            items={keyModeOptions}
+                                            onValueChange={field.onChange}
+                                            value={field.value}
+                                          >
+                                            <FormControl>
+                                              <SelectTrigger>
+                                                <SelectValue />
+                                              </SelectTrigger>
+                                            </FormControl>
+                                            <SelectContent
+                                              alignItemWithTrigger={false}
+                                            >
+                                              <SelectGroup>
+                                                {keyModeOptions.map(
+                                                  (option) => (
+                                                    <SelectItem
+                                                      key={option.value}
+                                                      value={option.value}
+                                                    >
+                                                      {option.label}
+                                                    </SelectItem>
+                                                  )
+                                                )}
+                                              </SelectGroup>
+                                            </SelectContent>
+                                          </Select>
+                                          {isMultiKeyChannel && (
+                                            <FormDescription>
+                                              {field.value === 'replace'
+                                                ? t(
+                                                    'Replace mode: Will completely replace all existing keys'
+                                                  )
+                                                : t(
+                                                    'Append mode: New keys will be added to the end of the existing key list'
+                                                  )}
+                                            </FormDescription>
+                                          )}
+                                          <FormMessage />
+                                        </FormItem>
+                                      )
+                                    }}
+                                  />
+                                )}
 
                               {!isEditing &&
                                 multiKeyMode === 'multi_to_single' && (

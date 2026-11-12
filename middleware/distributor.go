@@ -565,7 +565,7 @@ func isNoModelTaskQuery(relayMode int) bool {
 	}
 }
 
-func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string) *types.NewAPIError {
+func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string, selectedKey ...string) *types.NewAPIError {
 	c.Set("original_model", modelName) // for retry
 	if channel == nil {
 		return types.NewError(errors.New("channel is nil"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
@@ -574,7 +574,8 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelName, channel.Name)
 	common.SetContextKey(c, constant.ContextKeyChannelType, channel.Type)
 	common.SetContextKey(c, constant.ContextKeyChannelCreateTime, channel.CreatedTime)
-	common.SetContextKey(c, constant.ContextKeyChannelSetting, channel.GetSetting())
+	setting := channel.GetSetting()
+	common.SetContextKey(c, constant.ContextKeyChannelSetting, setting)
 	common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, channel.GetOtherSettings())
 	paramOverride := channel.GetParamOverride()
 	headerOverride := channel.GetHeaderOverride()
@@ -596,6 +597,15 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	if seed == "" {
 		seed, _ = service.ChannelAffinityKeySeed(c)
 	}
+	if seed == "" && setting.KeyEnvironments {
+		var body []byte
+		if cached, ok := c.Get(common.KeyBodyStorage); ok {
+			if storage, ok := cached.(common.BodyStorage); ok {
+				body, _ = storage.Bytes()
+			}
+		}
+		seed = service.CLIConversationSeed(c.Request.Header, body)
+	}
 	// A conversation without an affinity seed still places on an independent
 	// key environment channel by its binding key, so two concurrent first
 	// requests pick the same key instead of racing for the binding.
@@ -605,7 +615,13 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	var key string
 	var index int
 	var newAPIError *types.NewAPIError
-	if boundKey, boundIndex, bound, boundErr := boundKeyEnvironmentKey(c, channel, modelName); bound {
+	if len(selectedKey) > 0 {
+		key = selectedKey[0]
+		index = channel.EnabledKeyIndex(key)
+		if index < 0 {
+			return types.NewError(errors.New("selected channel key is not enabled and assigned"), types.ErrorCodeChannelNoAvailableKey)
+		}
+	} else if boundKey, boundIndex, bound, boundErr := boundKeyEnvironmentKey(c, channel, modelName); bound {
 		// A bound conversation keeps its key; selection never re-rolls it.
 		key, index, newAPIError = boundKey, boundIndex, boundErr
 	} else if seed != "" {
@@ -616,34 +632,9 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	if newAPIError != nil {
 		return newAPIError
 	}
-	if channel.ChannelInfo.IsMultiKey {
-		common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, true)
-		common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, index)
-	} else {
-		// 必须设置为 false，否则在重试到单个 key 的时候会导致日志显示错误
-		common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, false)
-		// A retry from a multi-key channel would otherwise leave its key index
-		// behind for this channel's logs and client identity.
-		common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, 0)
+	if newAPIError := SetupContextForChannelKey(c, channel, setting, key, index); newAPIError != nil {
+		return newAPIError
 	}
-	// An independent key environment channel wears the version assigned to the
-	// selected key. This is decided by the key, not by IsMultiKey, so a
-	// single-key copy of the channel (model sweep) wears its key's version too.
-	// Every reader of the client profile follows the setting in the context.
-	keyTag := ""
-	if setting := channel.GetSetting(); setting.KeyEnvironments {
-		profileId, assigned := channel.KeyEnvironmentProfile(key)
-		if !assigned {
-			return types.NewError(errors.New("channel key has no environment assigned"), types.ErrorCodeChannelNoAvailableKey)
-		}
-		setting.CLIVersionProfile = profileId
-		setting.TLSFingerprint = ""
-		common.SetContextKey(c, constant.ContextKeyChannelSetting, setting)
-		keyTag = model.ChannelKeyTag(key)
-	}
-	common.SetContextKey(c, constant.ContextKeyChannelKeyTag, keyTag)
-	// c.Request.Header.Set("Authorization", fmt.Sprintf("Bearer %s", key))
-	common.SetContextKey(c, constant.ContextKeyChannelKey, key)
 	common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, channel.GetBaseURL())
 
 	common.SetContextKey(c, constant.ContextKeySystemPromptOverride, false)
@@ -667,6 +658,32 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	case constant.ChannelTypeCoze:
 		c.Set("bot_id", channel.Other)
 	}
+	return nil
+}
+
+// SetupContextForChannelKey binds every key selection path to the same table
+// environment and activity record. Retries clear the previous key's index,
+// profile, proxy and identity tag. The switch off retains the channel settings.
+func SetupContextForChannelKey(c *gin.Context, channel *model.Channel, setting dto.ChannelSettings, key string, index int) *types.NewAPIError {
+	keyTag := ""
+	if setting.KeyEnvironments {
+		row, assigned := channel.KeyEnvironmentConfig(key)
+		if !assigned {
+			return types.NewError(errors.New("channel key has no environment assigned"), types.ErrorCodeChannelNoAvailableKey)
+		}
+		setting.CLIVersionProfile = *row.ProfileId
+		setting.TLSFingerprint = ""
+		if row.Proxy != "" {
+			setting.Proxy = row.Proxy
+		}
+		keyTag = model.ChannelKeyTag(key)
+	}
+	common.SetContextKey(c, constant.ContextKeyChannelIsMultiKey, channel.ChannelInfo.IsMultiKey)
+	common.SetContextKey(c, constant.ContextKeyChannelMultiKeyIndex, index)
+	common.SetContextKey(c, constant.ContextKeyChannelKeyTag, keyTag)
+	common.SetContextKey(c, constant.ContextKeyChannelKey, key)
+	common.SetContextKey(c, constant.ContextKeyChannelSetting, setting)
+	service.HoldChannelKey(c, channel.Id, model.ChannelKeyTag(key))
 	return nil
 }
 

@@ -38,7 +38,7 @@ type channelCacheSnapshot struct {
 	group2model2channels         map[string]map[string][]int
 	channelsIDM                  map[int]*Channel
 	channel2advancedCustomConfig map[int]*dto.AdvancedCustomConfig
-	keyEnvironments              map[int]map[string]string
+	keyEnvironments              map[int]map[string]ChannelKeyEnvironment
 }
 
 // Entries handed to readers must never be mutated in place, so every cache
@@ -102,7 +102,7 @@ func buildChannelCacheSnapshot() (*channelCacheSnapshot, bool) {
 
 	// The table is read only once a channel uses it, so a gateway without
 	// independent key environments scans exactly what it did before.
-	var keyEnvironments map[int]map[string]string
+	var keyEnvironments map[int]map[string]ChannelKeyEnvironment
 	for _, channel := range channels {
 		if !channel.GetSetting().KeyEnvironments {
 			continue

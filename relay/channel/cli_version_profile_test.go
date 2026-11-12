@@ -70,7 +70,7 @@ func TestCLIVersionRelayPreservesHistoryEffortAndBindsHeaders(t *testing.T) {
 				assert.Equal(t, p.Headers["x-stainless-package-version"], got.header.Get("x-stainless-package-version"))
 				assert.Equal(t, p.Headers["x-stainless-runtime-version"], got.header.Get("x-stainless-runtime-version"))
 				assert.Equal(t, p.Headers["anthropic-beta"], got.header.Get("anthropic-beta"))
-				assert.Equal(t, int64(p.MaxTokens), gjson.GetBytes(got.body, "max_tokens").Int())
+				assert.Equal(t, int64(128000), gjson.GetBytes(got.body, "max_tokens").Int(), "an absent caller limit uses the agreed profile default")
 				assert.Equal(t, "high", gjson.GetBytes(got.body, "output_config.effort").String())
 				assert.Equal(t, "keep context", gjson.GetBytes(got.body, "messages.0.content.0.text").String())
 				assert.Equal(t, p.LegacyUserID, strings.HasPrefix(gjson.GetBytes(got.body, "metadata.user_id").String(), "user_"))
@@ -126,11 +126,16 @@ func TestCodexNamespaceDescriptionCompatibility(t *testing.T) {
 				require.NoError(t, err)
 				data, err := io.ReadAll(reader)
 				require.NoError(t, err)
-				path, history := "input.0.tools", "input.1"
-				if p := service.LookupCLIVersionProfile(profile); p != nil && !p.ToolsInInput {
+				path, history, want := "input.0.tools", "input.1", tc.want
+				p := service.LookupCLIVersionProfile(profile)
+				if p == nil || !p.ToolsInInput {
 					path, history = "tools", "input.0"
 				}
-				assert.Equal(t, tc.want, gjson.GetBytes(data, path+".0.description").String())
+				if p == nil {
+					assert.Equal(t, body, string(data), "unselected versions preserve namespace descriptions and wire bytes")
+					want = gjson.Get(body, "tools.0.description").String()
+				}
+				assert.Equal(t, want, gjson.GetBytes(data, path+".0.description").String())
 				assert.Equal(t, "probe", gjson.GetBytes(data, path+".0.name").String())
 				assert.False(t, gjson.GetBytes(data, path+".0.tools.0.description").Exists(), "function descriptions are optional")
 				assert.Equal(t, "9007199254740993", gjson.GetBytes(data, path+".0.tools.0.parameters.properties.n.const").Raw)
@@ -168,7 +173,12 @@ func TestCodexNamespaceDescriptionInHistoricalToolSnapshots(t *testing.T) {
 			require.NoError(t, err)
 			assert.Len(t, gjson.GetBytes(data, "input").Array(), 3)
 			assert.Equal(t, "at_first", gjson.GetBytes(data, "input.0.id").String())
-			assert.Equal(t, "Tools in the probe namespace.", gjson.GetBytes(data, "input.0.tools.0.description").String())
+			wantDescription := "Tools in the probe namespace."
+			if profile == "" {
+				wantDescription = ""
+				assert.Equal(t, body, string(data), "unselected versions do not normalize historical tool snapshots")
+			}
+			assert.Equal(t, wantDescription, gjson.GetBytes(data, "input.0.tools.0.description").String())
 			assert.JSONEq(t, gjson.Get(body, "input.0.tools.0.tools").Raw, gjson.GetBytes(data, "input.0.tools.0.tools").Raw)
 			assert.JSONEq(t, gjson.Get(body, "input.1").Raw, gjson.GetBytes(data, "input.1").Raw)
 			assert.JSONEq(t, gjson.Get(body, "input.2").Raw, gjson.GetBytes(data, "input.2").Raw)

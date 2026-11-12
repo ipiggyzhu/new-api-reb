@@ -81,7 +81,7 @@ func ShouldTryResponsesWebsocket(info *common.RelayInfo) bool {
 	// and it reuses this relay code. Probing an upgrade here would turn "the model
 	// works" into "the upgrade failed" and could persist a downgrade off a
 	// synthetic request.
-	if info.IsChannelTest {
+	if info.IsChannelTest && !info.IsSystemKeepalive {
 		return false
 	}
 	switch info.ApiType {
@@ -613,7 +613,7 @@ func TryResponsesWebsocket(a Adaptor, c *gin.Context, info *common.RelayInfo, re
 			return nil, fmt.Errorf("websocket handshake failed: %w", errDial)
 		}
 		closeHandshakeBody(handshakeResp)
-		if isDefinitiveUpgradeRefusal(status) {
+		if isDefinitiveUpgradeRefusal(status) && !info.IsSystemKeepalive {
 			service.MarkChannelWebsocketUnsupported(
 				info.ChannelId,
 				appcommon.GetContextKeyString(c, appconstant.ContextKeyChannelName),

@@ -21,7 +21,7 @@ import (
 // nativeClaudeCodeRequest is a request as the real Claude Code client sends it:
 // Claude format in, never converted, with its own User-Agent.
 func nativeClaudeCodeRequest() (*gin.Context, *relaycommon.RelayInfo) {
-	c, info := cliTestRequest("claude")
+	c, info := versionedCLITestRequest("claude")
 	c.Request.Header.Set("User-Agent", "claude-cli/2.1.282 (external, cli)")
 	info.RelayFormat = types.RelayFormatClaude
 	info.InitRequestConversionChain()
@@ -70,7 +70,7 @@ func convertAndShapeOpenAIRequest(t *testing.T, profile, request string) (conver
 	t.Helper()
 	var openAIRequest dto.GeneralOpenAIRequest
 	require.NoError(t, appcommon.UnmarshalJsonStr(request, &openAIRequest))
-	c, info = cliTestRequest(profile)
+	c, info = versionedCLITestRequest(profile)
 	c.Request.Header.Set("User-Agent", "OpenAI/Python 1.99.0")
 	info.RelayFormat = types.RelayFormatOpenAI
 	info.InitRequestConversionChain()
@@ -173,15 +173,9 @@ const claudeCodeCachedRequest = `{"model":"claude-sonnet-4-5","max_tokens":32000
 		{"role":"user","content":[{"type":"text","text":"thanks"}]}
 	]}`
 
-// Only the real Claude Code client's own breakpoints are passed through; the
-// same layout from any other sender is replaced by the profile's placement.
+// Every sender uses the selected profile's placement, including native CLIs
+// whose User-Agent or legacy identity would previously bypass it.
 func TestClaudeCLIKeepsOnlyNativeClaudeCodeBreakpoints(t *testing.T) {
-	nativeBreakpoints := map[string]string{
-		"tools.0.cache_control":                        "ephemeral 1h",
-		"system.1.cache_control":                       "ephemeral 1h",
-		"messages.0.content.0.cache_control":           "ephemeral",
-		"messages.2.content.0.content.0.cache_control": "ephemeral",
-	}
 	profileBreakpoints := map[string]string{
 		"system.0.cache_control":             "ephemeral",
 		"system.1.cache_control":             "ephemeral",
@@ -204,7 +198,7 @@ func TestClaudeCLIKeepsOnlyNativeClaudeCodeBreakpoints(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, info := cliTestRequest("claude")
+			c, info := versionedCLITestRequest("claude")
 			c.Request.Header.Set("User-Agent", tc.userAgent)
 			info.RelayFormat = types.RelayFormatClaude
 			info.RequestConversionChain = []types.RelayFormat{types.RelayFormatClaude}
@@ -215,18 +209,11 @@ func TestClaudeCLIKeepsOnlyNativeClaudeCodeBreakpoints(t *testing.T) {
 			request := strings.Replace(claudeCodeCachedRequest, "@extra", tc.extra, 1)
 			sent := []byte(withClientCache.Replace(request))
 			shaped := shapeClaudeMessagesBody(t, c, info, sent)
-			if !tc.native {
-				assert.JSONEq(t, string(shapeClaudeMessagesBody(t, c, info, []byte(withoutClientCache.Replace(request)))), string(shaped))
-				assert.Equal(t, profileBreakpoints, claudeCacheBreakpoints(t, shaped))
-				assert.False(t, gjson.GetBytes(shaped, "cache_control").Exists(), "automatic caching is a cache policy too")
-				assert.Equal(t, "Bash", gjson.GetBytes(shaped, "tools.0.name").String())
-				return
-			}
-			assert.Equal(t, nativeBreakpoints, claudeCacheBreakpoints(t, shaped))
-			assert.JSONEq(t, gjson.GetBytes(sent, "system").Raw, gjson.GetBytes(shaped, "system").Raw)
-			assert.JSONEq(t, gjson.GetBytes(sent, "messages").Raw, gjson.GetBytes(shaped, "messages").Raw)
-			assert.Equal(t, "Write", gjson.GetBytes(shaped, "tools.0.name").String(), "a native cache boundary must not move")
-			assert.Equal(t, "string", gjson.GetBytes(shaped, "tools.0.input_schema.properties.cache_control.type").String())
+			assert.JSONEq(t, string(shapeClaudeMessagesBody(t, c, info, []byte(withoutClientCache.Replace(request)))), string(shaped))
+			assert.Equal(t, profileBreakpoints, claudeCacheBreakpoints(t, shaped))
+			assert.False(t, gjson.GetBytes(shaped, "cache_control").Exists(), "automatic caching is a cache policy too")
+			assert.Equal(t, "Bash", gjson.GetBytes(shaped, "tools.0.name").String())
+			assert.Equal(t, "string", gjson.GetBytes(shaped, "tools.1.input_schema.properties.cache_control.type").String())
 			assert.JSONEq(t, string(shaped), string(shapeClaudeMessagesBody(t, c, info, shaped)), "a retry must not add or move breakpoints")
 		})
 	}
@@ -241,7 +228,7 @@ func TestClaudeCLIStripsDocumentSourceBreakpoints(t *testing.T) {
 		"messages":[{"role":"user","content":[
 			{"type":"document","source":{"type":"content","content":[{"type":"text","text":"chapter 1"@ttl5m},{"type":"text","text":"chapter 2"@ttl1h}]}},
 			{"type":"text","text":"summarize"}]}]}`
-	c, info := cliTestRequest("claude")
+	c, info := versionedCLITestRequest("claude")
 	c.Request.Header.Set("User-Agent", "Anthropic/Python 0.60.0")
 	info.RelayFormat = types.RelayFormatClaude
 	info.InitRequestConversionChain()
@@ -278,11 +265,11 @@ func TestCodexCLIOwnsPromptCacheFields(t *testing.T) {
 	}{
 		{name: "unversioned", callerSession: true},
 		{name: "versioned with top-level tools", version: "codex-0.150.0-windows-x64", callerSession: true},
-		{name: "caller cache key as the only session hint"},
+		{name: "caller cache key as the only session hint", version: "codex-0.156.1-windows-x64"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			c, info := cliTestRequest("codex")
+			c, info := versionedCLITestRequest("codex")
 			info.ChannelSetting.CLIVersionProfile = tc.version
 			if !tc.callerSession {
 				c.Request.Header.Del("session-id")
@@ -291,6 +278,11 @@ func TestCodexCLIOwnsPromptCacheFields(t *testing.T) {
 			require.NoError(t, err)
 			data, err := io.ReadAll(reader)
 			require.NoError(t, err)
+			if tc.version == "" {
+				assert.Equal(t, body, string(data), "without a selected version even cache fields are byte-preserved")
+				assert.Empty(t, headers)
+				return
+			}
 			assert.Equal(t, headers.Get("thread-id"), gjson.GetBytes(data, "prompt_cache_key").String())
 			assert.NotEqual(t, "caller-cache-key", gjson.GetBytes(data, "prompt_cache_key").String())
 			for _, field := range []string{"cache_control", "prompt_cache_retention", "prompt_cache_options"} {
@@ -307,7 +299,7 @@ func TestCodexCLIOwnsPromptCacheFields(t *testing.T) {
 // keep the first turn's key while a different conversation gets its own.
 func TestCodexCLIPromptCacheKeyStableWithoutSessionHint(t *testing.T) {
 	cacheKey := func(requestID, input string) string {
-		c, info := cliTestRequest("codex")
+		c, info := versionedCLITestRequest("codex")
 		c.Request.Header.Del("session-id")
 		info.RequestId = requestID
 		body := `{"model":"gpt-6-astra","instructions":"system","input":[` + input + `]}`
@@ -335,7 +327,7 @@ func TestClaudeRequestToCodexCarriesNoCacheControl(t *testing.T) {
 			{"role":"assistant","content":[{"type":"text","text":"ok"@ttl5m}]},
 			{"role":"user","content":"again"}
 		]}`), &claudeRequest))
-	c, info := cliTestRequest("codex")
+	c, info := versionedCLITestRequest("codex")
 	info.RelayFormat = types.RelayFormatClaude
 	info.InitRequestConversionChain()
 	result, err := service.ConvertRequest(c, info, types.RelayFormatOpenAIResponses, &claudeRequest)

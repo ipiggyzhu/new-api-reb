@@ -67,6 +67,7 @@ import type {
   MultiKeyConfirmAction,
 } from '../../types'
 import { useChannels } from '../channels-provider'
+import { MultiKeyEnvDialog } from './multi-key-env-dialog'
 import { StatisticsCard } from './multi-key-statistics-card'
 import { MultiKeyTableRowActions } from './multi-key-table-row-actions'
 
@@ -115,12 +116,15 @@ export function MultiKeyManageDialog({
   const [confirmAction, setConfirmAction] =
     useState<MultiKeyConfirmAction | null>(null)
   const [isPerformingAction, setIsPerformingAction] = useState(false)
+  const [envKey, setEnvKey] = useState<KeyStatus | null>(null)
 
   // Reset and load data when dialog opens
   useEffect(() => {
     if (open && currentRow) {
       setCurrentPage(1)
       setStatusFilter(null)
+      setEnvKey(null)
+      setReassignPlan(null)
       loadKeyStatus(1, pageSize, null)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -316,7 +320,7 @@ export function MultiKeyManageDialog({
         description={t(
           'Manage multi-key status and configuration for this channel'
         )}
-        contentClassName='flex max-h-[90vh] max-w-5xl flex-col'
+        contentClassName='flex max-h-[90vh] max-w-6xl flex-col'
         titleClassName='flex items-center gap-2'
         contentHeight='min(72vh, 720px)'
         bodyClassName='space-y-4'
@@ -461,18 +465,20 @@ export function MultiKeyManageDialog({
 
           {/* Table */}
           <div className='min-h-0 flex-1 overflow-auto rounded-md border'>
-            {isLoading ? (
+            {isLoading && (
               <div className='flex items-center justify-center py-12'>
                 <Loader2 className='text-muted-foreground h-8 w-8 animate-spin' />
               </div>
-            ) : keys.length === 0 ? (
+            )}
+            {!isLoading && keys.length === 0 && (
               <div className='text-muted-foreground py-12 text-center'>
                 {t('No keys found')}
               </div>
-            ) : (
+            )}
+            {!isLoading && keys.length > 0 && (
               <StaticDataTable
                 className='rounded-none border-0'
-                tableClassName='min-w-[800px]'
+                tableClassName='min-w-[1100px]'
                 data={keys}
                 getRowKey={(key) => key.index}
                 columns={[
@@ -515,6 +521,24 @@ export function MultiKeyManageDialog({
                         },
                       ]
                     : []),
+                  ...(keyEnvironments
+                    ? [
+                        {
+                          id: 'proxy',
+                          header: t('Proxy'),
+                          className: 'w-56',
+                          cellClassName: 'max-w-56 truncate font-mono text-sm',
+                          cell: (key: KeyStatus) =>
+                            key.proxy ? (
+                              <span title={key.proxy}>{key.proxy}</span>
+                            ) : (
+                              <span className='text-muted-foreground font-sans'>
+                                {t('Inherit channel setting')}
+                              </span>
+                            ),
+                        },
+                      ]
+                    : []),
                   {
                     id: 'reason',
                     header: t('Disabled Reason'),
@@ -537,8 +561,10 @@ export function MultiKeyManageDialog({
                       <MultiKeyTableRowActions
                         keyIndex={key.index}
                         status={key.status}
-                        canDelete={canEditSensitive}
+                        canEditSensitive={canEditSensitive}
+                        keyEnvironments={keyEnvironments}
                         onAction={setConfirmAction}
+                        onEditEnvironment={() => setEnvKey(key)}
                       />
                     ),
                   },
@@ -616,6 +642,15 @@ export function MultiKeyManageDialog({
         isLoading={isPerformingAction}
         handleConfirm={applyReassignment}
       />
+      {envKey && keyEnvironments && (
+        <MultiKeyEnvDialog
+          key={envKey.index}
+          channel={currentRow}
+          keyStatus={envKey}
+          onOpenChange={(open) => !open && setEnvKey(null)}
+          onSaved={() => loadKeyStatus(currentPage, pageSize)}
+        />
+      )}
     </>
   )
 }

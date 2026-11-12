@@ -121,3 +121,33 @@ func TestChannelCooldownFor(t *testing.T) {
 		})
 	}
 }
+
+// One key of a multi-key channel cools for as long as a channel would for a
+// refusal, for defaultKeyFaultCooldown after any other fault that moves the
+// request on, and not at all when the request itself was at fault, including a
+// request too large or malformed that is still retried on another channel.
+func TestChannelKeyCooldownFor(t *testing.T) {
+	withHint := types.NewOpenAIError(errors.New("slow down"), types.ErrorCodeBadResponseStatusCode, http.StatusTooManyRequests)
+	withHint.RetryAfter = 42 * time.Second
+
+	cases := []struct {
+		name string
+		err  *types.NewAPIError
+		want time.Duration
+	}{
+		{"refusal with hint", withHint, 42 * time.Second},
+		{"429 without hint", types.NewOpenAIError(errors.New("slow down"), types.ErrorCodeBadResponseStatusCode, http.StatusTooManyRequests), defaultRateLimitCooldown},
+		{"529 without hint", types.NewOpenAIError(errors.New("overloaded"), types.ErrorCodeBadResponseStatusCode, 529), defaultOverloadCooldown},
+		{"key out of balance", types.NewOpenAIError(errors.New("insufficient balance"), types.ErrorCodeBadResponseStatusCode, http.StatusForbidden), defaultKeyFaultCooldown},
+		{"upstream 502", types.NewOpenAIError(errors.New("bad gateway"), types.ErrorCodeBadResponseStatusCode, http.StatusBadGateway), defaultKeyFaultCooldown},
+		{"client error", types.NewOpenAIError(errors.New("bad"), types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest), 0},
+		{"request too large", types.NewOpenAIError(errors.New("request_too_large"), types.ErrorCodeBadResponseStatusCode, http.StatusRequestEntityTooLarge), 0},
+		{"unprocessable request", types.NewOpenAIError(errors.New("invalid parameter"), types.ErrorCodeBadResponseStatusCode, http.StatusUnprocessableEntity), 0},
+		{"no error", nil, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, ChannelKeyCooldownFor(tc.err))
+		})
+	}
+}
