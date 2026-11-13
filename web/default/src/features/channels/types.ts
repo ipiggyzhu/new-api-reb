@@ -125,6 +125,8 @@ export interface ChannelSettings {
   proxy?: string
   pass_through_body_enabled?: boolean
   responses_reasoning_fallback?: boolean
+  /** '' as received, 'hoist' moves tool_result images after the tool results, 'placeholder' also drops those of earlier turns */
+  claude_tool_result_images?: string
   /** @deprecated superseded by synthetic_client_headers_profile; kept in sync by the backend */
   synthetic_client_headers?: boolean
   /** '' off, or an explicit client family; legacy 'auto' is normalized on read/save */

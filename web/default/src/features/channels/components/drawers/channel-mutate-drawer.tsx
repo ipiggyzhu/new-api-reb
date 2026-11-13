@@ -299,6 +299,7 @@ const SENSITIVE_FORM_FIELDS = [
   'proxy',
   'pass_through_body_enabled',
   'responses_reasoning_fallback',
+  'claude_tool_result_images',
   'websocket_transport',
   'synthetic_client_headers',
   'synthetic_client_headers_profile',
@@ -366,6 +367,7 @@ function hasAdvancedSettingsValues(values: ChannelFormValues): boolean {
     values.thinking_to_content ||
     values.pass_through_body_enabled ||
     values.responses_reasoning_fallback ||
+    (values.claude_tool_result_images ?? 'off') !== 'off' ||
     values.websocket_transport ||
     (values.synthetic_client_headers_profile ?? 'off') !== 'off' ||
     values.custom_client_identity_enabled ||
@@ -747,6 +749,9 @@ export function ChannelMutateDrawer({
   const keyMode = form.watch('key_mode')
   const currentGroups = form.watch('group')
   const currentType = form.watch('type')
+  // Anthropic, AWS Bedrock and Vertex AI speak the Messages format; the two
+  // old-session options below each apply to one protocol only.
+  const speaksClaudeMessages = [14, 33, 41].includes(currentType)
   const currentStatus = form.watch('status')
   const currentBaseUrl = form.watch('base_url')
   const currentKey = form.watch('key')
@@ -4348,30 +4353,94 @@ export function ChannelMutateDrawer({
                                 )}
                               />
 
-                              <FormField
-                                control={form.control}
-                                name='responses_reasoning_fallback'
-                                render={({ field }) => (
-                                  <FormItem className='flex items-center justify-between gap-3 px-4 py-3'>
-                                    <div className='space-y-0.5'>
+                              {!speaksClaudeMessages && (
+                                <FormField
+                                  control={form.control}
+                                  name='responses_reasoning_fallback'
+                                  render={({ field }) => (
+                                    <FormItem className='flex items-center justify-between gap-3 px-4 py-3'>
+                                      <div className='space-y-0.5'>
+                                        <FormLabel>
+                                          {t(
+                                            'Responses Reasoning Compatibility'
+                                          )}
+                                        </FormLabel>
+                                        <FormDescription>
+                                          {t(
+                                            'Retry HTTP 400 invalid_encrypted_content once without old reasoning ciphertext and IDs. Preserve visible history, summaries and requested effort; reset hidden reasoning. Skip compacted or server-side history. Off by default.'
+                                          )}
+                                        </FormDescription>
+                                      </div>
+                                      <FormControl>
+                                        <Switch
+                                          checked={field.value ?? false}
+                                          onCheckedChange={field.onChange}
+                                        />
+                                      </FormControl>
+                                    </FormItem>
+                                  )}
+                                />
+                              )}
+
+                              {speaksClaudeMessages && (
+                                <FormField
+                                  control={form.control}
+                                  name='claude_tool_result_images'
+                                  render={({ field }) => (
+                                    <FormItem className='px-4 py-3'>
                                       <FormLabel>
-                                        {t('Responses Reasoning Compatibility')}
+                                        {t('Images in Tool Results')}
                                       </FormLabel>
+                                      <Select
+                                        items={[
+                                          {
+                                            value: 'off',
+                                            label: t('Send as received'),
+                                          },
+                                          {
+                                            value: 'hoist',
+                                            label: t(
+                                              'Move after the tool results'
+                                            ),
+                                          },
+                                          {
+                                            value: 'placeholder',
+                                            label: t('Keep current turn only'),
+                                          },
+                                        ]}
+                                        onValueChange={field.onChange}
+                                        value={field.value ?? 'off'}
+                                      >
+                                        <FormControl>
+                                          <SelectTrigger>
+                                            <SelectValue />
+                                          </SelectTrigger>
+                                        </FormControl>
+                                        <SelectContent
+                                          alignItemWithTrigger={false}
+                                        >
+                                          <SelectGroup>
+                                            <SelectItem value='off'>
+                                              {t('Send as received')}
+                                            </SelectItem>
+                                            <SelectItem value='hoist'>
+                                              {t('Move after the tool results')}
+                                            </SelectItem>
+                                            <SelectItem value='placeholder'>
+                                              {t('Keep current turn only')}
+                                            </SelectItem>
+                                          </SelectGroup>
+                                        </SelectContent>
+                                      </Select>
                                       <FormDescription>
                                         {t(
-                                          'Retry HTTP 400 invalid_encrypted_content once without old reasoning ciphertext and IDs. Preserve visible history, summaries and requested effort; reset hidden reasoning. Skip compacted or server-side history. Off by default.'
+                                          'For long agent sessions that hang or fail with 429/503 once screenshots pile up inside tool results. Moving keeps every image and only changes where it sits in the message. Keeping the current turn only also replaces images of earlier turns with a text note. Ignored when body passthrough is on.'
                                         )}
                                       </FormDescription>
-                                    </div>
-                                    <FormControl>
-                                      <Switch
-                                        checked={field.value ?? false}
-                                        onCheckedChange={field.onChange}
-                                      />
-                                    </FormControl>
-                                  </FormItem>
-                                )}
-                              />
+                                    </FormItem>
+                                  )}
+                                />
+                              )}
 
                               <FormField
                                 control={form.control}

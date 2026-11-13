@@ -40,6 +40,7 @@ const ADVANCED_SETTINGS_FIELDS = new Set<FieldPath<ChannelFormValues>>([
   'thinking_to_content',
   'pass_through_body_enabled',
   'responses_reasoning_fallback',
+  'claude_tool_result_images',
   'synthetic_client_headers',
   'synthetic_client_headers_profile',
   'cli_version_profile',

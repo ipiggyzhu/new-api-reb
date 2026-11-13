@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
@@ -201,6 +202,13 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 		jsonData, err = common.Marshal(convertedRequest)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+
+		if mode := info.ChannelSetting.ClaudeToolResultImages; mode != "" {
+			if rewritten, hoisted, replaced := rewriteClaudeToolResultImages(jsonData, mode); hoisted+replaced > 0 {
+				jsonData = rewritten
+				logger.LogInfo(c, fmt.Sprintf("claude tool_result images (%s): moved %d out of tool results, replaced %d with a note", mode, hoisted, replaced))
+			}
 		}
 
 		body, closer, apiErr := buildUpstreamRequestBody(c, info, jsonData, true, "requestBody")

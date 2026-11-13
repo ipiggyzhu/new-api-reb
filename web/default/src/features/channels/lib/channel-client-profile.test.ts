@@ -145,6 +145,39 @@ describe('Responses reasoning compatibility setting', () => {
   })
 })
 
+describe('tool result images setting', () => {
+  test('defaults off and survives create, reopen, update and disable', () => {
+    const form = transformChannelToFormDefaults(channelWithSettings(14, {}))
+    assert.equal(form.claude_tool_result_images, 'off')
+    form.claude_tool_result_images = 'hoist'
+    const created = JSON.parse(
+      transformFormDataToCreatePayload(form).channel.setting ?? '{}'
+    )
+    assert.equal(created.claude_tool_result_images, 'hoist')
+    const reopened = transformChannelToFormDefaults(
+      channelWithSettings(14, created)
+    )
+    assert.equal(reopened.claude_tool_result_images, 'hoist')
+    reopened.claude_tool_result_images = 'placeholder'
+    const saved = JSON.parse(
+      transformFormDataToUpdatePayload(reopened, 25).setting ?? '{}'
+    )
+    assert.equal(saved.claude_tool_result_images, 'placeholder')
+    reopened.claude_tool_result_images = 'off'
+    const disabled = JSON.parse(
+      transformFormDataToUpdatePayload(reopened, 25).setting ?? '{}'
+    )
+    assert.equal(disabled.claude_tool_result_images, '')
+  })
+
+  test('an unknown stored value reads as off', () => {
+    const form = transformChannelToFormDefaults(
+      channelWithSettings(14, { claude_tool_result_images: 'something-else' })
+    )
+    assert.equal(form.claude_tool_result_images, 'off')
+  })
+})
+
 describe('channel TLS fingerprint override', () => {
   test('a saved fingerprint reopens as an enabled override and survives saving', () => {
     const form = transformChannelToFormDefaults(

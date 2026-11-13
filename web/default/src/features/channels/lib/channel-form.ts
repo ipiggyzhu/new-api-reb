@@ -286,6 +286,10 @@ export const channelFormSchema = z
     proxy: z.string().optional(),
     pass_through_body_enabled: z.boolean().optional(),
     responses_reasoning_fallback: z.boolean().optional(),
+    // 'off' rather than '' for the same Radix Select reason as the profile below.
+    claude_tool_result_images: z
+      .enum(['off', 'hoist', 'placeholder'])
+      .optional(),
     websocket_transport: z.boolean().optional(),
     synthetic_client_headers: z.boolean().optional(),
     // 'off' rather than '' because Radix Select reserves the empty string as a
@@ -491,6 +495,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   proxy: '',
   pass_through_body_enabled: false,
   responses_reasoning_fallback: false,
+  claude_tool_result_images: 'off',
   websocket_transport: false,
   synthetic_client_headers: false,
   synthetic_client_headers_profile: 'off',
@@ -546,6 +551,7 @@ export function transformChannelToFormDefaults(
     proxy: '',
     pass_through_body_enabled: false,
     responses_reasoning_fallback: false,
+    claude_tool_result_images: 'off' as 'off' | 'hoist' | 'placeholder',
     websocket_transport: false,
     synthetic_client_headers: false,
     synthetic_client_headers_profile: 'off' as SyntheticClientHeaderProfile,
@@ -583,6 +589,11 @@ export function transformChannelToFormDefaults(
         pass_through_body_enabled: parsed.pass_through_body_enabled || false,
         responses_reasoning_fallback:
           parsed.responses_reasoning_fallback || false,
+        claude_tool_result_images:
+          parsed.claude_tool_result_images === 'hoist' ||
+          parsed.claude_tool_result_images === 'placeholder'
+            ? parsed.claude_tool_result_images
+            : 'off',
         websocket_transport: parsed.websocket_transport || false,
         synthetic_client_headers: parsed.synthetic_client_headers || false,
         synthetic_client_headers_profile: parseSyntheticClientHeaderProfile(
@@ -762,6 +773,11 @@ function buildSettingJSON(formData: ChannelFormValues): string {
     pass_through_body_enabled: formData.pass_through_body_enabled || false,
     responses_reasoning_fallback:
       formData.responses_reasoning_fallback || false,
+    claude_tool_result_images:
+      formData.claude_tool_result_images === 'hoist' ||
+      formData.claude_tool_result_images === 'placeholder'
+        ? formData.claude_tool_result_images
+        : '',
     websocket_transport: formData.websocket_transport || false,
     // Both fields are written together, always. The backend reads the profile
     // and only falls back to the boolean for rows saved before the profile

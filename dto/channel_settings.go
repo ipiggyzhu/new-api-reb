@@ -104,7 +104,24 @@ type ChannelSettings struct {
 	// summaries and requested effort are preserved, but hidden reasoning is not.
 	// Off by default. Compaction and server-side history references are excluded.
 	ResponsesReasoningFallback bool `json:"responses_reasoning_fallback,omitempty"`
+
+	// ClaudeToolResultImages rewrites images nested inside tool_result blocks of
+	// a Messages request before it is sent. Some relays answer a conversation
+	// that carries several such images with a hang or a generic 429/503, while
+	// the same images as top-level blocks of the user message are accepted.
+	//   ""            send as received (default)
+	//   "hoist"       move each image out of its tool_result to directly after
+	//                 the message's tool_result blocks; nothing is dropped
+	//   "placeholder" as "hoist" for the final message, and replace the images
+	//                 of earlier messages with a text note (lossy)
+	// Body passthrough bypasses it, like every other rewrite.
+	ClaudeToolResultImages string `json:"claude_tool_result_images,omitempty"`
 }
+
+const (
+	ClaudeToolResultImagesHoist       = "hoist"
+	ClaudeToolResultImagesPlaceholder = "placeholder"
+)
 
 // SyntheticClientHeadersProfileAuto is accepted only for legacy configuration.
 // Normalize materializes it as an explicit client family; it is no longer a
