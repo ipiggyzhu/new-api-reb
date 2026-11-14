@@ -3,6 +3,7 @@ package channel
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -253,7 +254,9 @@ func closeWebsocketConn(conn *websocket.Conn) {
 	if conn == nil {
 		return
 	}
-	if err := conn.Close(); err != nil {
+	// Already closed is the expected state when the caller hung up first (see the
+	// cancellation watch in TryResponsesWebsocket), not a failure worth a log line.
+	if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
 		logger.LogError(nil, "websocket transport: close upstream socket failed: "+err.Error())
 	}
 }
@@ -629,6 +632,17 @@ func TryResponsesWebsocket(a Adaptor, c *gin.Context, info *common.RelayInfo, re
 	if info.ChannelSetting.KeyEnvironments {
 		appcommon.SetContextKey(c, appconstant.ContextKeyUpstreamWebsocketEstablished, true)
 	}
+
+	// Only the dial follows the caller's context; an established socket does not,
+	// and gorilla's reads cannot be interrupted except by closing it. Without this
+	// a caller that hangs up while the turn is being collected (every non-streaming
+	// request, and a streaming one until its first frame) leaves the upstream
+	// generating a response nobody will read, until the terminal event or the idle
+	// deadline. Released on return: by then a non-streaming turn is over, and a
+	// streaming one is torn down through websocketResponseBody.Close, which the
+	// stream scanner calls when the caller's context ends.
+	stopCancelWatch := context.AfterFunc(c.Request.Context(), func() { _ = conn.Close() })
+	defer stopCancelWatch()
 
 	// Past this point the upstream has proven it speaks WebSocket, so no later
 	// failure may set the unsupported flag or fall back: the request has been sent,

@@ -2,11 +2,13 @@ package aws
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
@@ -186,6 +188,94 @@ func TestHandleNovaRequest_UpstreamContent(t *testing.T) {
 			require.Len(t, relayed.Choices, 1)
 			assert.Equal(t, tc.wantText, relayed.Choices[0].Message.StringContent())
 			assert.Equal(t, "stop", relayed.Choices[0].FinishReason)
+		})
+	}
+}
+
+// blockingBedrockHTTPClient is an upstream that never answers: Do returns only
+// when the request's context ends, or when the test releases it.
+type blockingBedrockHTTPClient struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b blockingBedrockHTTPClient) Do(req *http.Request) (*http.Response, error) {
+	b.started <- struct{}{}
+	select {
+	case <-req.Context().Done():
+		return nil, req.Context().Err()
+	case <-b.release:
+		return nil, io.ErrUnexpectedEOF
+	}
+}
+
+// TestAwsInvokeStopsWhenCallerCancels pins the Bedrock SDK calls to the caller's
+// request. They ran on context.Background(), so a caller that hung up left the
+// invocation (and its tokens) running to completion upstream.
+func TestAwsInvokeStopsWhenCallerCancels(t *testing.T) {
+	t.Parallel()
+
+	modelID := aws.String("anthropic.claude-3-5-sonnet-20240620-v1:0")
+	invoke := &bedrockruntime.InvokeModelInput{
+		ModelId: modelID, Accept: aws.String("application/json"), ContentType: aws.String("application/json"), Body: []byte(`{"messages":[]}`),
+	}
+	cases := []struct {
+		name   string
+		awsReq any
+		run    func(*gin.Context, *relaycommon.RelayInfo, *Adaptor) (*types.NewAPIError, *dto.Usage)
+	}{
+		{"non-streaming", invoke, awsHandler},
+		{"streaming", &bedrockruntime.InvokeModelWithResponseStreamInput{
+			ModelId: modelID, Accept: aws.String("application/json"), ContentType: aws.String("application/json"), Body: []byte(`{"messages":[]}`),
+		}, awsStreamHandler},
+		{"nova", invoke, handleNovaRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			upstream := blockingBedrockHTTPClient{started: make(chan struct{}, 8), release: make(chan struct{})}
+			t.Cleanup(func() { close(upstream.release) })
+
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			callerCtx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil).WithContext(callerCtx)
+
+			adaptor := &Adaptor{
+				AwsClient: bedrockruntime.New(bedrockruntime.Options{
+					Region:      "us-east-1",
+					Credentials: aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider("access-key", "secret-key", "")),
+					HTTPClient:  upstream,
+				}),
+				AwsReq: tc.awsReq,
+			}
+			info := &relaycommon.RelayInfo{
+				ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "claude-3-5-sonnet-20240620"},
+			}
+
+			done := make(chan *types.NewAPIError, 1)
+			go func() {
+				apiErr, _ := tc.run(ctx, info, adaptor)
+				done <- apiErr
+			}()
+
+			select {
+			case <-upstream.started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the upstream call never started")
+			}
+			cancel()
+
+			select {
+			case apiErr := <-done:
+				require.NotNil(t, apiErr)
+				assert.Contains(t, apiErr.Error(), context.Canceled.Error())
+			case <-time.After(5 * time.Second):
+				t.Fatal("the Bedrock call kept running after the caller cancelled")
+			}
+			assert.Empty(t, upstream.started, "a cancelled call must not be sent again")
 		})
 	}
 }

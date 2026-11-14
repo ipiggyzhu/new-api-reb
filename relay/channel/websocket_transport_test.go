@@ -1,16 +1,19 @@
 package channel
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	appconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -387,5 +390,69 @@ func TestCollectWebsocketResponseFailedEventIsNotASuccess(t *testing.T) {
 			require.NoError(t, err)
 			assert.JSONEq(t, tc.wantBody, string(body))
 		})
+	}
+}
+
+// TestTryResponsesWebsocketClosesUpstreamWhenCallerCancels pins the caller's
+// cancellation onto the established socket. Only the dial is bound to the request
+// context, so a non-streaming turn used to keep reading frames (and the upstream
+// kept generating) until the terminal event or the five-minute idle deadline after
+// the caller had gone.
+func TestTryResponsesWebsocketClosesUpstreamWhenCallerCancels(t *testing.T) {
+	requestReceived := make(chan struct{})
+	upstreamSawClose := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		close(requestReceived)
+		// An upstream that is still thinking: no frame is sent, so the only way
+		// this read returns is the gateway closing the socket.
+		_, _, _ = conn.ReadMessage()
+		close(upstreamSawClose)
+	}))
+	t.Cleanup(server.Close)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(ctx)
+	info := newWebsocketGateInfo()
+	info.IsStream = false
+
+	type result struct {
+		attempt *WebsocketAttempt
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		attempt, err := TryResponsesWebsocket(cliTransportAdaptor{url: server.URL + "/v1/responses"}, c, info, strings.NewReader(`{"input":"hi"}`))
+		done <- result{attempt, err}
+	}()
+
+	select {
+	case <-requestReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the upstream never received the request")
+	}
+	cancel()
+
+	select {
+	case got := <-done:
+		require.Error(t, got.err, "a cancelled turn has no response to hand back")
+		assert.Nil(t, got.attempt, "nothing may fall back to HTTP once the request was sent")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the relay kept waiting on the upstream after the caller cancelled")
+	}
+	select {
+	case <-upstreamSawClose:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the upstream socket stayed open after the caller cancelled")
 	}
 }
