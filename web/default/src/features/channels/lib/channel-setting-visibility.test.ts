@@ -19,12 +19,15 @@ For commercial licensing, please contact support@quantumnous.com
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
+import { createInstance } from 'i18next'
+
 import {
   CHANNEL_SETTING_RULES,
   forwardedRequestFieldSettingValue,
   getChannelSettingState,
   getChannelSettingsOverview,
   isRequestFieldForwarded,
+  summarizeAdvancedSettings,
   type ChannelSettingKey,
   type ChannelSettingValues,
   type ChannelSettingsCardId,
@@ -303,6 +306,67 @@ describe('channel settings overview', () => {
     assert.deepEqual(
       Object.values(cards).map((summary) => summary.configured),
       [false, false, false, false, false]
+    )
+  })
+})
+
+describe('collapsed advanced settings summary', () => {
+  // The same options as the app: keys are whole English sentences, and the
+  // section titles are inserted as they are.
+  async function translator(lng: string) {
+    const i18n = createInstance()
+    await i18n.init({
+      lng,
+      nsSeparator: false,
+      interpolation: { escapeValue: false },
+      resources: {
+        zh: {
+          translation: {
+            'Configured: {{sections}}': '已配置：{{sections}}',
+            '{{count}} not used by this channel type':
+              '{{count}} 项对此渠道类型无效',
+          },
+        },
+      },
+    })
+    return i18n.t
+  }
+
+  test('lists the configured sections in order', async () => {
+    const t = await translator('en')
+    assert.equal(
+      summarizeAdvancedSettings(
+        ['Routing Strategy', 'Connection & keepalive', 'Client identity'],
+        0,
+        t
+      ),
+      'Configured: Routing Strategy · Connection & keepalive · Client identity'
+    )
+  })
+
+  test('adds how many options do nothing on this channel type', async () => {
+    assert.equal(
+      summarizeAdvancedSettings(
+        ['Client identity', 'Session compatibility'],
+        1,
+        await translator('en')
+      ),
+      'Configured: Client identity · Session compatibility · 1 not used by this channel type'
+    )
+    assert.equal(
+      summarizeAdvancedSettings(
+        ['客户端身份', '旧会话兼容'],
+        2,
+        await translator('zh')
+      ),
+      '已配置：客户端身份 · 旧会话兼容 · 2 项对此渠道类型无效'
+    )
+  })
+
+  test('is absent when nothing is configured', async () => {
+    assert.equal(
+      summarizeAdvancedSettings([], 0, await translator('en')),
+      undefined
     )
   })
 })

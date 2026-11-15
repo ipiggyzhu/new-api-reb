@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { TFunction } from 'i18next'
+
 import { MODEL_FETCHABLE_TYPES } from '../constants'
 import { CHANNEL_TYPE_ADVANCED_CUSTOM as ADVANCED_CUSTOM } from './advanced-custom'
 import type { ChannelFormValues } from './channel-form'
@@ -328,4 +330,26 @@ export function getChannelSettingsOverview(
       ),
     },
   }
+}
+
+/**
+ * The line shown under "Advanced Settings" while that area is collapsed: the
+ * sections that have something set and, when there are any, how many options
+ * are set without doing anything on this channel type. Undefined when nothing
+ * is set, so that the caller falls back to its general description.
+ */
+export function summarizeAdvancedSettings(
+  configuredSectionTitles: string[],
+  inactiveCount: number,
+  t: TFunction
+): string | undefined {
+  if (configuredSectionTitles.length === 0) return undefined
+  const summary = t('Configured: {{sections}}', {
+    sections: configuredSectionTitles.join(' · '),
+  })
+  if (inactiveCount === 0) return summary
+  const inactive = t('{{count}} not used by this channel type', {
+    count: inactiveCount,
+  })
+  return `${summary} · ${inactive}`
 }

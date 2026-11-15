@@ -173,6 +173,7 @@ import {
 import {
   CHANNEL_SETTINGS_CARDS,
   getChannelSettingsOverview,
+  summarizeAdvancedSettings,
 } from '../../lib/channel-setting-visibility'
 import {
   collectInvalidStatusCodeEntries,
@@ -1011,19 +1012,13 @@ export function ChannelMutateDrawer({
   const advancedConfigured = configuredAdvancedSectionTitles.length > 0
   // Shown in the collapsed trigger, so that what is set can be read without
   // opening the section.
-  let advancedSummary: string | undefined
-  if (advancedHaveErrors) {
-    advancedSummary = t('Error')
-  } else if (advancedConfigured) {
-    advancedSummary = t('Configured: {{sections}}', {
-      sections: configuredAdvancedSectionTitles.join(' · '),
-    })
-    if (channelSettings.inactiveCount > 0) {
-      advancedSummary += ` · ${t('{{count}} not used by this channel type', {
-        count: channelSettings.inactiveCount,
-      })}`
-    }
-  }
+  const advancedSummary = advancedHaveErrors
+    ? t('Error')
+    : summarizeAdvancedSettings(
+        configuredAdvancedSectionTitles,
+        channelSettings.inactiveCount,
+        t
+      )
   const editorNavItems: ChannelEditorNavItem[] = [
     {
       id: CHANNEL_EDITOR_SECTION_IDS.identity,
