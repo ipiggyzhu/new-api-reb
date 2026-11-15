@@ -633,6 +633,17 @@ func TryResponsesWebsocket(a Adaptor, c *gin.Context, info *common.RelayInfo, re
 		appcommon.SetContextKey(c, appconstant.ContextKeyUpstreamWebsocketEstablished, true)
 	}
 
+	// The dial itself follows the context only while connecting and during TLS:
+	// gorilla waits for the 101 under the handshake deadline alone, and a SOCKS5
+	// dial never sees the context. A caller that hung up in that window arrives
+	// here with a live socket. The watch below would close it, but from a goroutine
+	// of its own that races the send and usually loses, so the request still went
+	// out once. Nothing has been sent yet, so stop before it is.
+	if err := c.Request.Context().Err(); err != nil {
+		closeWebsocketConn(conn)
+		return nil, fmt.Errorf("websocket request not sent, the caller is gone: %w", err)
+	}
+
 	// Only the dial follows the caller's context; an established socket does not,
 	// and gorilla's reads cannot be interrupted except by closing it. Without this
 	// a caller that hangs up while the turn is being collected (every non-streaming
