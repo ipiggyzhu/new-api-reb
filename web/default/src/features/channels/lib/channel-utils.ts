@@ -479,6 +479,16 @@ export function formatTimestamp(timestamp: number): string {
   }
 }
 
+/**
+ * Format a Unix timestamp (seconds) the backend keeps in the channel settings
+ * as a local date and time, or '-' when it was never written.
+ */
+export function formatUnixTime(timestamp: unknown): string {
+  const seconds = Number(timestamp)
+  if (!Number.isFinite(seconds) || seconds <= 0) return '-'
+  return new Date(seconds * 1000).toLocaleString()
+}
+
 // ============================================================================
 // Quota Formatting
 // ============================================================================

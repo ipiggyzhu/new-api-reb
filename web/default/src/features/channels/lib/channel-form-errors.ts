@@ -24,7 +24,13 @@ type ChannelFormErrorMap = Partial<
   Record<FieldPath<ChannelFormValues>, unknown>
 >
 
+/**
+ * Every form field that lives in the collapsible advanced area, grouped by the
+ * card that holds it. An error on any of them has to open that area, or the
+ * message would stay out of sight.
+ */
 const ADVANCED_SETTINGS_FIELDS = new Set<FieldPath<ChannelFormValues>>([
+  // Routing & Overrides
   'priority',
   'weight',
   'max_concurrency',
@@ -36,20 +42,26 @@ const ADVANCED_SETTINGS_FIELDS = new Set<FieldPath<ChannelFormValues>>([
   'header_override',
   'status_code_mapping',
   'advanced_custom',
-  'force_format',
-  'thinking_to_content',
-  'pass_through_body_enabled',
-  'responses_reasoning_fallback',
-  'claude_tool_result_images',
+  // Connection & keepalive
+  'proxy',
+  'websocket_transport',
+  'disable_task_polling_sleep',
+  'upstream_keepalive_enabled',
+  'upstream_keepalive_interval_minutes',
+  'upstream_keepalive_active_window_minutes',
+  // Client identity
   'synthetic_client_headers',
   'synthetic_client_headers_profile',
   'cli_version_profile',
   'tls_fingerprint_enabled',
   'tls_fingerprint',
   'custom_client_identity_enabled',
+  'key_environments',
+  'key_environment_cache_ttl',
   'client_device_seed',
   'client_session_seed',
-  'proxy',
+  // Request & response rewriting
+  'pass_through_body_enabled',
   'system_prompt',
   'system_prompt_override',
   'allow_service_tier',
@@ -59,13 +71,15 @@ const ADVANCED_SETTINGS_FIELDS = new Set<FieldPath<ChannelFormValues>>([
   'allow_inference_geo',
   'allow_speed',
   'claude_beta_query',
-  'disable_task_polling_sleep',
+  'force_format',
+  'thinking_to_content',
+  // Session compatibility
+  'responses_reasoning_fallback',
+  'claude_tool_result_images',
+  // Upstream model detection
   'upstream_model_update_check_enabled',
   'upstream_model_update_auto_sync_enabled',
   'upstream_model_update_ignored_models',
-  'upstream_keepalive_enabled',
-  'upstream_keepalive_interval_minutes',
-  'upstream_keepalive_active_window_minutes',
 ])
 
 export function isAdvancedSettingsField(

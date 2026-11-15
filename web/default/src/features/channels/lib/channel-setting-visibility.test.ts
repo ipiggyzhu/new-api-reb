@@ -27,7 +27,7 @@ import {
   isRequestFieldForwarded,
   type ChannelSettingKey,
   type ChannelSettingValues,
-  type ChannelSettingsCard,
+  type ChannelSettingsCardId,
 } from './channel-setting-visibility'
 
 // OpenAI, Anthropic, AWS Bedrock, Vertex AI, Codex, and Gemini as a type that
@@ -173,30 +173,39 @@ describe('channel settings overview', () => {
     }
     const onAnthropic = getChannelSettingsOverview(14, loaded, loaded)
     assert.equal(onAnthropic.inactiveCount, 2)
-    assert.equal(onAnthropic.states.responses_reasoning_fallback, 'inactive')
-    assert.equal(onAnthropic.states.websocket_transport, 'inactive')
-    assert.equal(onAnthropic.states.claude_tool_result_images, 'applicable')
+    assert.deepEqual(onAnthropic.settings.responses_reasoning_fallback, {
+      state: 'inactive',
+      isSet: true,
+    })
+    assert.equal(onAnthropic.settings.websocket_transport.state, 'inactive')
+    assert.equal(
+      onAnthropic.settings.claude_tool_result_images.state,
+      'applicable'
+    )
 
     const onOpenAI = getChannelSettingsOverview(1, loaded, loaded)
     assert.equal(onOpenAI.inactiveCount, 1)
-    assert.equal(onOpenAI.states.claude_tool_result_images, 'inactive')
+    assert.equal(onOpenAI.settings.claude_tool_result_images.state, 'inactive')
   })
 
-  test('an option switched off stays listed until the channel is saved', () => {
+  test('an option switched off stays on screen but is no longer counted as set', () => {
     const loaded: ChannelSettingValues = { responses_reasoning_fallback: true }
     const current: ChannelSettingValues = {
       responses_reasoning_fallback: false,
     }
 
     const editing = getChannelSettingsOverview(14, current, loaded)
-    assert.equal(editing.states.responses_reasoning_fallback, 'inactive')
-    assert.equal(editing.inactiveCount, 1)
+    assert.deepEqual(editing.settings.responses_reasoning_fallback, {
+      state: 'inactive',
+      isSet: false,
+    })
+    assert.equal(editing.inactiveCount, 0)
+    assert.equal(editing.cards.sessionCompat.visible, true)
     assert.equal(editing.cards.sessionCompat.configured, false)
 
     // Nothing is stored for a channel that is still being created.
     const creating = getChannelSettingsOverview(14, current, undefined)
-    assert.equal(creating.states.responses_reasoning_fallback, 'hidden')
-    assert.equal(creating.inactiveCount, 0)
+    assert.equal(creating.settings.responses_reasoning_fallback.state, 'hidden')
   })
 
   test('a card is shown when it has a row and hidden when it has none', () => {
@@ -224,7 +233,10 @@ describe('channel settings overview', () => {
       detectionSet
     )
     assert.equal(withDetection.cards.upstreamModelDetection.visible, true)
-    assert.equal(withDetection.states.upstream_model_detection, 'inactive')
+    assert.equal(
+      withDetection.settings.upstream_model_detection.state,
+      'inactive'
+    )
     assert.equal(
       getChannelSettingsOverview(14, {}, {}).cards.upstreamModelDetection
         .visible,
@@ -232,7 +244,7 @@ describe('channel settings overview', () => {
     )
   })
 
-  const configuredBy: [ChannelSettingsCard, ChannelSettingValues][] = [
+  const configuredBy: [ChannelSettingsCardId, ChannelSettingValues][] = [
     ['connection', { proxy: 'socks5://127.0.0.1:1080' }],
     ['connection', { websocket_transport: true }],
     ['connection', { disable_task_polling_sleep: true }],

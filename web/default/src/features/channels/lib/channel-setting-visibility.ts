@@ -160,12 +160,28 @@ export function forwardedRequestFieldSettingValue(
 // Cards
 // ============================================================================
 
-export type ChannelSettingsCard =
-  | 'connection'
-  | 'clientIdentity'
-  | 'requestRewriting'
-  | 'sessionCompat'
-  | 'upstreamModelDetection'
+/** The settings cards of the channel editor, in display order. */
+export const CHANNEL_SETTINGS_CARDS = [
+  'connection',
+  'clientIdentity',
+  'requestRewriting',
+  'sessionCompat',
+  'upstreamModelDetection',
+] as const
+
+export type ChannelSettingsCardId = (typeof CHANNEL_SETTINGS_CARDS)[number]
+
+/** The two halves of the rewriting card, each under its own sub-heading. */
+export const CHANNEL_REWRITING_OPTIONS = {
+  request: [
+    'pass_through_body_enabled',
+    'system_prompt',
+    'system_prompt_override',
+    ...FORWARDED_REQUEST_FIELDS.map((row) => row.setting),
+    'claude_beta_query',
+  ],
+  response: ['force_format', 'thinking_to_content'],
+} satisfies Record<string, ChannelSettingKey[]>
 
 /** The options on each card. Client identity is not governed by the rules. */
 const CHANNEL_SETTINGS_CARD_OPTIONS = {
@@ -176,22 +192,12 @@ const CHANNEL_SETTINGS_CARD_OPTIONS = {
     'upstream_keepalive',
   ],
   requestRewriting: [
-    'pass_through_body_enabled',
-    'system_prompt',
-    'system_prompt_override',
-    'allow_service_tier',
-    'disable_store',
-    'allow_safety_identifier',
-    'allow_include_obfuscation',
-    'allow_inference_geo',
-    'allow_speed',
-    'claude_beta_query',
-    'force_format',
-    'thinking_to_content',
+    ...CHANNEL_REWRITING_OPTIONS.request,
+    ...CHANNEL_REWRITING_OPTIONS.response,
   ],
   sessionCompat: ['responses_reasoning_fallback', 'claude_tool_result_images'],
   upstreamModelDetection: ['upstream_model_detection'],
-} satisfies Partial<Record<ChannelSettingsCard, ChannelSettingKey[]>>
+} satisfies Partial<Record<ChannelSettingsCardId, ChannelSettingKey[]>>
 
 /**
  * The form values the options are read from. Every option is the form field of
@@ -213,10 +219,18 @@ export type ChannelSettingValues = Partial<
   >
 >
 
-export type ChannelSettingStates = Record<
-  ChannelSettingKey,
-  ChannelSettingState
->
+/** How one option is shown, and whether it is set right now. */
+export type ChannelSettingView = {
+  state: ChannelSettingState
+  /**
+   * The current value is not the default. An inactive option that has just
+   * been switched off stays on screen, because it was set when the channel was
+   * loaded, but it is no longer set.
+   */
+  isSet: boolean
+}
+
+export type ChannelSettingViews = Record<ChannelSettingKey, ChannelSettingView>
 
 type ChannelSettingsCardSummary = {
   /** The card has at least one row to show. */
@@ -226,10 +240,10 @@ type ChannelSettingsCardSummary = {
 }
 
 export type ChannelSettingsOverview = {
-  states: ChannelSettingStates
+  settings: ChannelSettingViews
   /** Options that are set but do nothing on this channel type. */
   inactiveCount: number
-  cards: Record<ChannelSettingsCard, ChannelSettingsCardSummary>
+  cards: Record<ChannelSettingsCardId, ChannelSettingsCardSummary>
 }
 
 function readSettingValue(
@@ -249,29 +263,26 @@ function readSettingValue(
 }
 
 export function hasVisibleChannelSetting(
-  states: ChannelSettingStates,
+  settings: ChannelSettingViews,
   keys: readonly ChannelSettingKey[]
 ): boolean {
-  return keys.some((key) => states[key] !== 'hidden')
+  return keys.some((key) => settings[key].state !== 'hidden')
 }
 
 function summarizeCard(
   options: readonly ChannelSettingKey[],
-  states: ChannelSettingStates,
-  values: ChannelSettingValues
+  settings: ChannelSettingViews
 ): ChannelSettingsCardSummary {
   return {
-    visible: hasVisibleChannelSetting(states, options),
-    configured: options.some((key) =>
-      isNonDefaultSettingValue(key, readSettingValue(key, values))
-    ),
+    visible: hasVisibleChannelSetting(settings, options),
+    configured: options.some((key) => settings[key].isSet),
   }
 }
 
 /**
- * Everything the editor derives from the rules for one channel: the state of
- * each option, and for each card whether it has anything to show and anything
- * set.
+ * Everything the editor derives from the rules for one channel: how each
+ * option is shown, and for each card whether it has anything to show and
+ * anything set.
  *
  * `loadedValues` are the values the channel was opened with; pass undefined
  * for a channel that is being created.
@@ -281,36 +292,39 @@ export function getChannelSettingsOverview(
   values: ChannelSettingValues,
   loadedValues: ChannelSettingValues | undefined
 ): ChannelSettingsOverview {
-  const states = {} as ChannelSettingStates
+  const settings = {} as ChannelSettingViews
   for (const key of CHANNEL_SETTING_KEYS) {
-    states[key] = getChannelSettingState(
-      key,
-      channelType,
-      readSettingValue(key, values),
-      readSettingValue(key, loadedValues)
-    )
+    const value = readSettingValue(key, values)
+    settings[key] = {
+      state: getChannelSettingState(
+        key,
+        channelType,
+        value,
+        readSettingValue(key, loadedValues)
+      ),
+      isSet: isNonDefaultSettingValue(key, value),
+    }
   }
 
   const options = CHANNEL_SETTINGS_CARD_OPTIONS
   return {
-    states,
+    settings,
     inactiveCount: CHANNEL_SETTING_KEYS.filter(
-      (key) => states[key] === 'inactive'
+      (key) => settings[key].state === 'inactive' && settings[key].isSet
     ).length,
     cards: {
-      connection: summarizeCard(options.connection, states, values),
+      connection: summarizeCard(options.connection, settings),
       clientIdentity: {
         visible: true,
         configured:
           (values.synthetic_client_headers_profile ?? 'off') !== 'off' ||
           values.custom_client_identity_enabled === true,
       },
-      requestRewriting: summarizeCard(options.requestRewriting, states, values),
-      sessionCompat: summarizeCard(options.sessionCompat, states, values),
+      requestRewriting: summarizeCard(options.requestRewriting, settings),
+      sessionCompat: summarizeCard(options.sessionCompat, settings),
       upstreamModelDetection: summarizeCard(
         options.upstreamModelDetection,
-        states,
-        values
+        settings
       ),
     },
   }
