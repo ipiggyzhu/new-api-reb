@@ -529,6 +529,36 @@ describe('notice around model detection on a type it is not offered for', () => 
     })
   })
 
+  test('counts the check as still on only when it was stored on and still is', () => {
+    const on: ChannelSettingValues = {
+      upstream_model_update_check_enabled: true,
+    }
+    const off: ChannelSettingValues = {
+      upstream_model_update_check_enabled: false,
+    }
+    // A leftover ignore list keeps the card on screen with the check off.
+    const leftover: ChannelSettingValues = {
+      upstream_model_update_check_enabled: false,
+      upstream_model_update_auto_sync_enabled: true,
+      upstream_model_update_ignored_models: 'gpt-test',
+    }
+    const stillOn = (
+      values: ChannelSettingValues,
+      loaded: ChannelSettingValues | undefined
+    ) => getChannelSettingsOverview(33, values, loaded).modelCheckStillOn
+
+    assert.equal(stillOn(on, on), true)
+    // Switched off in the form: the save will store it off.
+    assert.equal(stillOn(off, on), false)
+    assert.equal(stillOn(leftover, leftover), false)
+    // Switched on in the form on a type that does not offer it: the backend
+    // has it off, and the save does not store it.
+    assert.equal(stillOn(on, off), false)
+    assert.equal(stillOn(on, leftover), false)
+    // A channel that is being created has nothing stored.
+    assert.equal(stillOn(on, undefined), false)
+  })
+
   test('is not counted among the options the channel type does not use', () => {
     // AWS Bedrock: not model-fetchable, but the backend scans it all the same.
     const values: ChannelSettingValues = {

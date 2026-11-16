@@ -48,6 +48,8 @@ type ChannelModelDetectionSectionProps = {
   sensitiveLocked: boolean
   /** The whole card is one option as far as the channel type is concerned. */
   setting: ChannelSettingView
+  /** The check switch was on when the channel was loaded and still is. */
+  checkStillOn: boolean
   /** What the backend recorded on its last check of the upstream. */
   upstreamModelInfo: { lastCheckTime: unknown; detectedModels: string[] }
 }
@@ -84,10 +86,7 @@ export function ChannelModelDetectionSection(
     >
       <ChannelSettingRow
         setting={props.setting}
-        notice={getModelDetectionNotice(
-          upstreamModelUpdateCheckEnabled === true,
-          t
-        )}
+        notice={getModelDetectionNotice(props.checkStillOn, t)}
         layout='block'
       >
         <div className='divide-border space-y-0 divide-y border-y'>

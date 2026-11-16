@@ -124,6 +124,7 @@ export function ChannelSettingsSections(props: ChannelSettingsSectionsProps) {
           configured={cards.upstreamModelDetection.configured}
           sensitiveLocked={props.sensitiveLocked}
           setting={overview.settings.upstream_model_detection}
+          checkStillOn={overview.modelCheckStillOn}
           upstreamModelInfo={props.upstreamModelInfo}
         />
       )}

@@ -926,6 +926,25 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
     if (typeof settingsObj.upstream_model_update_last_check_time !== 'number') {
       settingsObj.upstream_model_update_last_check_time = 0
     }
+  } else if (settingsObj.upstream_model_update_check_enabled === true) {
+    // The backend's scheduled scan looks only at the stored check switch, not
+    // at the channel type. A check that is stored as on for any other type
+    // must therefore be savable from the form, or it could never be switched
+    // off. Only the two switches are written; everything else stays as stored.
+    settingsObj.upstream_model_update_check_enabled =
+      formData.upstream_model_update_check_enabled === true
+    const autoSyncEnabled =
+      settingsObj.upstream_model_update_check_enabled === true &&
+      formData.upstream_model_update_auto_sync_enabled === true
+    // The backend stores a scanned channel whose auto-sync is off without
+    // this key. It stays absent then, so that an untouched save sends the
+    // stored settings back as they were.
+    if (
+      autoSyncEnabled ||
+      'upstream_model_update_auto_sync_enabled' in settingsObj
+    ) {
+      settingsObj.upstream_model_update_auto_sync_enabled = autoSyncEnabled
+    }
   }
 
   // Upstream keepalive. upstream_keepalive_last_time is written by the backend

@@ -322,6 +322,13 @@ export type ChannelSettingsOverview = {
   settings: ChannelSettingViews
   /** Options that are set but do nothing on this channel type. */
   inactiveCount: number
+  /**
+   * The model check switch was on when the channel was loaded and is still on
+   * in the form. The backend's scheduled scan looks only at that stored
+   * switch, so this is when it keeps checking the upstream, whatever the
+   * channel type.
+   */
+  modelCheckStillOn: boolean
   cards: Record<ChannelSettingsCardId, ChannelSettingsCardSummary>
 }
 
@@ -399,6 +406,9 @@ export function getChannelSettingsOverview(
         settings[key].state === 'inactive' &&
         settings[key].isSet
     ).length,
+    modelCheckStillOn:
+      values.upstream_model_update_check_enabled === true &&
+      loadedValues?.upstream_model_update_check_enabled === true,
     cards: {
       connection: summarizeCard(options.connection, settings),
       clientIdentity: {
@@ -450,17 +460,18 @@ export function getInactiveSettingNotice(
 /**
  * The notice around the model detection card on a channel type the editor
  * does not offer it for. It never says "not used": the backend's scheduled
- * scan (controller/channel_upstream_update.go) looks only at the
- * `upstream_model_update_check_enabled` switch, not at the channel type, so
- * `checkEnabled` must be that switch and not the card's composite value.
+ * scan (controller/channel_upstream_update.go) looks only at the stored
+ * `upstream_model_update_check_enabled` switch, not at the channel type. So
+ * `checkStillOn` must be that switch (`modelCheckStillOn` of the overview),
+ * not the card's composite value.
  */
 export function getModelDetectionNotice(
-  checkEnabled: boolean,
+  checkStillOn: boolean,
   t: TFunction
 ): ChannelSettingNotice {
   return {
     badge: t('Not offered for this channel type'),
-    text: checkEnabled
+    text: checkStillOn
       ? t(
           'Model detection is not offered for this channel type, but it is still switched on and the gateway keeps checking this upstream on schedule. Turn it off unless this upstream answers /v1/models.'
         )
