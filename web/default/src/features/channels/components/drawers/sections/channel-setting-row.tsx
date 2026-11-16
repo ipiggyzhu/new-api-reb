@@ -22,12 +22,21 @@ import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
-import type { ChannelSettingView } from '../../../lib/channel-setting-visibility'
+import {
+  getInactiveSettingNotice,
+  type ChannelSettingNotice,
+  type ChannelSettingView,
+} from '../../../lib/channel-setting-visibility'
 
 type ChannelSettingRowProps = {
   setting: ChannelSettingView
   /** Why the option does nothing on this channel type. */
   reason?: string
+  /**
+   * Replaces the standard badge and sentence, for an option whose notice says
+   * something other than "not used".
+   */
+  notice?: ChannelSettingNotice
   /**
    * `row`: the control brings its own row padding, as in the divided lists.
    * `block`: it does not, so the notice pads it.
@@ -41,7 +50,8 @@ type ChannelSettingRowProps = {
 /**
  * Shows one option according to its state: as it is when it applies, not at
  * all when it is hidden, and inside an amber notice when it is set on a
- * channel type that does not use it, so the admin sees it and can turn it off.
+ * channel type that does not use it, so the admin sees it and knows what
+ * happens to it.
  */
 export function ChannelSettingRow(props: ChannelSettingRowProps) {
   const { t } = useTranslation()
@@ -50,6 +60,8 @@ export function ChannelSettingRow(props: ChannelSettingRowProps) {
   if (props.setting.state === 'applicable') return props.children
 
   const block = props.layout === 'block'
+  const notice =
+    props.notice ?? getInactiveSettingNotice(props.setting, props.reason, t)
   return (
     <div className={cn(!block && 'p-2', props.className)}>
       <div
@@ -68,13 +80,9 @@ export function ChannelSettingRow(props: ChannelSettingRowProps) {
             variant='outline'
             className='border-amber-300 bg-amber-100 text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/20 dark:text-amber-50'
           >
-            {t('Not used by this channel type')}
+            {notice.badge}
           </Badge>
-          <p className='text-xs'>
-            {props.reason ?? t('Not normally offered for this channel type.')}
-            {props.setting.isSet &&
-              ` ${t('It is still set. You can turn it off.')}`}
-          </p>
+          <p className='text-xs'>{notice.text}</p>
         </div>
         {props.children}
       </div>

@@ -219,6 +219,17 @@ export function forwardedRequestFieldSettingValue(
   return forwarded
 }
 
+/**
+ * Options the payload builder (buildSettingsJSON in ./channel-form) deletes on
+ * save on every channel type outside their list. One of these that is still
+ * set needs no action from the admin: saving the channel clears it.
+ */
+export const CLEARED_ON_SAVE: ReadonlySet<ChannelSettingKey> =
+  new Set<ChannelSettingKey>([
+    ...FORWARDED_REQUEST_FIELDS.map((row) => row.setting),
+    'claude_beta_query',
+  ])
+
 // ============================================================================
 // Cards
 // ============================================================================
@@ -291,6 +302,11 @@ export type ChannelSettingView = {
    * loaded, but it is no longer set.
    */
   isSet: boolean
+  /**
+   * The option does nothing on this channel type and saving the channel
+   * deletes it (see CLEARED_ON_SAVE).
+   */
+  clearedOnSave: boolean
 }
 
 export type ChannelSettingViews = Record<ChannelSettingKey, ChannelSettingView>
@@ -358,22 +374,30 @@ export function getChannelSettingsOverview(
   const settings = {} as ChannelSettingViews
   for (const key of CHANNEL_SETTING_KEYS) {
     const value = readSettingValue(key, values)
+    const state = getChannelSettingState(
+      key,
+      channelType,
+      value,
+      readSettingValue(key, loadedValues)
+    )
     settings[key] = {
-      state: getChannelSettingState(
-        key,
-        channelType,
-        value,
-        readSettingValue(key, loadedValues)
-      ),
+      state,
       isSet: isNonDefaultSettingValue(key, value),
+      clearedOnSave: state === 'inactive' && CLEARED_ON_SAVE.has(key),
     }
   }
 
   const options = CHANNEL_SETTINGS_CARD_OPTIONS
   return {
     settings,
+    // Model detection is left out of the count: the backend's scheduled scan
+    // does not look at the channel type, so on a type where the editor does
+    // not offer it, it is still not "unused".
     inactiveCount: CHANNEL_SETTING_KEYS.filter(
-      (key) => settings[key].state === 'inactive' && settings[key].isSet
+      (key) =>
+        key !== 'upstream_model_detection' &&
+        settings[key].state === 'inactive' &&
+        settings[key].isSet
     ).length,
     cards: {
       connection: summarizeCard(options.connection, settings),
@@ -390,6 +414,57 @@ export function getChannelSettingsOverview(
         settings
       ),
     },
+  }
+}
+
+// ============================================================================
+// Notices
+// ============================================================================
+
+/** What an amber notice says: its badge and the sentence next to it. */
+export type ChannelSettingNotice = { badge: string; text: string }
+
+/**
+ * The notice around an option that is set on a channel type that does not use
+ * it: why it does nothing there and, while it is still set, what happens to it.
+ */
+export function getInactiveSettingNotice(
+  setting: ChannelSettingView,
+  reason: string | undefined,
+  t: TFunction
+): ChannelSettingNotice {
+  const sentences = [reason ?? t('Not normally offered for this channel type.')]
+  if (setting.isSet) {
+    sentences.push(
+      setting.clearedOnSave
+        ? t('It is still set and will be cleared when you save.')
+        : t('It is still set. You can turn it off.')
+    )
+  }
+  return {
+    badge: t('Not used by this channel type'),
+    text: sentences.join(' '),
+  }
+}
+
+/**
+ * The notice around the model detection card on a channel type the editor
+ * does not offer it for. It never says "not used": the backend's scheduled
+ * scan (controller/channel_upstream_update.go) looks only at the
+ * `upstream_model_update_check_enabled` switch, not at the channel type, so
+ * `checkEnabled` must be that switch and not the card's composite value.
+ */
+export function getModelDetectionNotice(
+  checkEnabled: boolean,
+  t: TFunction
+): ChannelSettingNotice {
+  return {
+    badge: t('Not offered for this channel type'),
+    text: checkEnabled
+      ? t(
+          'Model detection is not offered for this channel type, but it is still switched on and the gateway keeps checking this upstream on schedule. Turn it off unless this upstream answers /v1/models.'
+        )
+      : t('Model detection is not offered for this channel type.'),
   }
 }
 

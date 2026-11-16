@@ -32,7 +32,10 @@ import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 
 import type { ChannelFormValues } from '../../../lib/channel-form'
-import type { ChannelSettingView } from '../../../lib/channel-setting-visibility'
+import {
+  getModelDetectionNotice,
+  type ChannelSettingView,
+} from '../../../lib/channel-setting-visibility'
 import { formatUnixTime } from '../../../lib/channel-utils'
 import { ChannelSettingRow } from './channel-setting-row'
 import { ChannelSettingsCard } from './channel-settings-card'
@@ -79,7 +82,14 @@ export function ChannelModelDetectionSection(
       configured={props.configured}
       sensitiveLocked={props.sensitiveLocked}
     >
-      <ChannelSettingRow setting={props.setting} layout='block'>
+      <ChannelSettingRow
+        setting={props.setting}
+        notice={getModelDetectionNotice(
+          upstreamModelUpdateCheckEnabled === true,
+          t
+        )}
+        layout='block'
+      >
         <div className='divide-border space-y-0 divide-y border-y'>
           <FormField
             control={form.control}

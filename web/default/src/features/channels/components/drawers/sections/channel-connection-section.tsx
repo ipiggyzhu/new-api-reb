@@ -134,7 +134,12 @@ export function ChannelConnectionSection(props: ChannelConnectionSectionProps) {
             />
           </ChannelSettingRow>
 
-          <ChannelSettingRow setting={settings.disable_task_polling_sleep}>
+          <ChannelSettingRow
+            setting={settings.disable_task_polling_sleep}
+            reason={t(
+              'Only matters on channel types that run async video tasks.'
+            )}
+          >
             <FormField
               control={form.control}
               name='disable_task_polling_sleep'

@@ -21,11 +21,19 @@ import { describe, test } from 'node:test'
 
 import { createInstance } from 'i18next'
 
+import { channelSchema } from '../types'
+import {
+  transformChannelToFormDefaults,
+  transformFormDataToUpdatePayload,
+} from './channel-form'
 import {
   CHANNEL_SETTING_RULES,
+  CLEARED_ON_SAVE,
   forwardedRequestFieldSettingValue,
   getChannelSettingState,
   getChannelSettingsOverview,
+  getInactiveSettingNotice,
+  getModelDetectionNotice,
   isRequestFieldForwarded,
   summarizeAdvancedSettings,
   type ChannelSettingKey,
@@ -206,6 +214,7 @@ describe('channel settings overview', () => {
     assert.deepEqual(onAnthropic.settings.responses_reasoning_fallback, {
       state: 'inactive',
       isSet: true,
+      clearedOnSave: false,
     })
     assert.equal(onAnthropic.settings.websocket_transport.state, 'inactive')
     assert.equal(
@@ -228,6 +237,7 @@ describe('channel settings overview', () => {
     assert.deepEqual(editing.settings.responses_reasoning_fallback, {
       state: 'inactive',
       isSet: false,
+      clearedOnSave: false,
     })
     assert.equal(editing.inactiveCount, 0)
     assert.equal(editing.cards.sessionCompat.visible, true)
@@ -337,28 +347,202 @@ describe('channel settings overview', () => {
   })
 })
 
-describe('collapsed advanced settings summary', () => {
-  // The same options as the app: keys are whole English sentences, and the
-  // section titles are inserted as they are.
-  async function translator(lng: string) {
-    const i18n = createInstance()
-    await i18n.init({
-      lng,
-      nsSeparator: false,
-      interpolation: { escapeValue: false },
-      resources: {
-        zh: {
-          translation: {
-            'Configured: {{sections}}': '已配置：{{sections}}',
-            '{{count}} not used by this channel type':
-              '{{count}} 项对此渠道类型无效',
-          },
+// The same options as the app: keys are whole English sentences, and the
+// section titles are inserted as they are.
+async function translator(lng: string) {
+  const i18n = createInstance()
+  await i18n.init({
+    lng,
+    nsSeparator: false,
+    interpolation: { escapeValue: false },
+    resources: {
+      zh: {
+        translation: {
+          'Configured: {{sections}}': '已配置：{{sections}}',
+          '{{count}} not used by this channel type':
+            '{{count}} 项对此渠道类型无效',
         },
       },
+    },
+  })
+  return i18n.t
+}
+
+/** Baidu: on none of the lists, so every narrowed option is unused on it. */
+const UNLISTED_TYPE = 15
+
+/** The options kept in the `settings` blob; the others are in `setting`. */
+const IN_SETTINGS_BLOB = new Set<ChannelSettingKey>([
+  ...CLEARED_ON_SAVE,
+  'disable_task_polling_sleep',
+])
+
+/** What an untouched save sends back for a channel that has `key` set. */
+function savedValue(key: ChannelSettingKey, channelType: number): unknown {
+  const stored = { [key]: setValue(key) }
+  const inSettings = IN_SETTINGS_BLOB.has(key)
+  const channel = channelSchema.parse({
+    id: 25,
+    type: channelType,
+    name: 'agent',
+    key: 'test-key',
+    status: 1,
+    created_time: 0,
+    test_time: 0,
+    response_time: 0,
+    balance_updated_time: 0,
+    models: 'gpt-test',
+    setting: JSON.stringify(inSettings ? {} : stored),
+    settings: JSON.stringify(inSettings ? stored : {}),
+  })
+  const payload = transformFormDataToUpdatePayload(
+    transformChannelToFormDefaults(channel),
+    channel.id
+  )
+  const blob = inSettings ? payload.settings : payload.setting
+  return JSON.parse(blob ?? '{}')[key]
+}
+
+describe('options the editor clears on save', () => {
+  const narrowedKeys = (
+    Object.keys(CHANNEL_SETTING_RULES) as ChannelSettingKey[]
+  ).filter(
+    (key) =>
+      key !== 'upstream_model_detection' &&
+      getChannelSettingState(key, UNLISTED_TYPE, undefined, undefined) ===
+        'hidden'
+  )
+
+  test('are the six forwarded request fields and the beta query', () => {
+    assert.deepEqual([...CLEARED_ON_SAVE].sort(), [
+      'allow_include_obfuscation',
+      'allow_inference_geo',
+      'allow_safety_identifier',
+      'allow_service_tier',
+      'allow_speed',
+      'claude_beta_query',
+      'disable_store',
+    ])
+    for (const key of CLEARED_ON_SAVE) assert.ok(narrowedKeys.includes(key))
+  })
+
+  // The sentence "will be cleared when you save" is only true where the
+  // payload builder really deletes the option, and "you can turn it off" is
+  // only needed where it does not.
+  for (const key of narrowedKeys) {
+    const cleared = CLEARED_ON_SAVE.has(key)
+    test(`${key} set on a type that does not use it is ${cleared ? 'deleted' : 'kept'} by a save`, () => {
+      assert.equal(
+        savedValue(key, UNLISTED_TYPE),
+        cleared ? undefined : setValue(key)
+      )
+
+      const values: ChannelSettingValues = { [key]: setValue(key) }
+      assert.deepEqual(
+        getChannelSettingsOverview(UNLISTED_TYPE, values, values).settings[key],
+        { state: 'inactive', isSet: true, clearedOnSave: cleared }
+      )
     })
-    return i18n.t
   }
 
+  test('nothing is marked as cleared on a type that uses the option', () => {
+    const values: ChannelSettingValues = {
+      allow_service_tier: true,
+      claude_beta_query: true,
+    }
+    const settings = getChannelSettingsOverview(14, values, values).settings
+    assert.equal(settings.allow_service_tier.clearedOnSave, false)
+    assert.equal(settings.claude_beta_query.clearedOnSave, false)
+    assert.equal(savedValue('claude_beta_query', 14), true)
+  })
+})
+
+describe('notice around an option the channel type does not use', () => {
+  const reason = 'Only Anthropic channels use this query parameter.'
+
+  test('says an option the save deletes will be cleared', async () => {
+    const t = await translator('en')
+    assert.deepEqual(
+      getInactiveSettingNotice(
+        { state: 'inactive', isSet: true, clearedOnSave: true },
+        reason,
+        t
+      ),
+      {
+        badge: 'Not used by this channel type',
+        text: `${reason} It is still set and will be cleared when you save.`,
+      }
+    )
+  })
+
+  test('says any other option can be turned off', async () => {
+    const t = await translator('en')
+    assert.equal(
+      getInactiveSettingNotice(
+        { state: 'inactive', isSet: true, clearedOnSave: false },
+        reason,
+        t
+      ).text,
+      `${reason} It is still set. You can turn it off.`
+    )
+  })
+
+  test('says neither once the option has been switched off', async () => {
+    const t = await translator('en')
+    for (const clearedOnSave of [true, false]) {
+      assert.equal(
+        getInactiveSettingNotice(
+          { state: 'inactive', isSet: false, clearedOnSave },
+          reason,
+          t
+        ).text,
+        reason
+      )
+    }
+  })
+
+  test('falls back to a general reason', async () => {
+    const t = await translator('en')
+    assert.equal(
+      getInactiveSettingNotice(
+        { state: 'inactive', isSet: false, clearedOnSave: true },
+        undefined,
+        t
+      ).text,
+      'Not normally offered for this channel type.'
+    )
+  })
+})
+
+describe('notice around model detection on a type it is not offered for', () => {
+  test('warns that the gateway keeps checking while the check is on', async () => {
+    assert.deepEqual(getModelDetectionNotice(true, await translator('en')), {
+      badge: 'Not offered for this channel type',
+      text: 'Model detection is not offered for this channel type, but it is still switched on and the gateway keeps checking this upstream on schedule. Turn it off unless this upstream answers /v1/models.',
+    })
+  })
+
+  test('only says it is not offered once the check is off', async () => {
+    assert.deepEqual(getModelDetectionNotice(false, await translator('en')), {
+      badge: 'Not offered for this channel type',
+      text: 'Model detection is not offered for this channel type.',
+    })
+  })
+
+  test('is not counted among the options the channel type does not use', () => {
+    // AWS Bedrock: not model-fetchable, but the backend scans it all the same.
+    const values: ChannelSettingValues = {
+      upstream_model_update_check_enabled: true,
+      responses_reasoning_fallback: true,
+    }
+    const overview = getChannelSettingsOverview(33, values, values)
+    assert.equal(overview.settings.upstream_model_detection.state, 'inactive')
+    assert.equal(overview.settings.upstream_model_detection.isSet, true)
+    assert.equal(overview.inactiveCount, 1)
+  })
+})
+
+describe('collapsed advanced settings summary', () => {
   test('lists the configured sections in order', async () => {
     const t = await translator('en')
     assert.equal(

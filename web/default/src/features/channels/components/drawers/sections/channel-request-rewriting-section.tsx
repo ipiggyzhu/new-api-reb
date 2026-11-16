@@ -55,6 +55,9 @@ export function ChannelRequestRewritingSection(
   const { t } = useTranslation()
   const form = useFormContext<ChannelFormValues>()
   const settings = props.settings
+  const systemPromptReason = t(
+    'No request path on this channel type applies a channel system prompt.'
+  )
 
   return (
     <ChannelSettingsCard
@@ -104,7 +107,11 @@ export function ChannelRequestRewritingSection(
             </div>
           )}
 
-          <ChannelSettingRow setting={settings.system_prompt} layout='block'>
+          <ChannelSettingRow
+            setting={settings.system_prompt}
+            reason={systemPromptReason}
+            layout='block'
+          >
             <FormField
               control={form.control}
               name='system_prompt'
@@ -131,6 +138,7 @@ export function ChannelRequestRewritingSection(
 
           <ChannelSettingRow
             setting={settings.system_prompt_override}
+            reason={systemPromptReason}
             layout='block'
           >
             <FormField
@@ -205,7 +213,12 @@ export function ChannelRequestRewritingSection(
           <SubHeading title={t('Response')} />
 
           <div className='divide-border space-y-0 divide-y border-y'>
-            <ChannelSettingRow setting={settings.force_format}>
+            <ChannelSettingRow
+              setting={settings.force_format}
+              reason={t(
+                'Only acts on Chat Completions answers from OpenAI-compatible and Gemini upstreams.'
+              )}
+            >
               <FormField
                 control={form.control}
                 name='force_format'
@@ -230,7 +243,12 @@ export function ChannelRequestRewritingSection(
               />
             </ChannelSettingRow>
 
-            <ChannelSettingRow setting={settings.thinking_to_content}>
+            <ChannelSettingRow
+              setting={settings.thinking_to_content}
+              reason={t(
+                'Only acts on streamed Chat Completions answers from OpenAI-compatible and Gemini upstreams.'
+              )}
+            >
               <FormField
                 control={form.control}
                 name='thinking_to_content'

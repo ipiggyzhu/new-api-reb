@@ -51,6 +51,9 @@ const SECTION_IDS = {
 }
 
 const INACTIVE_BADGE = 'Not used by this channel type'
+const NOT_OFFERED_BADGE = 'Not offered for this channel type'
+const TURN_OFF = 'It is still set. You can turn it off.'
+const CLEARED_ON_SAVE = 'It is still set and will be cleared when you save.'
 
 /** A stored channel: `setting` and `settings` are its two settings JSON blobs. */
 function storedChannel(
@@ -276,7 +279,23 @@ describe('options follow the channel type', () => {
     const card = cardMarkup(stillOn, 'requestRewriting')
     assert.equal(switchIsOn(card, 'Thinking to Content'), true)
     assert.equal(count(stillOn, INACTIVE_BADGE), 1)
+    assert.ok(
+      card.includes(
+        `Only acts on streamed Chat Completions answers from OpenAI-compatible and Gemini upstreams. ${TURN_OFF}`
+      )
+    )
     assert.ok(!card.includes('Force Format'))
+
+    const forced = cardMarkup(
+      await renderSections(storedChannel(14, { force_format: true })),
+      'requestRewriting'
+    )
+    assert.equal(switchIsOn(forced, 'Force Format'), true)
+    assert.ok(
+      forced.includes(
+        `Only acts on Chat Completions answers from OpenAI-compatible and Gemini upstreams. ${TURN_OFF}`
+      )
+    )
   })
 
   test('the task polling delay is offered only where video tasks run', async () => {
@@ -291,6 +310,11 @@ describe('options follow the channel type', () => {
     const card = cardMarkup(stillOn, 'connection')
     assert.equal(switchIsOn(card, label), true)
     assert.equal(count(stillOn, INACTIVE_BADGE), 1)
+    assert.ok(
+      card.includes(
+        `Only matters on channel types that run async video tasks. ${TURN_OFF}`
+      )
+    )
   })
 
   test('the system prompt goes on a type with no request path that applies it', async () => {
@@ -311,8 +335,19 @@ describe('options follow the channel type', () => {
     const card = cardMarkup(stillSet, 'requestRewriting')
     assert.ok(card.includes('Answer briefly.'))
     assert.equal(count(stillSet, INACTIVE_BADGE), 1)
+    const reason = `No request path on this channel type applies a channel system prompt. ${TURN_OFF}`
+    assert.equal(count(card, reason), 1)
     // The companion switch is at its default, so it stays out.
     assert.ok(!card.includes('Also prepend to requests that have their own'))
+
+    const both = await renderSections(
+      storedChannel(37, {
+        system_prompt: 'Answer briefly.',
+        system_prompt_override: true,
+      })
+    )
+    assert.equal(count(both, INACTIVE_BADGE), 2)
+    assert.equal(count(both, reason), 2)
   })
 
   test('a Gemini channel has no session compatibility card', async () => {
@@ -380,7 +415,13 @@ describe('request fields forwarded upstream', () => {
     )
     assert.deepEqual(forwardedFields(html), ['safety_identifier'])
     assert.equal(count(html, INACTIVE_BADGE), 1)
-    assert.ok(html.includes('Not normally offered for this channel type.'))
+    // The save deletes it on this type, so there is nothing to turn off.
+    assert.ok(
+      html.includes(
+        `Not normally offered for this channel type. ${CLEARED_ON_SAVE}`
+      )
+    )
+    assert.ok(!html.includes(TURN_OFF))
   })
 
   test('the Anthropic beta query sits with the request options, reworded', async () => {
@@ -399,9 +440,60 @@ describe('request fields forwarded upstream', () => {
     )
     assert.ok(
       cardMarkup(openai, 'requestRewriting').includes(
-        'Only Anthropic channels use this query parameter. It is still set.'
+        `Only Anthropic channels use this query parameter. ${CLEARED_ON_SAVE}`
       )
     )
+    assert.ok(!openai.includes(TURN_OFF))
+  })
+})
+
+describe('model detection on a type it is not offered for', () => {
+  const STILL_CHECKING =
+    'Model detection is not offered for this channel type, but it is still switched on and the gateway keeps checking this upstream on schedule. Turn it off unless this upstream answers /v1/models.'
+  const NOT_OFFERED = 'Model detection is not offered for this channel type.'
+
+  test('warns that the gateway keeps checking while the check is on', async () => {
+    // AWS Bedrock is not model-fetchable; the backend scans it all the same.
+    const html = await renderSections(
+      storedChannel(33, {}, { upstream_model_update_check_enabled: true })
+    )
+    const card = cardMarkup(html, 'upstreamModelDetection')
+    assert.equal(switchIsOn(card, 'Upstream Model Update Check'), true)
+    assert.equal(count(card, NOT_OFFERED_BADGE), 1)
+    assert.equal(count(card, STILL_CHECKING), 1)
+    // It is in use, so nothing calls it unused or merely "still set".
+    assert.ok(!html.includes(INACTIVE_BADGE))
+    assert.ok(!html.includes('It is still set'))
+  })
+
+  test('only says it is not offered when the check itself is off', async () => {
+    // The card is kept by a leftover ignore list; the scan does not run.
+    const html = await renderSections(
+      storedChannel(
+        33,
+        {},
+        {
+          upstream_model_update_check_enabled: false,
+          upstream_model_update_ignored_models: ['gpt-test'],
+        }
+      )
+    )
+    const card = cardMarkup(html, 'upstreamModelDetection')
+    assert.equal(switchIsOn(card, 'Upstream Model Update Check'), false)
+    assert.equal(count(card, NOT_OFFERED_BADGE), 1)
+    assert.equal(count(card, NOT_OFFERED), 1)
+    assert.ok(!card.includes('keeps checking'))
+    assert.ok(!html.includes(INACTIVE_BADGE))
+  })
+
+  test('a type it is offered for shows the card without a notice', async () => {
+    const html = await renderSections(
+      storedChannel(14, {}, { upstream_model_update_check_enabled: true })
+    )
+    const card = cardMarkup(html, 'upstreamModelDetection')
+    assert.equal(switchIsOn(card, 'Upstream Model Update Check'), true)
+    assert.ok(!html.includes(NOT_OFFERED_BADGE))
+    assert.ok(!html.includes(NOT_OFFERED))
   })
 })
 
@@ -483,7 +575,7 @@ describe('cards', () => {
       storedChannel(33, {}, { upstream_model_update_check_enabled: true })
     )
     const card = cardMarkup(stillSet, 'upstreamModelDetection')
-    assert.ok(card.includes(INACTIVE_BADGE))
+    assert.ok(card.includes(NOT_OFFERED_BADGE))
     assert.equal(switchIsOn(card, 'Upstream Model Update Check'), true)
   })
 
@@ -512,8 +604,16 @@ describe('cards', () => {
             hideResponseOptions
               ? {
                   ...settings,
-                  force_format: { state: 'hidden', isSet: false },
-                  thinking_to_content: { state: 'hidden', isSet: false },
+                  force_format: {
+                    state: 'hidden',
+                    isSet: false,
+                    clearedOnSave: false,
+                  },
+                  thinking_to_content: {
+                    state: 'hidden',
+                    isSet: false,
+                    clearedOnSave: false,
+                  },
                 }
               : settings
           }
@@ -549,7 +649,7 @@ describe('an option switched off on a type that ignores it', () => {
       renderInForm(
         form,
         <ChannelSettingRow
-          setting={{ state: 'inactive', isSet }}
+          setting={{ state: 'inactive', isSet, clearedOnSave: false }}
           reason='Only acts on upstreams that speak the OpenAI Responses protocol.'
         >
           <span>the control</span>
