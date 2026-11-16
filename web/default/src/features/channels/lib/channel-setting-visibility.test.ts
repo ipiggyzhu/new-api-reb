@@ -33,31 +33,32 @@ import {
   type ChannelSettingsCardId,
 } from './channel-setting-visibility'
 
-// OpenAI, Anthropic, AWS Bedrock, Vertex AI, Codex, and Gemini as a type that
-// is on none of the lists except the model-fetchable one.
-const CHANNEL_TYPES = [1, 14, 33, 41, 57, 24]
+// OpenAI, Custom (an OpenAI-compatible relay), Anthropic, Ali, Gemini, AWS
+// Bedrock, Vertex AI, Jimeng, Codex, and Baidu as a type whose adaptor has none
+// of the code paths the narrowed options need.
+const CHANNEL_TYPES = [1, 8, 14, 17, 24, 33, 41, 51, 57, 15]
 
 // One row per option, one column per type above: Y applies, - does not.
 const APPLIES: Record<ChannelSettingKey, string> = {
-  force_format: 'Y-----',
-  thinking_to_content: 'YYYYYY',
-  pass_through_body_enabled: 'YYYYYY',
-  system_prompt: 'YYYYYY',
-  system_prompt_override: 'YYYYYY',
-  proxy: 'YYYYYY',
-  websocket_transport: 'Y---YY',
-  disable_task_polling_sleep: 'YYYYYY',
-  upstream_keepalive: 'YYYYYY',
-  responses_reasoning_fallback: 'Y---YY',
-  claude_tool_result_images: '-YYY--',
-  claude_beta_query: '-Y----',
-  allow_service_tier: 'YY--Y-',
-  allow_inference_geo: 'YY--Y-',
-  disable_store: 'Y---Y-',
-  allow_safety_identifier: 'Y---Y-',
-  allow_include_obfuscation: 'Y---Y-',
-  allow_speed: '-Y----',
-  upstream_model_detection: 'YY---Y',
+  force_format: 'YY-YY-YY--',
+  thinking_to_content: 'YY-YY-YY--',
+  pass_through_body_enabled: 'YYYYYYYYYY',
+  system_prompt: 'YYYYYYYYY-',
+  system_prompt_override: 'YYYYYYYYY-',
+  proxy: 'YYYYYYYYYY',
+  websocket_transport: 'YY------Y-',
+  disable_task_polling_sleep: 'Y--YY-YY--',
+  upstream_keepalive: 'YYYYYYYYYY',
+  responses_reasoning_fallback: 'YY-Y----Y-',
+  claude_tool_result_images: '--YY-YY---',
+  claude_beta_query: '--Y-------',
+  allow_service_tier: 'Y-Y-----Y-',
+  allow_inference_geo: 'Y-Y-----Y-',
+  disable_store: 'Y-------Y-',
+  allow_safety_identifier: 'Y-------Y-',
+  allow_include_obfuscation: 'Y-------Y-',
+  allow_speed: '--Y-------',
+  upstream_model_detection: 'Y-YYY-----',
 }
 
 function setValue(key: ChannelSettingKey): unknown {
@@ -117,6 +118,32 @@ describe('channel setting rules', () => {
       getChannelSettingState('responses_reasoning_fallback', 58, false, false),
       'applicable'
     )
+    // Its routes can answer in the OpenAI format, but it never takes the
+    // Responses WebSocket path.
+    assert.equal(
+      getChannelSettingState('force_format', 58, false, false),
+      'applicable'
+    )
+    assert.equal(
+      getChannelSettingState('websocket_transport', 58, false, false),
+      'hidden'
+    )
+  })
+
+  test('the task platforms that share the OpenAI API type keep WebSocket transport', () => {
+    // Nothing in the backend rules them out, so they are not narrowed.
+    for (const channelType of [2, 5, 36, 50, 52, 54, 55]) {
+      assert.equal(
+        getChannelSettingState(
+          'websocket_transport',
+          channelType,
+          false,
+          false
+        ),
+        'applicable',
+        `type ${channelType}`
+      )
+    }
   })
 
   test('values that are absent or blank count as the default', () => {

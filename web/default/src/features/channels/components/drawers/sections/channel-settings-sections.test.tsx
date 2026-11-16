@@ -230,33 +230,96 @@ describe('options follow the channel type', () => {
     assert.ok(!openai.includes(INACTIVE_BADGE))
   })
 
-  test('options that apply to every type are always there', async () => {
-    // AWS Bedrock is on none of the "only" lists.
+  test('an AWS Bedrock channel shows the options its type uses and no others', async () => {
     const html = await renderSections(storedChannel(33))
     for (const label of [
       'Proxy Address',
-      'Skip async task polling delay',
       'Enable upstream keepalive',
       'Client type',
       'Pass Through Body',
       'System Prompt',
       'Also prepend to requests that have their own',
-      'Thinking to Content',
       'Images in Tool Results',
     ]) {
       assert.ok(html.includes(label), label)
     }
     for (const label of [
-      'Force Format',
       'WebSocket Transport',
-      'Responses Reasoning Compatibility',
+      'Skip async task polling delay',
       'Append ?beta=true to Messages requests',
       'Request fields forwarded upstream',
+      'Force Format',
+      'Thinking to Content',
+      'Responses Reasoning Compatibility',
       'Upstream Model Detection Settings',
       INACTIVE_BADGE,
     ]) {
       assert.ok(!html.includes(label), label)
     }
+  })
+
+  test('the response options are offered on every OpenAI-compatible type, not on Anthropic', async () => {
+    // Custom (8) is an OpenAI-compatible relay: the backend honours both there.
+    const custom = await renderSections(storedChannel(8))
+    const rewriting = cardMarkup(custom, 'requestRewriting')
+    assert.ok(rewriting.includes('Force Format'))
+    assert.ok(rewriting.includes('Thinking to Content'))
+    assert.ok(!custom.includes(INACTIVE_BADGE))
+
+    const anthropic = await renderSections(storedChannel(14))
+    assert.ok(!anthropic.includes('Force Format'))
+    assert.ok(!anthropic.includes('Thinking to Content'))
+
+    const stillOn = await renderSections(
+      storedChannel(14, { thinking_to_content: true })
+    )
+    const card = cardMarkup(stillOn, 'requestRewriting')
+    assert.equal(switchIsOn(card, 'Thinking to Content'), true)
+    assert.equal(count(stillOn, INACTIVE_BADGE), 1)
+    assert.ok(!card.includes('Force Format'))
+  })
+
+  test('the task polling delay is offered only where video tasks run', async () => {
+    const label = 'Skip async task polling delay'
+    // Gemini (24) has a video task adaptor, Custom (8) has none.
+    assert.ok((await renderSections(storedChannel(24))).includes(label))
+    assert.ok(!(await renderSections(storedChannel(8))).includes(label))
+
+    const stillOn = await renderSections(
+      storedChannel(8, {}, { disable_task_polling_sleep: true })
+    )
+    const card = cardMarkup(stillOn, 'connection')
+    assert.equal(switchIsOn(card, label), true)
+    assert.equal(count(stillOn, INACTIVE_BADGE), 1)
+  })
+
+  test('the system prompt goes on a type with no request path that applies it', async () => {
+    // Dify (37): its adaptor takes neither Messages nor OpenAI chat requests.
+    const dify = await renderSections(storedChannel(37))
+    assert.ok(!dify.includes('>System Prompt</label>'))
+    assert.ok(!dify.includes('Also prepend to requests that have their own'))
+    assert.ok(dify.includes('Pass Through Body'))
+    assert.ok(
+      (await renderSections(storedChannel(1))).includes(
+        '>System Prompt</label>'
+      )
+    )
+
+    const stillSet = await renderSections(
+      storedChannel(37, { system_prompt: 'Answer briefly.' })
+    )
+    const card = cardMarkup(stillSet, 'requestRewriting')
+    assert.ok(card.includes('Answer briefly.'))
+    assert.equal(count(stillSet, INACTIVE_BADGE), 1)
+    // The companion switch is at its default, so it stays out.
+    assert.ok(!card.includes('Also prepend to requests that have their own'))
+  })
+
+  test('a Gemini channel has no session compatibility card', async () => {
+    // Neither a Responses upstream nor a Claude Messages body.
+    const gemini = await renderSections(storedChannel(24))
+    assert.ok(!gemini.includes(SECTION_IDS.sessionCompat))
+    assert.ok(!gemini.includes('Session compatibility'))
   })
 })
 
@@ -436,8 +499,8 @@ describe('cards', () => {
   })
 
   test('the Response heading goes when no response option is shown', async () => {
-    const form = transformChannelToFormDefaults(storedChannel(14))
-    const settings = getChannelSettingsOverview(14, form, form).settings
+    const form = transformChannelToFormDefaults(storedChannel(1))
+    const settings = getChannelSettingsOverview(1, form, form).settings
     const render = (hideResponseOptions: boolean) =>
       renderInForm(
         form,

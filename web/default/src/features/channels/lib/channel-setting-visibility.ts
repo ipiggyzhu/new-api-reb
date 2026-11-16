@@ -37,34 +37,95 @@ type ChannelSettingRule =
   | { only: readonly number[] }
   | { except: readonly number[] }
 
+// The longer lists of channel type ids used by the rules below, each named for
+// what the backend code establishes about the types on it.
+
+/** None of their adaptors answers through the OpenAI-format response handlers. */
+const NO_OPENAI_FORMAT_ANSWER = [
+  4, 11, 14, 15, 16, 18, 21, 23, 33, 34, 37, 38, 39, 44, 48, 49, 56, 57,
+]
+
+/** No request path of theirs applies a channel system prompt. */
+const NO_SYSTEM_PROMPT_PATH = [15, 16, 21, 23, 34, 37, 38, 44, 49, 56]
+
+/** Their API type is neither OpenAI nor Codex. */
+const NOT_OPENAI_OR_CODEX_API = [
+  4, 11, 14, 15, 16, 17, 18, 20, 21, 23, 24, 25, 26, 27, 33, 34, 35, 37, 38, 39,
+  40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 51, 53, 56, 58,
+]
+
+/** They have a video task adaptor. */
+const VIDEO_TASK_TYPES = [1, 17, 24, 35, 41, 45, 50, 51, 52, 54, 55]
+
+/** They can never have a Responses upstream. */
+const NO_RESPONSES_UPSTREAM = [
+  4, 11, 14, 15, 16, 18, 21, 23, 24, 25, 26, 33, 34, 35, 37, 38, 41, 43, 44, 46,
+  49, 51,
+]
+
+/** Their ConvertClaudeRequest can return a body in the Claude Messages shape. */
+const CLAUDE_BODY_TYPES = [14, 17, 25, 26, 33, 35, 41, 43, 45, ADVANCED_CUSTOM]
+
 /**
  * The channel types each option applies to, one line per option: `only` lists
  * the types it applies to, `except` the types it does not.
  *
- * These lists are the proven minimum. Narrow an option only on evidence of
- * where the backend reads it; anything unproven stays 'all'.
+ * Each rule comes from where the backend reads the option, and the comment
+ * above it names that code. An option is narrowed only on that evidence and
+ * stays 'all' otherwise.
  *
- * 1 OpenAI, 14 Anthropic, 33 AWS Bedrock, 41 Vertex AI, 57 Codex.
+ * Two kinds of rule mirror this editor instead. The six forwarded request
+ * fields follow the payload builder (buildSettingsJSON in ./channel-form),
+ * which stores those switches only for the listed types and deletes them on
+ * any other. Model detection follows MODEL_FETCHABLE_TYPES, the types the
+ * editor can fetch a model list for.
+ *
+ * force_format is deliberately wider than "OpenAI (type 1) only": the backend
+ * honours it on every OpenAI-compatible type, and with the old restriction
+ * the notice claimed it was unused on types where it was in fact applied.
+ *
+ * 1 OpenAI, 14 Anthropic, 57 Codex; CHANNEL_TYPES in ../constants names the
+ * other ids.
  */
 export const CHANNEL_SETTING_RULES = {
-  force_format: { only: [1] },
-  thinking_to_content: 'all',
+  // Read only by the handlers that answer in the OpenAI format:
+  // OaiStreamHandler and OpenaiHandler in relay/channel/openai/relay-openai.go,
+  // handleStream in relay/channel/gemini/relay-gemini.go.
+  force_format: { except: NO_OPENAI_FORMAT_ANSWER },
+  // Read by the streaming ones of those handlers: OaiStreamHandler, handleStream.
+  thinking_to_content: { except: NO_OPENAI_FORMAT_ANSWER },
   pass_through_body_enabled: 'all',
-  system_prompt: 'all',
-  system_prompt_override: 'all',
+  // Applied only by ClaudeHelper (relay/claude_handler.go), GeminiHelper
+  // (relay/gemini_handler.go), applySystemPromptIfNeeded as called from
+  // TextHelper (relay/compatible_handler.go), and ConvertOpenAIResponsesRequest
+  // in relay/channel/codex/adaptor.go.
+  system_prompt: { except: NO_SYSTEM_PROMPT_PATH },
+  system_prompt_override: { except: NO_SYSTEM_PROMPT_PATH },
   proxy: 'all',
-  websocket_transport: { except: [14, 33, 41] },
-  disable_task_polling_sleep: 'all',
+  // ShouldTryResponsesWebsocket in relay/channel/websocket_transport.go only
+  // proceeds for the OpenAI and Codex API types (ChannelType2APIType in
+  // common/api_type.go).
+  websocket_transport: { except: NOT_OPENAI_OR_CODEX_API },
+  // Read once, in updateVideoTasks (service/task_polling.go), which needs a
+  // task adaptor from GetTaskAdaptor (relay/relay_adaptor.go).
+  disable_task_polling_sleep: { only: VIDEO_TASK_TYPES },
   upstream_keepalive: 'all',
-  responses_reasoning_fallback: { except: [14, 33, 41] },
-  claude_tool_result_images: { only: [14, 33, 41, ADVANCED_CUSTOM] },
+  // Read in doUpstreamRoundTrip (relay/compatible_handler.go), in the
+  // Responses relay mode only.
+  responses_reasoning_fallback: { except: NO_RESPONSES_UPSTREAM },
+  // Read in ClaudeHelper (relay/claude_handler.go), on the body returned by
+  // the adaptor's ConvertClaudeRequest.
+  claude_tool_result_images: { only: CLAUDE_BODY_TYPES },
+  // Read by shouldAppendClaudeBetaQuery in relay/channel/claude/adaptor.go.
   claude_beta_query: { only: [14] },
+  // The six forwarded request fields, as buildSettingsJSON stores them.
   allow_service_tier: { only: [1, 14, 57] },
   allow_inference_geo: { only: [1, 14, 57] },
   disable_store: { only: [1, 57] },
   allow_safety_identifier: { only: [1, 57] },
   allow_include_obfuscation: { only: [1, 57] },
   allow_speed: { only: [14] },
+  // Offered where the editor can fetch the upstream's model list.
   upstream_model_detection: { only: [...MODEL_FETCHABLE_TYPES] },
 } satisfies Record<string, ChannelSettingRule>
 
