@@ -74,6 +74,10 @@ func channelSettingsMatchIgnoringKeepalive(current, expected string) bool {
 	}
 	currentSettings.UpstreamKeepaliveLastTime = 0
 	expectedSettings.UpstreamKeepaliveLastTime = 0
+	// The sweep's own outage counter is progress, not configuration: the sweep
+	// writes it between reading the channel and applying its results.
+	currentSettings.UpstreamModelUpdateOutageRuns = 0
+	expectedSettings.UpstreamModelUpdateOutageRuns = 0
 	return reflect.DeepEqual(currentSettings, expectedSettings)
 }
 

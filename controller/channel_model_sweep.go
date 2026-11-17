@@ -106,7 +106,7 @@ func classifyChannelModelSweepResult(result testResult) channelModelSweepVerdict
 	// A generic 410 may describe a removed endpoint, not a removed model.
 	// Only the explicit model retirement response observed upstream qualifies.
 	if upstreamErr.StatusCode == http.StatusGone {
-		if strings.Contains(message, "model") && strings.Contains(message, "end of life") && strings.Contains(message, "no longer available") {
+		if strings.Contains(message, "model") && (strings.Contains(message, "end of life") || strings.Contains(message, "no longer available") || strings.Contains(message, "deprecated")) {
 			return sweepVerdictFail
 		}
 	}
@@ -318,12 +318,27 @@ func sweepChannelModels(ctx context.Context, channelID int, testUserID int, budg
 	for _, m := range existing {
 		existingSet[m] = struct{}{}
 	}
-	items := make([]sweepTestItem, 0, len(existing)+len(candidates))
+	// A vendor-prefixed id listed next to its own bare name is the same model
+	// twice. The bare name stays; the prefixed one is neither tested nor adopted.
+	stripPrefix := operation_setting.GetMonitorSetting().UpstreamModelUpdateStripVendorPrefix
+	var redundant []string
+	checked := make([]string, 0, len(existing))
 	for _, m := range existing {
+		if stripPrefix && isRedundantPrefixedModel(m, existingSet) {
+			redundant = append(redundant, m)
+			continue
+		}
+		checked = append(checked, m)
+	}
+	items := make([]sweepTestItem, 0, len(existing)+len(candidates))
+	for _, m := range checked {
 		items = append(items, sweepTestItem{testName: m, adoptName: m})
 	}
 	for _, m := range candidates {
 		if _, ok := existingSet[m]; ok {
+			continue
+		}
+		if stripPrefix && isRedundantPrefixedModel(m, existingSet) {
 			continue
 		}
 		testName := m
@@ -420,6 +435,19 @@ func sweepChannelModels(ctx context.Context, channelID int, testUserID int, budg
 	}
 	if ctx != nil && ctx.Err() != nil {
 		return result, ctx.Err()
+	}
+
+	if fetchErr == nil && len(upstreamModels) > 0 {
+		if unlisted := markUnlistedModelsFailed(checked, normalizeModelNames(upstreamModels), activeMapping, verdicts); len(unlisted) > 0 {
+			common.SysLog(fmt.Sprintf("channel model sweep: channel %d: no longer listed upstream and not answering, removing: %s", channelID, strings.Join(unlisted, ",")))
+		}
+	}
+	for _, m := range redundant {
+		verdicts[m] = sweepVerdictFail
+	}
+	if recordChannelSweepOutage(channelID, sweepLooksLikeOutage(checked, verdicts)) {
+		result.disabled = true
+		return result, nil
 	}
 
 	nextModels, added, removed, _ := computeSweptModels(existing, candidates, verdicts)

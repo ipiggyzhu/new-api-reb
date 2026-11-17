@@ -418,7 +418,7 @@ func TestCollectPendingUpstreamModelChangesFromModels_StripsVendorPrefixes(t *te
 		"openai/gpt-4o",
 		"anthropic/claude-sonnet-4-20250514",
 		"openai/gpt-4o-mini",
-		"gpt-4o-mini", // bare id also listed: the prefixed one keeps its prefix
+		"gpt-4o-mini", // bare id also listed: the prefixed twin is not offered
 		"openai/o3",
 		"azure/o3", // two vendors collapse to o3: neither is stripped
 		"google/gemini-2.5-pro:free",
@@ -437,7 +437,6 @@ func TestCollectPendingUpstreamModelChangesFromModels_StripsVendorPrefixes(t *te
 		assert.Equal(t, []string{
 			"gpt-4o",
 			"claude-sonnet-4-20250514",
-			"openai/gpt-4o-mini",
 			"gpt-4o-mini",
 			"openai/o3",
 			"azure/o3",

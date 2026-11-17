@@ -264,6 +264,10 @@ func collectPendingUpstreamModelChangesFromModels(
 	for _, modelName := range upstreamModels {
 		upstreamSet[modelName] = struct{}{}
 	}
+	rawUpstreamSet := make(map[string]struct{}, len(upstreamModels))
+	for _, modelName := range upstreamModels {
+		rawUpstreamSet[modelName] = struct{}{}
+	}
 	bareOf := map[string]string{}
 	if stripVendorPrefix {
 		bareOf = stripUpstreamVendorPrefixes(upstreamModels)
@@ -304,6 +308,11 @@ func collectPendingUpstreamModelChangesFromModels(
 		candidate := upstreamName
 		if bare, ok := bareOf[upstreamName]; ok {
 			candidate = bare
+		}
+		// The upstream lists this id under its bare name as well: one model,
+		// two spellings. Only the bare one is offered.
+		if stripVendorPrefix && isRedundantPrefixedModel(upstreamName, rawUpstreamSet) {
+			continue
 		}
 		// Covered under either spelling: an admin who listed or mapped the
 		// prefixed id already serves this model.

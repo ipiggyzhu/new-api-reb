@@ -201,6 +201,9 @@ type ChannelOtherSettings struct {
 	UpstreamModelUpdateModelHealth map[string]ModelHealthState `json:"upstream_model_update_model_health,omitempty"`
 	// 已有模型轮换抽查的游标，跨轮持久化推进以覆盖全部模型
 	UpstreamModelUpdateRotationCursor int `json:"upstream_model_update_rotation_cursor,omitempty"`
+	// 模型巡检连续多少轮没有从这个上游得到任何明确结果（全部超时/5xx/鉴权失败）。
+	// 达到上限后渠道被自动禁用；任何一轮有明确结果即清零。由巡检写入，不是配置。
+	UpstreamModelUpdateOutageRuns int `json:"upstream_model_update_outage_runs,omitempty"`
 	// WebsocketUnsupported 记录上游在握手阶段明确拒绝了 WebSocket 升级，
 	// 之后不再尝试，直接走 HTTP+SSE。与管理员配置的
 	// ChannelSettings.WebsocketTransport 分开存放：这一项是探测结果，由程序写入。
