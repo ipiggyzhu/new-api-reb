@@ -257,6 +257,19 @@ export const CHANNEL_REWRITING_OPTIONS = {
   response: ['force_format', 'thinking_to_content'],
 } satisfies Record<string, ChannelSettingKey[]>
 
+/**
+ * Whether the rewriting card labels its halves "Request" and "Response". It
+ * does only when both have a row to show; a single half needs no label.
+ */
+export function showRewritingSubHeadings(
+  settings: ChannelSettingViews
+): boolean {
+  return (
+    hasVisibleChannelSetting(settings, CHANNEL_REWRITING_OPTIONS.request) &&
+    hasVisibleChannelSetting(settings, CHANNEL_REWRITING_OPTIONS.response)
+  )
+}
+
 /** The options on each card. Client identity is not governed by the rules. */
 const CHANNEL_SETTINGS_CARD_OPTIONS = {
   connection: [
@@ -425,6 +438,47 @@ export function getChannelSettingsOverview(
       ),
     },
   }
+}
+
+// ============================================================================
+// System prompt scope
+// ============================================================================
+
+/** The requests a channel system prompt is applied to on a channel type. */
+export type SystemPromptScope = 'messages' | 'responses' | 'chatAndMessages'
+
+// Where the backend applies the channel system prompt (the code named above
+// the system_prompt rule), for the types where that is worth a line of help.
+
+/** Anthropic, AWS Bedrock: on /v1/messages only (ClaudeHelper). */
+const SYSTEM_PROMPT_ON_MESSAGES_ONLY = new Set([14, 33])
+
+/** Codex: on /v1/responses, inside its adaptor. */
+const SYSTEM_PROMPT_ON_RESPONSES = new Set([57])
+
+/**
+ * The chat types served by the OpenAI adaptor: on /v1/chat/completions
+ * (TextHelper) and /v1/messages (ClaudeHelper); the Responses handler never
+ * applies it.
+ */
+const SYSTEM_PROMPT_ON_CHAT_AND_MESSAGES = new Set([
+  1, 3, 6, 7, 8, 9, 10, 12, 13, 19, 20, 22, 31, 47,
+])
+
+/**
+ * Which requests the channel system prompt is applied to on this channel
+ * type, where the editor says so under the option; undefined for the types it
+ * has no such line for.
+ */
+export function getSystemPromptScope(
+  channelType: number
+): SystemPromptScope | undefined {
+  if (SYSTEM_PROMPT_ON_MESSAGES_ONLY.has(channelType)) return 'messages'
+  if (SYSTEM_PROMPT_ON_RESPONSES.has(channelType)) return 'responses'
+  if (SYSTEM_PROMPT_ON_CHAT_AND_MESSAGES.has(channelType)) {
+    return 'chatAndMessages'
+  }
+  return undefined
 }
 
 // ============================================================================

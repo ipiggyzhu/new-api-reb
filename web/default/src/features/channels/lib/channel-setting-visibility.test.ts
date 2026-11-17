@@ -34,10 +34,13 @@ import {
   getChannelSettingsOverview,
   getInactiveSettingNotice,
   getModelDetectionNotice,
+  getSystemPromptScope,
   isRequestFieldForwarded,
+  showRewritingSubHeadings,
   summarizeAdvancedSettings,
   type ChannelSettingKey,
   type ChannelSettingValues,
+  type ChannelSettingView,
   type ChannelSettingsCardId,
 } from './channel-setting-visibility'
 
@@ -569,6 +572,87 @@ describe('notice around model detection on a type it is not offered for', () => 
     assert.equal(overview.settings.upstream_model_detection.state, 'inactive')
     assert.equal(overview.settings.upstream_model_detection.isSet, true)
     assert.equal(overview.inactiveCount, 1)
+  })
+})
+
+describe('system prompt scope', () => {
+  test('Anthropic and AWS Bedrock apply it to Messages requests only', () => {
+    assert.equal(getSystemPromptScope(14), 'messages')
+    assert.equal(getSystemPromptScope(33), 'messages')
+  })
+
+  test('Codex applies it to Responses requests', () => {
+    assert.equal(getSystemPromptScope(57), 'responses')
+  })
+
+  test('the OpenAI-adaptor chat types apply it to chat and Messages requests', () => {
+    for (const type of [1, 3, 6, 7, 8, 9, 10, 12, 13, 19, 20, 22, 31, 47]) {
+      assert.equal(getSystemPromptScope(type), 'chatAndMessages', `${type}`)
+    }
+  })
+
+  test('every other type has no line', () => {
+    const withScope = new Set([
+      1, 3, 6, 7, 8, 9, 10, 12, 13, 14, 19, 20, 22, 31, 33, 47, 57,
+    ])
+    for (let type = 0; type <= 60; type++) {
+      if (withScope.has(type)) continue
+      assert.equal(getSystemPromptScope(type), undefined, `type ${type}`)
+    }
+    // Among them: Ali, Gemini, Vertex AI, Jimeng, the task platforms that
+    // share the OpenAI API type, and advanced custom.
+    for (const type of [17, 24, 41, 51, 2, 50, 58]) {
+      assert.equal(getSystemPromptScope(type), undefined, `type ${type}`)
+    }
+  })
+
+  test('a type has a line only if it uses the system prompt at all', () => {
+    for (let type = 0; type <= 60; type++) {
+      if (getSystemPromptScope(type) === undefined) continue
+      assert.equal(
+        getChannelSettingState('system_prompt', type, '', ''),
+        'applicable',
+        `type ${type}`
+      )
+    }
+  })
+})
+
+describe('sub-headings of the rewriting card', () => {
+  const settingsOf = (type: number, values: ChannelSettingValues = {}) =>
+    getChannelSettingsOverview(type, values, values).settings
+
+  test('are shown when both halves have a row', () => {
+    for (const type of [1, 8, 17, 24, 41, 51]) {
+      assert.equal(showRewritingSubHeadings(settingsOf(type)), true, `${type}`)
+    }
+    // A response option that is set on a type that does not use it is a row.
+    assert.equal(
+      showRewritingSubHeadings(settingsOf(14, { thinking_to_content: true })),
+      true
+    )
+  })
+
+  test('are left out when only the request half has rows', () => {
+    for (const type of [14, 33, 57]) {
+      assert.equal(showRewritingSubHeadings(settingsOf(type)), false, `${type}`)
+    }
+  })
+
+  test('are left out when only the response half has rows', () => {
+    const settings = settingsOf(1)
+    const hidden: ChannelSettingView = {
+      state: 'hidden',
+      isSet: false,
+      clearedOnSave: false,
+    }
+    const responseOnly = { ...settings }
+    for (const key of Object.keys(settings) as ChannelSettingKey[]) {
+      if (key !== 'force_format' && key !== 'thinking_to_content') {
+        responseOnly[key] = hidden
+      }
+    }
+    assert.equal(showRewritingSubHeadings(responseOnly), false)
   })
 })
 

@@ -358,6 +358,77 @@ describe('options follow the channel type', () => {
   })
 })
 
+describe('texts of the rewriting card', () => {
+  const SCOPE = 'On this channel type it is applied to'
+  const scopeByType: [number, string | undefined][] = [
+    [14, `${SCOPE} /v1/messages requests only.`],
+    [33, `${SCOPE} /v1/messages requests only.`],
+    [57, `${SCOPE} /v1/responses requests.`],
+    [
+      1,
+      `${SCOPE} /v1/chat/completions and /v1/messages requests; /v1/responses requests are sent without it.`,
+    ],
+    [
+      8,
+      `${SCOPE} /v1/chat/completions and /v1/messages requests; /v1/responses requests are sent without it.`,
+    ],
+    [24, undefined],
+    [17, undefined],
+  ]
+  for (const [type, hint] of scopeByType) {
+    test(`type ${type}: ${hint ?? 'no line about where the system prompt applies'}`, async () => {
+      const html = await renderSections(storedChannel(type))
+      assert.equal(count(html, SCOPE), hint ? 1 : 0)
+      if (!hint) return
+      // One muted line, right under the description of the System Prompt.
+      const card = cardMarkup(html, 'requestRewriting')
+      const description =
+        'Used as the system prompt when a request has none.</p>'
+      const after = card.slice(card.indexOf(description) + description.length)
+      assert.ok(card.includes(description))
+      assert.ok(
+        after.startsWith(
+          `<p class="text-muted-foreground text-sm">${hint}</p>`
+        ),
+        after.slice(0, 200)
+      )
+    })
+  }
+
+  test('a system prompt left on a type that never applies it gets no such line', async () => {
+    const html = await renderSections(
+      storedChannel(37, { system_prompt: 'Answer briefly.' })
+    )
+    assert.ok(html.includes('Answer briefly.'))
+    assert.ok(!html.includes(SCOPE))
+  })
+
+  test('Force Format says what it does, without "OpenAI channel only"', async () => {
+    const card = cardMarkup(
+      await renderSections(storedChannel(8)),
+      'requestRewriting'
+    )
+    assert.ok(
+      card.includes(
+        'Re-serialise Chat Completions answers into the standard OpenAI format. Turn it on when an upstream returns non-standard fields that break clients.'
+      )
+    )
+    assert.ok(!card.includes('OpenAI channel only'))
+  })
+
+  test('Pass Through Body lists everything it switches off', async () => {
+    const card = cardMarkup(
+      await renderSections(storedChannel(14)),
+      'requestRewriting'
+    )
+    assert.ok(
+      card.includes(
+        'Forward the client&#x27;s request body as received. While this is on, the system prompt, field filtering, tool-result image handling and parameter overrides are skipped, and model mapping does not rewrite the model name in the body.'
+      )
+    )
+  })
+})
+
 describe('request fields forwarded upstream', () => {
   const rowsByType: [number, string[]][] = [
     [
@@ -590,7 +661,7 @@ describe('cards', () => {
     assert.equal(outlined('requestRewriting'), false)
   })
 
-  test('the Response heading goes when no response option is shown', async () => {
+  test('both sub-headings go when no response option is shown', async () => {
     const form = transformChannelToFormDefaults(storedChannel(1))
     const settings = getChannelSettingsOverview(1, form, form).settings
     const render = (hideResponseOptions: boolean) =>
@@ -600,6 +671,7 @@ describe('cards', () => {
           id='card-request-rewriting'
           configured={false}
           sensitiveLocked={false}
+          channelType={1}
           settings={
             hideResponseOptions
               ? {
@@ -619,10 +691,37 @@ describe('cards', () => {
           }
         />
       )
-    assert.ok((await render(false)).includes('>Response</h4>'))
+    const both = await render(false)
+    assert.equal(count(both, '>Request</h4>'), 1)
+    assert.equal(count(both, '>Response</h4>'), 1)
+    assert.ok(both.indexOf('>Request</h4>') < both.indexOf('>Response</h4>'))
+
+    // A single half is not labelled; its rows are still there.
     const html = await render(true)
     assert.ok(!html.includes('>Response</h4>'))
-    assert.ok(html.includes('>Request</h4>'))
+    assert.ok(!html.includes('>Request</h4>'))
+    assert.ok(!html.includes('<h4'))
+    assert.ok(html.includes('Pass Through Body'))
+    assert.ok(html.includes('>System Prompt</label>'))
+    assert.ok(html.includes('Request fields forwarded upstream'))
+  })
+
+  test('an Anthropic channel has request rows only, so no sub-headings', async () => {
+    const card = cardMarkup(
+      await renderSections(storedChannel(14)),
+      'requestRewriting'
+    )
+    assert.ok(!card.includes('<h4'))
+    assert.ok(card.includes('Pass Through Body'))
+    assert.ok(card.includes('Append ?beta=true to Messages requests'))
+
+    // A response option still set there brings both sub-headings back.
+    const stillOn = cardMarkup(
+      await renderSections(storedChannel(14, { thinking_to_content: true })),
+      'requestRewriting'
+    )
+    assert.equal(count(stillOn, '>Request</h4>'), 1)
+    assert.equal(count(stillOn, '>Response</h4>'), 1)
   })
 
   test('without the sensitive-write permission the cards are locked under one notice', async () => {

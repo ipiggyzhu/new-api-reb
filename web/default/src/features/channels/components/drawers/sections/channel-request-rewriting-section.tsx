@@ -34,8 +34,11 @@ import { Textarea } from '@/components/ui/textarea'
 import type { ChannelFormValues } from '../../../lib/channel-form'
 import {
   CHANNEL_REWRITING_OPTIONS,
+  getSystemPromptScope,
   hasVisibleChannelSetting,
+  showRewritingSubHeadings,
   type ChannelSettingViews,
+  type SystemPromptScope,
 } from '../../../lib/channel-setting-visibility'
 import { ChannelForwardedFields } from './channel-forwarded-fields'
 import { SubHeading } from './channel-section-heading'
@@ -46,6 +49,7 @@ type ChannelRequestRewritingSectionProps = {
   id: string
   configured: boolean
   sensitiveLocked: boolean
+  channelType: number
   settings: ChannelSettingViews
 }
 
@@ -55,9 +59,22 @@ export function ChannelRequestRewritingSection(
   const { t } = useTranslation()
   const form = useFormContext<ChannelFormValues>()
   const settings = props.settings
+  const subHeadings = showRewritingSubHeadings(settings)
   const systemPromptReason = t(
     'No request path on this channel type applies a channel system prompt.'
   )
+  const systemPromptScope = getSystemPromptScope(props.channelType)
+  const systemPromptScopeHints: Record<SystemPromptScope, string> = {
+    messages: t(
+      'On this channel type it is applied to /v1/messages requests only.'
+    ),
+    responses: t(
+      'On this channel type it is applied to /v1/responses requests.'
+    ),
+    chatAndMessages: t(
+      'On this channel type it is applied to /v1/chat/completions and /v1/messages requests; /v1/responses requests are sent without it.'
+    ),
+  }
 
   return (
     <ChannelSettingsCard
@@ -76,7 +93,7 @@ export function ChannelRequestRewritingSection(
         CHANNEL_REWRITING_OPTIONS.request
       ) && (
         <div className='space-y-4'>
-          <SubHeading title={t('Request')} />
+          {subHeadings && <SubHeading title={t('Request')} />}
 
           {settings.pass_through_body_enabled.state !== 'hidden' && (
             <div className='divide-border space-y-0 divide-y border-y'>
@@ -90,7 +107,7 @@ export function ChannelRequestRewritingSection(
                         <FormLabel>{t('Pass Through Body')}</FormLabel>
                         <FormDescription>
                           {t(
-                            "Forward the client's request body as received. System prompt, field filtering and tool-result image handling are skipped while this is on."
+                            "Forward the client's request body as received. While this is on, the system prompt, field filtering, tool-result image handling and parameter overrides are skipped, and model mapping does not rewrite the model name in the body."
                           )}
                         </FormDescription>
                       </div>
@@ -130,6 +147,11 @@ export function ChannelRequestRewritingSection(
                   <FormDescription>
                     {t('Used as the system prompt when a request has none.')}
                   </FormDescription>
+                  {systemPromptScope && (
+                    <p className='text-muted-foreground text-sm'>
+                      {systemPromptScopeHints[systemPromptScope]}
+                    </p>
+                  )}
                   <FormMessage />
                 </FormItem>
               )}
@@ -210,7 +232,7 @@ export function ChannelRequestRewritingSection(
         CHANNEL_REWRITING_OPTIONS.response
       ) && (
         <div className='space-y-4 pt-2'>
-          <SubHeading title={t('Response')} />
+          {subHeadings && <SubHeading title={t('Response')} />}
 
           <div className='divide-border space-y-0 divide-y border-y'>
             <ChannelSettingRow
@@ -228,7 +250,7 @@ export function ChannelRequestRewritingSection(
                       <FormLabel>{t('Force Format')}</FormLabel>
                       <FormDescription>
                         {t(
-                          'Force format response to OpenAI standard (OpenAI channel only)'
+                          'Re-serialise Chat Completions answers into the standard OpenAI format. Turn it on when an upstream returns non-standard fields that break clients.'
                         )}
                       </FormDescription>
                     </div>

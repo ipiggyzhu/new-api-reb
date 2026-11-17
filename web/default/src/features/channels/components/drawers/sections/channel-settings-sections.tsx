@@ -105,6 +105,7 @@ export function ChannelSettingsSections(props: ChannelSettingsSectionsProps) {
           id={props.sectionIds.requestRewriting}
           configured={cards.requestRewriting.configured}
           sensitiveLocked={props.sensitiveLocked}
+          channelType={channelType}
           settings={overview.settings}
         />
       )}
