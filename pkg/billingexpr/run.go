@@ -59,6 +59,7 @@ func runProgram(prog *vm.Program, params TokenParams, request RequestInput) (flo
 		"cr":   params.CR,
 		"cc":   params.CC,
 		"cc1h": params.CC1h,
+		"cc12h": float64(0),
 		"img":  params.Img,
 		"img_o": params.ImgO,
 		"ai":   params.AI,
