@@ -52,6 +52,7 @@
     "Used as the system prompt when a request has none.": "リクエストにシステムプロンプトがない場合に使用されます。",
     "What the gateway changes before forwarding a request and before returning the answer.": "リクエストの転送前と応答の返却前に、ゲートウェイが変更する内容。",
     "Which client the upstream sees when the gateway calls it.": "ゲートウェイからのリクエストが、アップストリームにどのクライアントとして見えるか。",
+    "With a Codex version selected, Chat Completions and Messages requests are converted to Responses before they are sent, because that client only calls /v1/responses.": "Codex のバージョンを選択すると、Chat Completions と Messages のリクエストは送信前に Responses に変換されます。このクライアントは /v1/responses しか呼び出さないためです。",
     "{{count}} not used by this channel type": "{{count}} 件はこのチャネルタイプでは使用されません",
     "，": "、",
     ", and": "、および",

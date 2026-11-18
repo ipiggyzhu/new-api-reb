@@ -52,6 +52,7 @@
     "Used as the system prompt when a request has none.": "Used as the system prompt when a request has none.",
     "What the gateway changes before forwarding a request and before returning the answer.": "What the gateway changes before forwarding a request and before returning the answer.",
     "Which client the upstream sees when the gateway calls it.": "Which client the upstream sees when the gateway calls it.",
+    "With a Codex version selected, Chat Completions and Messages requests are converted to Responses before they are sent, because that client only calls /v1/responses.": "With a Codex version selected, Chat Completions and Messages requests are converted to Responses before they are sent, because that client only calls /v1/responses.",
     "{{count}} not used by this channel type": "{{count}} not used by this channel type",
     "，": ", ",
     ", and": ", and",

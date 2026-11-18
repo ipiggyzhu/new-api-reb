@@ -19,6 +19,27 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// chatCompletionsUseResponses reports whether a Chat Completions request on
+// this channel is sent upstream as a Responses request: when the global policy
+// says so, and on a channel that presents itself as a specific Codex CLI
+// version. That client only ever speaks /v1/responses, so forwarding the chat
+// request as it came would carry the Codex headers on an endpoint the client
+// never calls, with a body the profile cannot shape; upstreams answer that
+// with "Invalid URL", "only allows Codex official clients", or a complaint
+// about a Responses-only header.
+func chatCompletionsUseResponses(info *relaycommon.RelayInfo) bool {
+	if service.ShouldChatCompletionsUseResponsesGlobal(info.ChannelId, info.ChannelType, info.OriginModelName) {
+		return true
+	}
+	if info.ApiType != constant.APITypeOpenAI && info.ApiType != constant.APITypeCodex {
+		return false
+	}
+	settings := info.ChannelSetting
+	settings.Normalize(info.ApiType)
+	return settings.SyntheticClientHeadersProfile == constant.ClientHeaderFamilyCodex &&
+		(strings.TrimSpace(settings.CLIVersionProfile) != "" || settings.KeyEnvironments)
+}
+
 func applySystemPromptIfNeeded(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) {
 	if info == nil || request == nil {
 		return

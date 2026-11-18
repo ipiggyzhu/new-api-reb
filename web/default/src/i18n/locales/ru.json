@@ -52,6 +52,7 @@
     "Used as the system prompt when a request has none.": "Используется как системное приглашение, если в запросе его нет.",
     "What the gateway changes before forwarding a request and before returning the answer.": "Что шлюз изменяет перед пересылкой запроса и перед возвратом ответа.",
     "Which client the upstream sees when the gateway calls it.": "Каким клиентом шлюз выглядит для провайдера при обращении к нему.",
+    "With a Codex version selected, Chat Completions and Messages requests are converted to Responses before they are sent, because that client only calls /v1/responses.": "Если выбрана версия Codex, запросы Chat Completions и Messages перед отправкой преобразуются в Responses, потому что этот клиент обращается только к /v1/responses.",
     "{{count}} not used by this channel type": "не используется этим типом канала: {{count}}",
     "，": ", ",
     ", and": ", и",

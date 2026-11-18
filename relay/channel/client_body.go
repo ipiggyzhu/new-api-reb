@@ -832,6 +832,20 @@ func shapeCodexBody(body cliObject, identity cliIdentity, version *service.CLIVe
 			body[key] = value
 		}
 	}
+	// A client version that sends X-OpenAI-Internal-Codex-Responses-Lite always
+	// sends reasoning.context "all_turns" with it, and the upstream rejects the
+	// header without it. A caller that is not that client (a converted Chat
+	// Completions request, another SDK) leaves the field out; the caller's
+	// effort is kept.
+	if version != nil && version.Headers["x-openai-internal-codex-responses-lite"] != "" {
+		var reasoning cliObject
+		_ = common.Unmarshal(body["reasoning"], &reasoning)
+		if reasoning == nil {
+			reasoning = cliObject{}
+		}
+		reasoning["context"] = json.RawMessage(`"all_turns"`)
+		body["reasoning"] = cliField(reasoning)
+	}
 	// service_tier=priority is a paid routing choice, not a structural default.
 	// Keep explicit tier, max_output_tokens, and reasoning settings unchanged.
 	// Cache policy belongs to the profile: Codex sends only the session's

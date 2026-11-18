@@ -55,6 +55,10 @@ export function ChannelClientIdentitySection(
 ) {
   const { t } = useTranslation()
   const form = useFormContext<ChannelFormValues>()
+  const cliVersionProfile = form.watch('cli_version_profile')
+  const keyEnvironments = form.watch('key_environments')
+  const codexVersionPinned =
+    Boolean(cliVersionProfile?.trim()) || keyEnvironments === true
 
   return (
     <ChannelSettingsCard
@@ -150,7 +154,15 @@ export function ChannelClientIdentitySection(
                   'Choose the client type first, then its version below. Changing the client type resets the version and any legacy TLS override; device/session identities and requested reasoning effort stay unchanged.'
                 )}
               </FormDescription>
-              {(field.value === 'claude' || field.value === 'codex') && (
+              {field.value === 'codex' && codexVersionPinned && (
+                <p className='text-muted-foreground mt-2 text-xs'>
+                  {t(
+                    'With a Codex version selected, Chat Completions and Messages requests are converted to Responses before they are sent, because that client only calls /v1/responses.'
+                  )}
+                </p>
+              )}
+              {(field.value === 'claude' ||
+                (field.value === 'codex' && !codexVersionPinned)) && (
                 <p className='text-warning mt-2 text-xs'>
                   {t(
                     'Body alignment requires the upstream {{endpoint}} protocol. Selecting a client profile does not switch endpoints: requests using other protocols only receive the selected headers. Configure a protocol converter separately if needed.',

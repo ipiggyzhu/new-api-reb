@@ -52,6 +52,7 @@
     "Used as the system prompt when a request has none.": "請求沒有系統提示詞時，使用這裡的內容。",
     "What the gateway changes before forwarding a request and before returning the answer.": "閘道在轉發請求前、返回結果前會改動什麼。",
     "Which client the upstream sees when the gateway calls it.": "閘道請求上游時，上游看到的是哪種用戶端。",
+    "With a Codex version selected, Chat Completions and Messages requests are converted to Responses before they are sent, because that client only calls /v1/responses.": "選定 Codex 版本後，Chat Completions 和 Messages 請求會先轉換成 Responses 再傳送，因為這個用戶端只呼叫 /v1/responses。",
     "{{count}} not used by this channel type": "{{count}} 項對此渠道類型無效",
     "，": "，",
     ", and": "，和",

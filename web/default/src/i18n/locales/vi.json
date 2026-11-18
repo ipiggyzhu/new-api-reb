@@ -52,6 +52,7 @@
     "Used as the system prompt when a request has none.": "Được dùng làm lời nhắc hệ thống khi yêu cầu không có.",
     "What the gateway changes before forwarding a request and before returning the answer.": "Những gì cổng thay đổi trước khi chuyển tiếp yêu cầu và trước khi trả về kết quả.",
     "Which client the upstream sees when the gateway calls it.": "Nguồn nhìn thấy ứng dụng khách nào khi cổng gọi tới nó.",
+    "With a Codex version selected, Chat Completions and Messages requests are converted to Responses before they are sent, because that client only calls /v1/responses.": "Khi đã chọn phiên bản Codex, các yêu cầu Chat Completions và Messages được chuyển thành Responses trước khi gửi, vì ứng dụng khách này chỉ gọi /v1/responses.",
     "{{count}} not used by this channel type": "{{count}} mục không được loại kênh này sử dụng",
     "，": ", ",
     ", and": ", và",

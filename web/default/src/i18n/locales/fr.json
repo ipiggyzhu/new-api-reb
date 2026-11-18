@@ -52,6 +52,7 @@
     "Used as the system prompt when a request has none.": "Utilisée comme invite système lorsqu'une requête n'en contient pas.",
     "What the gateway changes before forwarding a request and before returning the answer.": "Ce que la passerelle modifie avant de transmettre une requête et avant de renvoyer la réponse.",
     "Which client the upstream sees when the gateway calls it.": "Le client que le service amont voit lorsque la passerelle l'appelle.",
+    "With a Codex version selected, Chat Completions and Messages requests are converted to Responses before they are sent, because that client only calls /v1/responses.": "Lorsqu'une version de Codex est sélectionnée, les requêtes Chat Completions et Messages sont converties en Responses avant l'envoi, car ce client n'appelle que /v1/responses.",
     "{{count}} not used by this channel type": "{{count}} non utilisé(s) par ce type de canal",
     "，": ", ",
     ", and": ", et",
