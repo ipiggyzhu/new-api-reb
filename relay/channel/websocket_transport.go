@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/QuantumNous/new-api/pkg/privacy"
 	"io"
 	"net"
 	"net/http"
@@ -546,6 +547,10 @@ type WebsocketAttempt struct {
 // Callers gate on ShouldTryResponsesWebsocket first, then fall back to
 // DoApiRequest with attempt.FallbackBody whenever Response is nil.
 func TryResponsesWebsocket(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*WebsocketAttempt, error) {
+	requestBody, privacyErr := privacy.ProtectReader(c, requestBody)
+	if privacyErr != nil {
+		return nil, types.NewError(privacyErr, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+	}
 	httpURL, err := a.GetRequestURL(info)
 	if err != nil {
 		return nil, fmt.Errorf("get request url failed: %w", err)
@@ -594,6 +599,10 @@ func TryResponsesWebsocket(a Adaptor, c *gin.Context, info *common.RelayInfo, re
 	}
 	stripHTTPOnlyHandshakeHeaders(header)
 	applyResponsesWebsocketBetaHeader(header)
+	privacy.ProtectHeaders(c, header)
+	if err := privacy.CheckOutboundJSON(c, body); err != nil {
+		return nil, types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+	}
 
 	// Bound to the caller's context so a client disconnect mid-handshake tears the
 	// dial down instead of holding it to the handshake timeout.

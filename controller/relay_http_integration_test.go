@@ -67,7 +67,7 @@ func setupRelayHTTPTest(t *testing.T, upstream http.Handler, retries, concurrenc
 		defer common.CleanupBodyStorage(c)
 		c.Set(common.RequestIdKey, c.GetHeader("X-Request-ID"))
 		c.Next()
-	}, middleware.TokenAuth(), middleware.ModelRequestRateLimit())
+	}, middleware.TokenAuth(), middleware.PromptPrivacy(), middleware.ModelRequestRateLimit())
 	router.POST("/v1/chat/completions", middleware.Distribute(), func(c *gin.Context) { Relay(c, types.RelayFormatOpenAI) })
 	router.POST("/suno/submit/:action", middleware.Distribute(), RelayTask)
 	server := httptest.NewServer(router)

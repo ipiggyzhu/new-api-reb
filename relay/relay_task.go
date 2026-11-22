@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/privacy"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/task/taskcommon"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -240,6 +241,10 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	}
 
 	// 9. 发送请求
+	requestBody, privacyErr := privacy.ProtectReader(c, requestBody)
+	if privacyErr != nil {
+		return nil, service.TaskErrorWrapperLocal(privacyErr, "privacy_protection_failed", http.StatusBadRequest)
+	}
 	resp, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
 		taskErr := service.TaskErrorWrapper(err, "do_request_failed", http.StatusInternalServerError)

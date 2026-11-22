@@ -3,6 +3,7 @@ package aws
 import (
 	"context"
 	"fmt"
+	"github.com/QuantumNous/new-api/pkg/privacy"
 	"io"
 	"net/http"
 	"strings"
@@ -137,7 +138,10 @@ func doAwsClientRequest(c *gin.Context, info *relaycommon.RelayInfo, a *Adaptor,
 		if err != nil {
 			return nil, types.NewError(errors.Wrap(err, "marshal nova request"), types.ErrorCodeBadResponseBody)
 		}
-		awsReq.Body = reqBody
+		awsReq.Body, err = privacy.ProtectOutboundJSON(c, reqBody)
+		if err != nil {
+			return nil, types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
 		a.AwsReq = awsReq
 		return nil, nil
 	} else {
@@ -193,9 +197,17 @@ func buildAwsRequestBody(c *gin.Context, info *relaycommon.RelayInfo, awsClaudeR
 		}
 		delete(data, "model")
 		delete(data, "stream")
-		return common.Marshal(data)
+		payload, err := common.Marshal(data)
+		if err != nil {
+			return nil, err
+		}
+		return privacy.ProtectOutboundJSON(c, payload)
 	}
-	return common.Marshal(awsClaudeReq)
+	payload, err := common.Marshal(awsClaudeReq)
+	if err != nil {
+		return nil, err
+	}
+	return privacy.ProtectOutboundJSON(c, payload)
 }
 
 func getAwsRegionPrefix(awsRegionId string) string {

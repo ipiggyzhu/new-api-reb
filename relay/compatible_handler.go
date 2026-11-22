@@ -10,6 +10,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/pkg/privacy"
 	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -174,6 +175,10 @@ func buildUpstreamRequestBody(c *gin.Context, info *relaycommon.RelayInfo, jsonD
 		if err != nil {
 			return nil, nil, newAPIErrorFromParamOverride(err)
 		}
+	}
+	jsonData, err = privacy.ProtectOutboundJSON(c, jsonData)
+	if err != nil {
+		return nil, nil, types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}
 	logger.LogDebug(c, "%s: %s", debugLabel, jsonData)
 	body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)

@@ -1,9 +1,11 @@
 package channel
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"github.com/QuantumNous/new-api/pkg/privacy"
 	"io"
 	"net/http"
 	"net/url"
@@ -450,6 +452,10 @@ func applyHeaderOverrideToRequest(req *http.Request, headerOverride map[string]s
 }
 
 func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
+	requestBody, privacyErr := privacy.ProtectReader(c, requestBody)
+	if privacyErr != nil {
+		return nil, types.NewError(privacyErr, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+	}
 	fullRequestURL, err := a.GetRequestURL(info)
 	if err != nil {
 		return nil, fmt.Errorf("get request url failed: %w", err)
@@ -509,6 +515,10 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 }
 
 func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
+	requestBody, privacyErr := privacy.ProtectReader(c, requestBody)
+	if privacyErr != nil {
+		return nil, types.NewError(privacyErr, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+	}
 	fullRequestURL, err := a.GetRequestURL(info)
 	if err != nil {
 		return nil, fmt.Errorf("get request url failed: %w", err)
@@ -677,6 +687,28 @@ func DoRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	return doRequest(c, req, info)
 }
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
+	if session := privacy.FromContext(c); session != nil {
+		privacy.ProtectHeaders(c, req.Header)
+		if req.GetBody == nil {
+			return nil, types.NewError(fmt.Errorf("privacy requires a replayable request"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
+		copyBody, err := req.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		data, err := io.ReadAll(io.LimitReader(copyBody, privacy.OutboundLimit+1))
+		_ = copyBody.Close()
+		if err != nil || len(data) > privacy.OutboundLimit && !session.BestEffort {
+			return nil, types.NewError(privacy.ErrLimit, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
+		// A larger body under the site-wide switch was sent on unread by
+		// privacy.ProtectReader; there is nothing to verify in it.
+		if len(data) <= privacy.OutboundLimit {
+			if err := privacy.CheckOutboundJSON(c, data); err != nil {
+				return nil, types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+			}
+		}
+	}
 	var client *http.Client
 	var err error
 	settings := info.ChannelSetting
@@ -762,6 +794,10 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 }
 
 func DoTaskApiRequest(a TaskAdaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {
+	requestBody, privacyErr := privacy.ProtectReader(c, requestBody)
+	if privacyErr != nil {
+		return nil, types.NewError(privacyErr, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+	}
 	fullRequestURL, err := a.BuildRequestURL(info)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
@@ -771,8 +807,16 @@ func DoTaskApiRequest(a TaskAdaptor, c *gin.Context, info *common.RelayInfo, req
 		return nil, types.NewError(fmt.Errorf("new request failed: %w", err), types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
 	}
 	applyUpstreamContentLength(req, info)
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(requestBody), nil
+	if privacy.FromContext(c) != nil {
+		data, err := io.ReadAll(requestBody)
+		if err != nil {
+			return nil, types.NewError(fmt.Errorf("read protected task body failed"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
+		requestBody = bytes.NewReader(data)
+		req.Body = io.NopCloser(requestBody)
+		req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(data)), nil }
+	} else {
+		req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(requestBody), nil }
 	}
 
 	err = a.BuildRequestHeader(c, req, info)
