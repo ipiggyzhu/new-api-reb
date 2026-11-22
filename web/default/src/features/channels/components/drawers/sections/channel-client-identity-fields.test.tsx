@@ -109,6 +109,16 @@ describe('single version/TLS selection', () => {
       assert.ok(!html.includes('Effective TLS'))
     })
   }
+  // The dropdown lists 1h versions only where one is already in use, so the
+  // saved choice must not turn into a blank selector.
+  test('a channel saved on a 1h version keeps showing it', async () => {
+    const html = await renderIdentity({
+      synthetic_client_headers_profile: 'claude',
+      cli_version_profile: 'claude-test-1h',
+    })
+    assert.ok(html.includes('Claude 1h version'))
+    assert.ok(html.includes('JA3: claude-ja3'))
+  })
   test('a saved mixed-family TLS override is visible even when identity overrides are off', async () => {
     const html = await renderIdentity({
       synthetic_client_headers_profile: 'claude',
@@ -153,17 +163,16 @@ describe('independent key environment fields', () => {
     assert.ok(!html.includes('A saved legacy TLS override is still active'))
   })
 
-  test('Claude counts only the versions captured in the chosen cache mode', async () => {
+  test('Claude counts each version once and offers no cache mode', async () => {
     const html = await renderIdentity(
       {
         type: 14,
         synthetic_client_headers_profile: 'claude',
         key_environments: true,
-        key_environment_cache_ttl: '1h',
       },
       { multiKey: true, keyCount: 3 }
     )
-    assert.ok(html.includes('Cache mode'))
+    assert.ok(!html.includes('Cache mode'))
     assert.ok(
       html.includes(
         'Assignable real versions: 1 (2.1.306) | Keys in this channel: 3'

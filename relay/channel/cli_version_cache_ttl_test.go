@@ -52,8 +52,9 @@ func cliTLSUpstream(t *testing.T) (*httptest.Server, chan cliWireCapture) {
 
 // A converted (non-native) request is laid out by the selected profile: the
 // same request gets the capture's breakpoint positions under both 2.1.306
-// profiles, and only the cache mode differs — every breakpoint's TTL in the
-// body and the extended-cache-ttl beta flag in the headers, together.
+// profiles. The client sent no breakpoints, so the cache mode is the
+// profile's — every breakpoint's TTL in the body and the extended-cache-ttl
+// beta flag in the headers, together.
 func TestClaudeVersionProfileTTLModeShapesConvertedRequest(t *testing.T) {
 	server, captures := cliTLSUpstream(t)
 	cases := []struct {
@@ -64,7 +65,7 @@ func TestClaudeVersionProfileTTLModeShapesConvertedRequest(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.profile, func(t *testing.T) {
-			converted, _, c, info := convertAndShapeOpenAIRequest(t, "claude", withClientCache.Replace(oddlyCachedOpenAIRequest))
+			converted, _, c, info := convertAndShapeOpenAIRequest(t, "claude", withoutClientCache.Replace(oddlyCachedOpenAIRequest))
 			info.ChannelSetting.CLIVersionProfile = tc.profile
 			resp, err := DoApiRequest(cliTransportAdaptor{url: server.URL + "/v1/messages"}, c, info, strings.NewReader(string(converted)))
 			require.NoError(t, err)
@@ -92,8 +93,9 @@ func TestClaudeVersionProfileTTLModeShapesConvertedRequest(t *testing.T) {
 	}
 }
 
-// A native CLI uses the selected profile's cache layout and TTL, just like a
-// converted request. Caller breakpoints cannot bypass the profile.
+// A native CLI uses the selected profile's cache layout, just like a converted
+// request. Caller breakpoints cannot move it; here they ask for the same 1h
+// the profile would place for a caller that sent none.
 func TestClaudeVersionProfileTTLModeOwnsNativeClaudeCodeBreakpoints(t *testing.T) {
 	const profile = "claude-2.1.306-linux-x64-1h"
 	c, info := nativeClaudeCodeRequest()
@@ -108,7 +110,7 @@ func TestClaudeVersionProfileTTLModeOwnsNativeClaudeCodeBreakpoints(t *testing.T
 	assertProfileBillingLeads(t, "2.1.306", string(sent), shaped)
 	assert.JSONEq(t, string(shaped),
 		string(shapeClaudeMessagesBody(t, c, info, []byte(withoutClientCache.Replace(strings.Replace(claudeCodeCachedRequest, "@extra", "", 1))))),
-		"the same history receives the same profile shape regardless of caller breakpoints")
+		"the same history receives the same profile layout regardless of caller breakpoints")
 	assert.False(t, gjson.GetBytes(shaped, "messages.0.content.0.cache_control").Exists())
 	assert.Equal(t, "file body", gjson.GetBytes(shaped, "messages.2.content.0.content.0.text").String())
 	assert.Equal(t, "Bash", gjson.GetBytes(shaped, "tools.0.name").String(), "caller breakpoints cannot pin tool order")
@@ -125,41 +127,40 @@ func TestClaudeVersionProfileTTLModeOwnsNativeClaudeCodeBreakpoints(t *testing.T
 	}
 }
 
-// The channel-wide TTL choice controls native and converted requests alike.
-func TestClaudeVersionProfileTTLModeControlsNativeRequests(t *testing.T) {
+// The caller's own breakpoints decide the TTL under either profile: 1h as
+// soon as one of them asks for it, the default otherwise. The profile still
+// places them, and the beta flag follows the body.
+func TestClaudeCallerBreakpointsDecideTTLUnderEitherProfile(t *testing.T) {
 	server, captures := cliTLSUpstream(t)
-	bodies := map[string]string{
-		"client sends 1h and 5m": withClientCache.Replace(strings.Replace(claudeCodeCachedRequest, "@extra", "", 1)),
-		"client sends only 5m": strings.NewReplacer("@ttl1h", `,"cache_control":{"type":"ephemeral"}`, "@ttl5m", `,"cache_control":{"type":"ephemeral"}`).
-			Replace(strings.Replace(claudeCodeCachedRequest, "@extra", "", 1)),
+	cases := []struct {
+		name, body, want string
+	}{
+		{"client sends 1h and 5m", withClientCache.Replace(strings.Replace(claudeCodeCachedRequest, "@extra", "", 1)), "ephemeral 1h"},
+		{"client sends only 5m", strings.NewReplacer("@ttl1h", `,"cache_control":{"type":"ephemeral"}`, "@ttl5m", `,"cache_control":{"type":"ephemeral"}`).
+			Replace(strings.Replace(claudeCodeCachedRequest, "@extra", "", 1)), "ephemeral"},
 	}
-	for name, body := range bodies {
-		t.Run(name, func(t *testing.T) {
-			wire := make(map[string]cliWireCapture)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			beta := claudeCode2306Beta
+			if tc.want == "ephemeral 1h" {
+				beta += ",extended-cache-ttl-2025-04-11"
+			}
 			for _, profile := range []string{"claude-2.1.306-linux-x64", "claude-2.1.306-linux-x64-1h"} {
 				c, info := nativeClaudeCodeRequest()
 				info.ChannelSetting.CLIVersionProfile = profile
-				withOriginalRequest(t, c, body)
-				resp, err := DoApiRequest(cliTransportAdaptor{url: server.URL + "/v1/messages"}, c, info, strings.NewReader(body))
+				withOriginalRequest(t, c, tc.body)
+				resp, err := DoApiRequest(cliTransportAdaptor{url: server.URL + "/v1/messages"}, c, info, strings.NewReader(tc.body))
 				require.NoError(t, err)
 				require.NoError(t, resp.Body.Close())
-				wire[profile] = <-captures
+				got := <-captures
+				assert.Equal(t, beta, got.header.Get("anthropic-beta"), profile)
+				assert.Equal(t, map[string]string{
+					"system.1.cache_control": tc.want, "system.2.cache_control": tc.want,
+					"messages.4.content.0.cache_control": tc.want,
+				}, claudeCacheBreakpoints(t, got.body), profile)
+				assert.Equal(t, gjson.Get(tc.body, "messages.2.content.0.content.0.text").String(),
+					gjson.GetBytes(got.body, "messages.2.content.0.content.0.text").String())
 			}
-			def, hour := wire["claude-2.1.306-linux-x64"], wire["claude-2.1.306-linux-x64-1h"]
-			assert.NotEqual(t, string(def.body), string(hour.body))
-			assert.Equal(t, claudeCode2306Beta, def.header.Get("anthropic-beta"))
-			assert.Equal(t, claudeCode2306Beta+",extended-cache-ttl-2025-04-11", hour.header.Get("anthropic-beta"))
-			assert.Equal(t, map[string]string{
-				"system.1.cache_control": "ephemeral", "system.2.cache_control": "ephemeral",
-				"messages.4.content.0.cache_control": "ephemeral",
-			}, claudeCacheBreakpoints(t, def.body))
-			assert.Equal(t, map[string]string{
-				"system.1.cache_control": "ephemeral 1h", "system.2.cache_control": "ephemeral 1h",
-				"messages.4.content.0.cache_control": "ephemeral 1h",
-			}, claudeCacheBreakpoints(t, hour.body))
-			assert.Equal(t, def.header.Get("X-Claude-Code-Session-Id"), hour.header.Get("X-Claude-Code-Session-Id"))
-			assert.Equal(t, gjson.GetBytes(def.body, "messages.2.content.0.content.0.text").String(),
-				gjson.GetBytes(hour.body, "messages.2.content.0.content.0.text").String())
 		})
 	}
 }

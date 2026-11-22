@@ -95,7 +95,8 @@ func TestClaudeProfileOwnsParamOverrideFields(t *testing.T) {
 }
 
 // Neither caller nor administrator breakpoints can replace the selected
-// profile's placement or channel-wide TTL.
+// profile's placement. A breakpoint an override writes counts like the
+// caller's own when the TTL is chosen.
 func TestClaudeProfileOwnsParamOverrideBreakpoints(t *testing.T) {
 	const request = `{"model":"claude-sonnet-4-5","max_tokens":1024,
 		"system":[{"type":"text","text":"stable"},{"type":"text","text":"dynamic"}],
@@ -105,11 +106,11 @@ func TestClaudeProfileOwnsParamOverrideBreakpoints(t *testing.T) {
 		map[string]any{"path": "system.0.cache_control", "mode": "set", "value": map[string]any{"type": "ephemeral", "ttl": "1h"}}))
 	assert.Len(t, info.ParamOverrideWrites.Breakpoints, 1)
 	assert.Equal(t, map[string]string{
-		"system.1.cache_control": "ephemeral", "system.2.cache_control": "ephemeral",
-		"messages.2.content.0.cache_control": "ephemeral",
+		"system.1.cache_control": "ephemeral 1h", "system.2.cache_control": "ephemeral 1h",
+		"messages.2.content.0.cache_control": "ephemeral 1h",
 	}, claudeCacheBreakpoints(t, shaped))
 	assert.Equal(t, "stable", gjson.GetBytes(shaped, "system.1.text").String())
-	assert.NotContains(t, strings.Split(headers.Get("anthropic-beta"), ","), "extended-cache-ttl-2025-04-11")
+	assert.Contains(t, strings.Split(headers.Get("anthropic-beta"), ","), "extended-cache-ttl-2025-04-11")
 
 	shaped, headers, _ = overrideAndShape(t, "claude", "claude-2.1.306-linux-x64", request, map[string]any{"max_tokens": 512})
 	assert.Equal(t, map[string]string{

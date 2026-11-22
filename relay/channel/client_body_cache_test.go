@@ -101,10 +101,16 @@ var (
 	withoutClientCache = strings.NewReplacer("@ttl1h", "", "@ttl5m", "")
 )
 
+// defaultTTL rewrites a shaped body's 1h breakpoints to the default TTL, to
+// compare the layout of two bodies whose callers asked for different TTLs.
+func defaultTTL(shaped []byte) string {
+	return strings.ReplaceAll(string(shaped), `,"ttl":"1h"`, "")
+}
+
 // Conversion keeps an OpenAI client's cache_control, but under the Claude Code
-// profile it must not decide the upstream body: the result is exactly the body
-// shaped from the same request without any cache_control, i.e. the profile's
-// own breakpoint placement, TTL and tool order.
+// profile it decides only the TTL: apart from that the result is exactly the
+// body shaped from the same request without any cache_control, i.e. the
+// profile's own breakpoint placement and tool order.
 func TestClaudeCLIOwnsCacheBreakpointsOfConvertedRequests(t *testing.T) {
 	converted, shaped, c, info := convertAndShapeOpenAIRequest(t, "claude", withClientCache.Replace(oddlyCachedOpenAIRequest))
 	assert.Equal(t, map[string]string{
@@ -115,12 +121,12 @@ func TestClaudeCLIOwnsCacheBreakpointsOfConvertedRequests(t *testing.T) {
 	}, claudeCacheBreakpoints(t, converted), "conversion passes the client's breakpoints to the shaping layer")
 
 	_, profileShaped, _, _ := convertAndShapeOpenAIRequest(t, "claude", withoutClientCache.Replace(oddlyCachedOpenAIRequest))
-	assert.JSONEq(t, string(profileShaped), string(shaped))
+	assert.JSONEq(t, string(profileShaped), defaultTTL(shaped))
 	assert.Equal(t, map[string]string{
-		"system.0.cache_control":             "ephemeral",
-		"system.1.cache_control":             "ephemeral",
-		"messages.3.content.0.cache_control": "ephemeral",
-	}, claudeCacheBreakpoints(t, shaped))
+		"system.0.cache_control":             "ephemeral 1h",
+		"system.1.cache_control":             "ephemeral 1h",
+		"messages.3.content.0.cache_control": "ephemeral 1h",
+	}, claudeCacheBreakpoints(t, shaped), "the client asked for 1h")
 	assert.Equal(t, "Bash", gjson.GetBytes(shaped, "tools.0.name").String(), "client breakpoints must not pin the tool order")
 	assert.Equal(t, "lookup", gjson.GetBytes(shaped, "tools.1.name").String())
 	assert.JSONEq(t, string(shaped), string(shapeClaudeMessagesBody(t, c, info, shaped)), "a retry must not add or move breakpoints")
@@ -174,12 +180,13 @@ const claudeCodeCachedRequest = `{"model":"claude-sonnet-4-5","max_tokens":32000
 	]}`
 
 // Every sender uses the selected profile's placement, including native CLIs
-// whose User-Agent or legacy identity would previously bypass it.
+// whose User-Agent or legacy identity would previously bypass it. The TTL is
+// the one the sender asked for.
 func TestClaudeCLIKeepsOnlyNativeClaudeCodeBreakpoints(t *testing.T) {
 	profileBreakpoints := map[string]string{
-		"system.0.cache_control":             "ephemeral",
-		"system.1.cache_control":             "ephemeral",
-		"messages.4.content.0.cache_control": "ephemeral",
+		"system.0.cache_control":             "ephemeral 1h",
+		"system.1.cache_control":             "ephemeral 1h",
+		"messages.4.content.0.cache_control": "ephemeral 1h",
 	}
 	cases := []struct {
 		name      string
@@ -209,7 +216,7 @@ func TestClaudeCLIKeepsOnlyNativeClaudeCodeBreakpoints(t *testing.T) {
 			request := strings.Replace(claudeCodeCachedRequest, "@extra", tc.extra, 1)
 			sent := []byte(withClientCache.Replace(request))
 			shaped := shapeClaudeMessagesBody(t, c, info, sent)
-			assert.JSONEq(t, string(shapeClaudeMessagesBody(t, c, info, []byte(withoutClientCache.Replace(request)))), string(shaped))
+			assert.JSONEq(t, string(shapeClaudeMessagesBody(t, c, info, []byte(withoutClientCache.Replace(request)))), defaultTTL(shaped))
 			assert.Equal(t, profileBreakpoints, claudeCacheBreakpoints(t, shaped))
 			assert.False(t, gjson.GetBytes(shaped, "cache_control").Exists(), "automatic caching is a cache policy too")
 			assert.Equal(t, "Bash", gjson.GetBytes(shaped, "tools.0.name").String())
@@ -222,6 +229,7 @@ func TestClaudeCLIKeepsOnlyNativeClaudeCodeBreakpoints(t *testing.T) {
 // A custom-content document's text blocks carry breakpoints as well. A
 // non-native sender's are stripped like any other, so the profile's placement
 // stays the whole cache layout: no fifth breakpoint and no 5m-before-1h order.
+// Only the 1h it asked for carries over.
 func TestClaudeCLIStripsDocumentSourceBreakpoints(t *testing.T) {
 	request := `{"model":"claude-sonnet-4-5","max_tokens":1024,
 		"system":[{"type":"text","text":"a"},{"type":"text","text":"b"}],
@@ -234,11 +242,11 @@ func TestClaudeCLIStripsDocumentSourceBreakpoints(t *testing.T) {
 	info.InitRequestConversionChain()
 
 	shaped := shapeClaudeMessagesBody(t, c, info, []byte(withClientCache.Replace(request)))
-	assert.JSONEq(t, string(shapeClaudeMessagesBody(t, c, info, []byte(withoutClientCache.Replace(request)))), string(shaped))
+	assert.JSONEq(t, string(shapeClaudeMessagesBody(t, c, info, []byte(withoutClientCache.Replace(request)))), defaultTTL(shaped))
 	assert.Equal(t, map[string]string{
-		"system.0.cache_control":             "ephemeral",
-		"system.1.cache_control":             "ephemeral",
-		"messages.0.content.1.cache_control": "ephemeral",
+		"system.0.cache_control":             "ephemeral 1h",
+		"system.1.cache_control":             "ephemeral 1h",
+		"messages.0.content.1.cache_control": "ephemeral 1h",
 	}, claudeCacheBreakpoints(t, shaped))
 	assert.Equal(t, "chapter 2", gjson.GetBytes(shaped, "messages.0.content.0.source.content.1.text").String())
 }

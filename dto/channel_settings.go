@@ -79,10 +79,6 @@ type ChannelSettings struct {
 	// is kept as saved (the rollback target) and replaced per key at request
 	// time.
 	KeyEnvironments bool `json:"key_environments,omitempty"`
-	// KeyEnvironmentCacheTTL picks the cache mode the pool is drawn from: ""
-	// for the default (5m) captures, "1h" for the 1h ones. Codex captures have
-	// no cache mode.
-	KeyEnvironmentCacheTTL string `json:"key_environment_cache_ttl,omitempty"`
 
 	// WebsocketTransport opts this channel's /v1/responses traffic onto the
 	// Responses API WebSocket transport instead of HTTP+SSE.
@@ -153,10 +149,6 @@ func (s *ChannelSettings) Normalize(apiType int) {
 	s.CLIVersionProfile = strings.ToLower(strings.TrimSpace(s.CLIVersionProfile))
 	s.ClientDeviceSeed = strings.TrimSpace(s.ClientDeviceSeed)
 	s.ClientSessionSeed = strings.TrimSpace(s.ClientSessionSeed)
-	s.KeyEnvironmentCacheTTL = strings.ToLower(strings.TrimSpace(s.KeyEnvironmentCacheTTL))
-	if s.KeyEnvironmentCacheTTL == "5m" {
-		s.KeyEnvironmentCacheTTL = ""
-	}
 }
 
 type VertexKeyType string

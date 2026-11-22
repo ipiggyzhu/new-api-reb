@@ -28,7 +28,6 @@ import {
   FormLabel,
   FormMessage,
 } from '@/components/ui/form'
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Switch } from '@/components/ui/switch'
 
 import { getChannelTLSFingerprints } from '../../../api'
@@ -51,14 +50,9 @@ export function ChannelKeyEnvironmentFields(
 ) {
   const { t } = useTranslation()
   const form = useFormContext<ChannelFormValues>()
-  const [family, channelType, enabled, cacheTTL] = useWatch({
+  const [family, channelType, enabled] = useWatch({
     control: form.control,
-    name: [
-      'synthetic_client_headers_profile',
-      'type',
-      'key_environments',
-      'key_environment_cache_ttl',
-    ],
+    name: ['synthetic_client_headers_profile', 'type', 'key_environments'],
   })
   const { data } = useQuery({
     queryKey: channelsQueryKeys.tlsFingerprints(),
@@ -72,11 +66,7 @@ export function ChannelKeyEnvironmentFields(
     channelType,
     multiKey: props.multiKey,
   })
-  const pool = keyEnvironmentPool(
-    data?.cli_profiles ?? [],
-    family,
-    cacheTTL ?? '5m'
-  )
+  const pool = keyEnvironmentPool(data?.cli_profiles ?? [], family)
 
   return (
     <>
@@ -111,33 +101,6 @@ export function ChannelKeyEnvironmentFields(
           </FormItem>
         )}
       />
-      {enabled && family === 'claude' && (
-        <FormField
-          control={form.control}
-          name='key_environment_cache_ttl'
-          render={({ field }) => (
-            <FormItem className='px-4 py-3'>
-              <FormLabel>{t('Cache mode')}</FormLabel>
-              <FormControl>
-                <RadioGroup
-                  value={field.value ?? '5m'}
-                  onValueChange={field.onChange}
-                  className='flex gap-4'
-                >
-                  <label className='flex items-center gap-2 text-sm'>
-                    <RadioGroupItem value='5m' />
-                    {t('5 minutes')}
-                  </label>
-                  <label className='flex items-center gap-2 text-sm'>
-                    <RadioGroupItem value='1h' />
-                    {t('1 hour')}
-                  </label>
-                </RadioGroup>
-              </FormControl>
-            </FormItem>
-          )}
-        />
-      )}
       {enabled && (
         <p
           className='text-muted-foreground px-4 pb-3 text-xs'

@@ -308,7 +308,6 @@ export const channelFormSchema = z
     // Independent key environments: every key wears its own captured CLI
     // version, device and session. The backend assigns the versions.
     key_environments: z.boolean().optional(),
-    key_environment_cache_ttl: z.enum(['5m', '1h']).optional(),
     client_device_seed: z.string().optional(),
     client_session_seed: z.string().optional(),
     system_prompt: z.string().optional(),
@@ -504,7 +503,6 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   tls_fingerprint: '',
   custom_client_identity_enabled: false,
   key_environments: false,
-  key_environment_cache_ttl: '5m',
   client_device_seed: '',
   client_session_seed: '',
   system_prompt: '',
@@ -560,7 +558,6 @@ export function transformChannelToFormDefaults(
     tls_fingerprint: '',
     custom_client_identity_enabled: false,
     key_environments: false,
-    key_environment_cache_ttl: '5m' as '5m' | '1h',
     client_device_seed: '',
     client_session_seed: '',
     system_prompt: '',
@@ -608,8 +605,6 @@ export function transformChannelToFormDefaults(
         tls_fingerprint: tlsFingerprint,
         custom_client_identity_enabled: deviceSeed !== '' || sessionSeed !== '',
         key_environments: parsed.key_environments === true,
-        key_environment_cache_ttl:
-          parsed.key_environment_cache_ttl === '1h' ? '1h' : '5m',
         client_device_seed: deviceSeed,
         client_session_seed: sessionSeed,
         system_prompt: parsed.system_prompt || '',
@@ -789,12 +784,9 @@ function buildSettingJSON(formData: ChannelFormValues): string {
       syntheticProfile === 'off' ? '' : syntheticProfile,
     cli_version_profile: cliVersion,
     key_environments: keyEnvironments,
-    key_environment_cache_ttl:
-      keyEnvironments &&
-      syntheticProfile === 'claude' &&
-      formData.key_environment_cache_ttl === '1h'
-        ? '1h'
-        : '',
+    // Cache lifetime follows the caller now; drop the pool cache mode a
+    // channel saved before that still carries.
+    key_environment_cache_ttl: undefined,
     // Explicitly overwrite the stored fingerprint when its override is off.
     // In independent mode this is saved for use when that mode is turned off;
     // the selected key's CLI profile controls the effective TLS handshake.

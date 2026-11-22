@@ -402,8 +402,8 @@ func newCLIProfileAudit(c *gin.Context, info *relaycommon.RelayInfo, version *se
 
 // stripCacheBreakpoints removes prompt-cache breakpoints from content blocks,
 // including blocks nested in tool_result content and in a custom-content
-// document's source, so that only the selected profile's cache policy reaches
-// upstream, regardless of caller identity or parameter overrides.
+// document's source, so that only the selected profile's breakpoint placement
+// reaches upstream, regardless of caller identity or parameter overrides.
 func stripCacheBreakpoints(blocks []cliObject) {
 	for _, block := range blocks {
 		delete(block, "cache_control")
@@ -471,10 +471,38 @@ func claudeBodyHasHourTTL(data []byte) bool {
 	return false
 }
 
-// The selected profile owns cache placement, tool order and captured client
-// fields. Caller output limits and effort, and billing absent from the profile,
+// claudeCallerCacheTTL reports whether the request arrived with cache
+// breakpoints of its own, and whether any of them asks for the 1h TTL.
+func claudeCallerCacheTTL(body cliObject) (sent, hour bool) {
+	points := []gjson.Result{gjson.ParseBytes(body["cache_control"])}
+	for _, field := range []string{"system", "tools", "messages"} {
+		points = claudePromptBreakpoints(gjson.ParseBytes(body[field]), points)
+	}
+	for _, point := range points {
+		if !point.IsObject() {
+			continue
+		}
+		sent = true
+		if point.Get("ttl").String() == "1h" {
+			hour = true
+		}
+	}
+	return sent, hour
+}
+
+// The selected profile owns breakpoint placement, tool order and captured
+// client fields. How long the cache lives is the caller's choice: the TTL its
+// own breakpoints ask for, and the profile's captured mode only when it sent
+// none. Caller output limits and effort, and billing absent from the profile,
 // retain their explicit semantics.
 func shapeClaudeCodeBody(body cliObject, identity cliIdentity, callerMaxTokens bool, callerEffort string, version *service.CLIVersionProfile) error {
+	cacheControl := version.CacheControl()
+	if sent, hour := claudeCallerCacheTTL(body); sent {
+		cacheControl = json.RawMessage(`{"type":"ephemeral"}`)
+		if hour {
+			cacheControl = json.RawMessage(`{"type":"ephemeral","ttl":"1h"}`)
+		}
+	}
 	system, err := cliContentBlocks(body["system"], "text")
 	if err != nil {
 		return err
@@ -482,7 +510,7 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity, callerMaxTokens b
 	billing := version != nil && version.BillingHeader != ""
 	preserveCallerBilling := version != nil && !billing
 	// A preserved billing block is opaque caller data. Its breakpoint counts
-	// toward the cache limit, but every other breakpoint belongs to the profile.
+	// toward the cache limit, but every other breakpoint is placed by the profile.
 	hasCache := false
 	if preserveCallerBilling {
 		for _, block := range system {
@@ -513,9 +541,8 @@ func shapeClaudeCodeBody(body cliObject, identity cliIdentity, callerMaxTokens b
 		}
 		system = kept
 	}
-	// Breakpoints we place carry the profile's TTL mode; its headers carry the
-	// matching beta flag (see prepareCLIRequest).
-	cacheControl := version.CacheControl()
+	// The headers carry the beta flag matching the TTL placed here (see
+	// prepareCLIRequest).
 	if !hasCache {
 		for i := len(system) - 1; i >= 0 && i >= len(system)-2; i-- {
 			if gjson.ParseBytes(system[i]["type"]).String() == "text" &&

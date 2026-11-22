@@ -785,7 +785,6 @@ describe('saving', () => {
       synthetic_client_headers_profile: '',
       cli_version_profile: '',
       key_environments: false,
-      key_environment_cache_ttl: '',
       tls_fingerprint: '',
       client_device_seed: '',
       client_session_seed: '',

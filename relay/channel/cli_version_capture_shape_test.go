@@ -401,8 +401,9 @@ func TestClaudeVersionProfileDecidesBillingBlock(t *testing.T) {
 	})
 }
 
-// The outgoing beta set follows the profile's final cache policy, even when
-// native clients or administrator overrides try to supply another TTL.
+// The outgoing beta set follows the TTL of the body that is sent: the
+// caller's when it sent breakpoints, the profile's otherwise. An administrator's
+// beta override cannot make the two disagree.
 func TestClaudeVersionProfileBetaFollowsFinalBodyTTL(t *testing.T) {
 	server, captures := cliTLSUpstream(t)
 	withHour := withClientCache.Replace(strings.Replace(claudeCodeCachedRequest, "@extra", "", 1))
@@ -416,15 +417,15 @@ func TestClaudeVersionProfileBetaFollowsFinalBodyTTL(t *testing.T) {
 		name, profile, body, adminBeta string
 		sdk, hourTTL                   bool
 	}{
-		{"default profile, client sends 1h", "claude-2.1.306-linux-x64", withHour, "", false, false},
-		{"1h profile, client sends only 5m", "claude-2.1.306-linux-x64-1h", onlyDefault, "", false, true},
+		{"default profile, client sends 1h", "claude-2.1.306-linux-x64", withHour, "", false, true},
+		{"1h profile, client sends only 5m", "claude-2.1.306-linux-x64-1h", onlyDefault, "", false, false},
 		{"1h profile, profile places 1h", "claude-2.1.306-linux-x64-1h", uncached, "", false, true},
 		{"default profile, profile places 5m", "claude-2.1.306-linux-x64", uncached, "", false, false},
-		{"shaped SDK 1h under default profile", "claude-2.1.306-linux-x64", sdkHour, "", true, false},
+		{"shaped SDK 1h under default profile", "claude-2.1.306-linux-x64", sdkHour, "", true, true},
 		{"shaped SDK under 1h profile", "claude-2.1.306-linux-x64-1h", sdkHour, "", true, true},
 		{"admin beta with 1h token, 5m body", "claude-2.1.306-linux-x64", onlyDefault, claudeCode2306Beta + ",extended-cache-ttl-2025-04-11", false, false},
 		{"admin beta without 1h token, 1h body", "claude-2.1.306-linux-x64-1h", withHour, claudeCode2306Beta, false, true},
-		{"default profile, client's 1h inside a document", "claude-2.1.306-linux-x64", documentHour, "", false, false},
+		{"default profile, client's 1h inside a document", "claude-2.1.306-linux-x64", documentHour, "", false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

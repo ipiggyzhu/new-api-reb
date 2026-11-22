@@ -181,15 +181,15 @@ func SupportedCLIVersionProfiles() []CLIVersionProfileOption {
 	return options
 }
 
-// KeyEnvironmentProfiles is the independent key environment pool for a family
-// and cache mode, newest version first. Cache mode only selects between
-// variants of a claude version; codex profiles have no cache mode and are
-// listed whatever ttl says.
-func KeyEnvironmentProfiles(family, ttl string) []*CLIVersionProfile {
+// KeyEnvironmentProfiles is the independent key environment pool for a
+// family, newest version first: one capture per version. How long the cache
+// lives follows the caller, so the 1h capture of a version would be the same
+// environment a second time and stays out of the pool.
+func KeyEnvironmentProfiles(family string) []*CLIVersionProfile {
 	var pool []*CLIVersionProfile
 	for i := range cliVersionProfiles {
 		p := &cliVersionProfiles[i]
-		if !p.AutoAssign || p.Family != family || (family == "claude" && p.CacheTTL != ttl) {
+		if !p.AutoAssign || p.Family != family || p.CacheTTL != "" {
 			continue
 		}
 		pool = append(pool, p)

@@ -459,71 +459,43 @@ describe('versioned CLI transport validation', () => {
 })
 
 describe('independent key environments', () => {
-  test('the switch and Claude cache mode survive create, update and reopening', () => {
+  test('the switch survives create, update and reopening', () => {
     const form = transformChannelToFormDefaults(
       channelWithSettings(14, {
         synthetic_client_headers_profile: 'claude',
         key_environments: true,
-        key_environment_cache_ttl: '1h',
       })
     )
     assert.equal(form.key_environments, true)
-    assert.equal(form.key_environment_cache_ttl, '1h')
     for (const setting of [
       transformFormDataToCreatePayload(form).channel.setting,
       transformFormDataToUpdatePayload(form, 25).setting,
     ]) {
       const saved = JSON.parse(setting ?? '{}')
       assert.equal(saved.key_environments, true)
-      assert.equal(saved.key_environment_cache_ttl, '1h')
       const reopened = transformChannelToFormDefaults(
         channelWithSettings(14, saved)
       )
       assert.equal(reopened.key_environments, true)
-      assert.equal(reopened.key_environment_cache_ttl, '1h')
     }
   })
 
-  test('a new channel opens with key environments off in the 5m cache mode', () => {
+  test('a new channel opens with key environments off', () => {
     const form = transformChannelToFormDefaults(channelWithSettings(14, {}))
     assert.equal(form.key_environments, false)
-    assert.equal(form.key_environment_cache_ttl, '5m')
     const saved = JSON.parse(
       transformFormDataToUpdatePayload(form, 25).setting ?? '{}'
     )
     assert.equal(saved.key_environments, false)
-    assert.equal(saved.key_environment_cache_ttl, '')
   })
 
-  test('the cache mode is saved only for Claude channels with key environments on', () => {
-    const cases: {
-      type: number
-      profile: string
-      keyEnvironments: boolean
-      chosen: '5m' | '1h'
-      ttl: string
-    }[] = [
-      {
-        type: 14,
-        profile: 'claude',
-        keyEnvironments: true,
-        chosen: '5m',
-        ttl: '',
-      },
-      {
-        type: 1,
-        profile: 'codex',
-        keyEnvironments: true,
-        chosen: '1h',
-        ttl: '',
-      },
-      {
-        type: 14,
-        profile: 'claude',
-        keyEnvironments: false,
-        chosen: '1h',
-        ttl: '',
-      },
+  // Cache lifetime follows the caller, so the pool cache mode a channel saved
+  // earlier is not written back.
+  test('saving drops a cache mode stored before the setting was removed', () => {
+    const cases = [
+      { type: 14, profile: 'claude', keyEnvironments: true },
+      { type: 1, profile: 'codex', keyEnvironments: true },
+      { type: 14, profile: 'claude', keyEnvironments: false },
     ]
     for (const c of cases) {
       const form = transformChannelToFormDefaults(
@@ -533,12 +505,11 @@ describe('independent key environments', () => {
           key_environment_cache_ttl: '1h',
         })
       )
-      form.key_environment_cache_ttl = c.chosen
       const saved = JSON.parse(
         transformFormDataToUpdatePayload(form, 25).setting ?? '{}'
       )
       assert.equal(saved.key_environments, c.keyEnvironments)
-      assert.equal(saved.key_environment_cache_ttl, c.ttl)
+      assert.ok(!('key_environment_cache_ttl' in saved))
     }
   })
 
@@ -650,15 +621,12 @@ describe('key environment version pool', () => {
   ]
   const ids = (list: CLIVersionProfileOption[]) => list.map((p) => p.id)
 
-  test('only auto-assignable captures of the family and cache mode, newest first', () => {
-    assert.deepEqual(ids(keyEnvironmentPool(profiles, 'claude', '5m')), [
+  test('one auto-assignable capture per version of the family, newest first', () => {
+    assert.deepEqual(ids(keyEnvironmentPool(profiles, 'claude')), [
       'claude-2.1.306-linux-x64',
       'claude-2.1.99-linux-x64',
     ])
-    assert.deepEqual(ids(keyEnvironmentPool(profiles, 'claude', '1h')), [
-      'claude-2.1.306-linux-x64-1h',
-    ])
-    assert.deepEqual(ids(keyEnvironmentPool(profiles, 'codex', '1h')), [
+    assert.deepEqual(ids(keyEnvironmentPool(profiles, 'codex')), [
       'codex-0.163.0-linux-x64',
       'codex-0.156.1-windows-x64',
     ])

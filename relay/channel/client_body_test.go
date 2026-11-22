@@ -114,7 +114,8 @@ func TestClaudeCLIShapePreservesContentToolsAndExplicitParameters(t *testing.T) 
 	assert.Equal(t, headers, sameHeaders)
 }
 
-// Native clients use the selected profile's cache placement, while a model
+// Native clients use the selected profile's cache placement with the TTL they
+// asked for, while a model
 // outside its capture is never given unsupported adaptive thinking.
 func TestClaudeCLIHonorsCacheBreakpointsAndModelCapabilities(t *testing.T) {
 	c, info := nativeClaudeCodeRequest()
@@ -122,7 +123,7 @@ func TestClaudeCLIHonorsCacheBreakpointsAndModelCapabilities(t *testing.T) {
 	require.NoError(t, err)
 	data, err := io.ReadAll(reader)
 	require.NoError(t, err)
-	assert.Empty(t, gjson.GetBytes(data, "system.0.cache_control.ttl").String())
+	assert.Equal(t, "1h", gjson.GetBytes(data, "system.0.cache_control.ttl").String())
 	assert.Equal(t, "Bash", gjson.GetBytes(data, "tools.0.name").String(), "the selected profile owns tool order")
 	assert.Equal(t, "ephemeral", gjson.GetBytes(data, "messages.0.content.1.cache_control.type").String())
 	assert.Equal(t, "aW1hZ2U=", gjson.GetBytes(data, "messages.0.content.0.source.data").String())

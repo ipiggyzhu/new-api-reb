@@ -46,9 +46,6 @@ func validateKeyEnvironmentSettings(channel *model.Channel, isMultiKey bool, pre
 	case family == constant.ClientHeaderFamilyCodex && effective.Type != constant.ChannelTypeOpenAI && effective.Type != constant.ChannelTypeCodex:
 		return fmt.Errorf("codex key environments need an OpenAI channel")
 	}
-	if setting.KeyEnvironmentCacheTTL != "" && (family != constant.ClientHeaderFamilyClaude || setting.KeyEnvironmentCacheTTL != "1h") {
-		return fmt.Errorf("unsupported key environment cache mode: %s", setting.KeyEnvironmentCacheTTL)
-	}
 	for name := range effective.GetHeaderOverride() {
 		if service.IsProtectedProfileHeader(family, name) {
 			return fmt.Errorf("header override %q would replace a header each key takes from its own CLI version or identity", name)

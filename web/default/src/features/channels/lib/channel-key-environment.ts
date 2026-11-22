@@ -55,21 +55,20 @@ export function keyEnvironmentUnavailableReason(params: {
 
 /**
  * The captured versions the backend draws key environments from, newest
- * first: auto-assignable profiles of the family, and for Claude only the ones
- * captured in the chosen cache mode.
+ * first: one auto-assignable capture per version of the family. How long the
+ * cache lives follows the caller, so a version's 1h capture is not a second
+ * environment and is left out.
  */
 export function keyEnvironmentPool(
   profiles: CLIVersionProfileOption[],
-  family: string,
-  cacheTTL: '5m' | '1h'
+  family: string
 ): CLIVersionProfileOption[] {
-  const ttl = cacheTTL === '1h' ? '1h' : ''
   return profiles
     .filter(
       (profile) =>
         profile.auto_assign === true &&
         profile.family === family &&
-        (family !== 'claude' || (profile.cache_ttl ?? '') === ttl)
+        !profile.cache_ttl
     )
     .sort((a, b) => compareVersions(b.version, a.version))
 }

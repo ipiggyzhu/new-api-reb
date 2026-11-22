@@ -57,7 +57,6 @@ const ADVANCED_SETTINGS_FIELDS = new Set<FieldPath<ChannelFormValues>>([
   'tls_fingerprint',
   'custom_client_identity_enabled',
   'key_environments',
-  'key_environment_cache_ttl',
   'client_device_seed',
   'client_session_seed',
   // Request & response rewriting

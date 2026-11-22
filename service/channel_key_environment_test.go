@@ -13,7 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func keyEnvironmentTestChannel(id int, family string, ttl string, enabled bool, keys string) *model.Channel {
+func keyEnvironmentTestChannel(id int, family string, enabled bool, keys string) *model.Channel {
 	channelType := constant.ChannelTypeOpenAI
 	if family == "claude" {
 		channelType = constant.ChannelTypeAnthropic
@@ -22,7 +22,6 @@ func keyEnvironmentTestChannel(id int, family string, ttl string, enabled bool, 
 	setting := channel.GetSetting()
 	setting.SyntheticClientHeadersProfile = family
 	setting.KeyEnvironments = enabled
-	setting.KeyEnvironmentCacheTTL = ttl
 	channel.SetSetting(setting)
 	return channel
 }
@@ -86,7 +85,7 @@ func TestReconcileKeyEnvironmentsKeepsAssignmentsStable(t *testing.T) {
 			want: map[string]string{"sk-a": "codex-0.163.0-linux-x64", "sk-c": "codex-0.156.1-windows-x64", "sk-d": "codex-0.160.0-windows-x64"}},
 	}
 	for _, step := range steps {
-		require.NoError(t, reconcileInTx(keyEnvironmentTestChannel(id, "codex", "", true, step.keys), false), step.name)
+		require.NoError(t, reconcileInTx(keyEnvironmentTestChannel(id, "codex", true, step.keys), false), step.name)
 		assert.Equal(t, step.want, storedKeyEnvironments(t, id, all...), step.name)
 	}
 }
@@ -96,16 +95,16 @@ func TestReconcileKeyEnvironmentsRejectsBadKeyLists(t *testing.T) {
 	owner := &model.Channel{Id: 7201, Name: "owner-env", Type: constant.ChannelTypeOpenAI, Key: "sk-owned"}
 	require.NoError(t, model.DB.Create(owner).Error)
 	t.Cleanup(func() { require.NoError(t, model.DB.Delete(owner).Error) })
-	require.NoError(t, reconcileInTx(keyEnvironmentTestChannel(owner.Id, "codex", "", true, "sk-owned\nsk-other"), false))
+	require.NoError(t, reconcileInTx(keyEnvironmentTestChannel(owner.Id, "codex", true, "sk-owned\nsk-other"), false))
 
 	t.Run("a key repeated with a trailing carriage return", func(t *testing.T) {
-		err := reconcileInTx(keyEnvironmentTestChannel(7202, "codex", "", true, "sk-x\nsk-x\r"), false)
+		err := reconcileInTx(keyEnvironmentTestChannel(7202, "codex", true, "sk-x\nsk-x\r"), false)
 		var duplicate *KeyEnvironmentDuplicateError
 		require.ErrorAs(t, err, &duplicate)
 		assert.Equal(t, KeyEnvironmentDuplicateError{Index: 1, FirstIndex: 0}, *duplicate)
 	})
 	t.Run("a key another environment channel holds", func(t *testing.T) {
-		err := reconcileInTx(keyEnvironmentTestChannel(7202, "codex", "", true, "sk-new\nsk-owned"), false)
+		err := reconcileInTx(keyEnvironmentTestChannel(7202, "codex", true, "sk-new\nsk-owned"), false)
 		var conflict *KeyEnvironmentConflictError
 		require.ErrorAs(t, err, &conflict)
 		assert.Equal(t, KeyEnvironmentConflictError{Index: 1, ChannelId: owner.Id, ChannelName: "owner-env"}, *conflict)
@@ -118,48 +117,84 @@ func TestReconcileKeyEnvironmentsShortage(t *testing.T) {
 	const id = 7301
 	keys := "sk-1\nsk-2\nsk-3\nsk-4\nsk-5"
 
-	err := reconcileInTx(keyEnvironmentTestChannel(id, "claude", "", true, keys), false)
+	err := reconcileInTx(keyEnvironmentTestChannel(id, "claude", true, keys), false)
 	var shortage *KeyEnvironmentShortageError
 	require.ErrorAs(t, err, &shortage)
 	assert.Equal(t, KeyEnvironmentShortageError{Available: 3, Keys: 5, UnassignedIndexes: []int{3, 4}, Versions: []string{"2.1.306", "2.1.288", "2.1.282"}}, *shortage)
 	assert.Empty(t, storedKeyEnvironments(t, id), "the shortage rolls the transaction back")
 
-	require.NoError(t, reconcileInTx(keyEnvironmentTestChannel(id, "claude", "", true, keys), true))
+	require.NoError(t, reconcileInTx(keyEnvironmentTestChannel(id, "claude", true, keys), true))
 	assert.Equal(t, map[string]string{
 		"sk-1": "claude-2.1.306-linux-x64", "sk-2": "claude-2.1.288-linux-x64", "sk-3": "claude-2.1.282-linux-x64", "sk-4": "", "sk-5": "",
 	}, storedKeyEnvironments(t, id, "sk-1", "sk-2", "sk-3", "sk-4", "sk-5"))
 
 	// The same keys saved again stay accepted only with the confirmation.
-	require.ErrorAs(t, reconcileInTx(keyEnvironmentTestChannel(id, "claude", "", true, keys), false), &shortage)
+	require.ErrorAs(t, reconcileInTx(keyEnvironmentTestChannel(id, "claude", true, keys), false), &shortage)
 }
 
-func TestReconcileKeyEnvironmentsCacheModeMapsToVariant(t *testing.T) {
+// Channels saved while the pool still had a 1h cache mode hold 1h captures.
+func seedLegacyHourKeyEnvironments(t *testing.T, channelId int, assigned map[string]string) {
+	t.Helper()
+	rows := make([]model.ChannelKeyEnvironment, 0, len(assigned))
+	for key, profile := range assigned {
+		rows = append(rows, keyEnvironmentRow(model.ChannelKeyTag(key), profile))
+	}
+	require.NoError(t, model.ReplaceChannelKeyEnvironmentRows(model.DB, channelId, rows))
+}
+
+func TestReconcileKeyEnvironmentsCarriesLegacyHourCapturesToTheirVersion(t *testing.T) {
 	setupKeyEnvironmentTable(t)
 	const id = 7401
 	all := []string{"sk-1", "sk-2", "sk-3", "sk-4"}
-	require.NoError(t, reconcileInTx(keyEnvironmentTestChannel(id, "claude", "", true, "sk-1\nsk-2\nsk-3\nsk-4"), true))
-	require.Equal(t, map[string]string{
+	seedLegacyHourKeyEnvironments(t, id, map[string]string{
+		"sk-1": "claude-2.1.306-linux-x64-1h", "sk-2": "claude-2.1.288-linux-x64-1h", "sk-3": "claude-2.1.282-linux-x64-1h", "sk-4": "",
+	})
+
+	// Each key keeps its version, whatever the list order.
+	plan, err := ReconcileKeyEnvironments(model.DB, keyEnvironmentTestChannel(id, "claude", true, "sk-4\nsk-3\nsk-2\nsk-1"), true)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{
 		"sk-1": "claude-2.1.306-linux-x64", "sk-2": "claude-2.1.288-linux-x64", "sk-3": "claude-2.1.282-linux-x64", "sk-4": "",
 	}, storedKeyEnvironments(t, id, all...))
+	for _, assignment := range plan {
+		assert.False(t, assignment.Downgrade, "the same version in another capture is not a downgrade")
+	}
+}
 
-	// Each key keeps its version across the switch, whatever the list order.
-	require.NoError(t, reconcileInTx(keyEnvironmentTestChannel(id, "claude", "1h", true, "sk-4\nsk-3\nsk-2\nsk-1"), true))
-	assert.Equal(t, map[string]string{
-		"sk-1": "claude-2.1.306-linux-x64-1h", "sk-2": "claude-2.1.288-linux-x64-1h", "sk-3": "claude-2.1.282-linux-x64-1h", "sk-4": "",
-	}, storedKeyEnvironments(t, id, all...))
+func TestKeyEnvironmentUpdateTreatsALegacyHourCaptureAsItsVersion(t *testing.T) {
+	setupKeyEnvironmentTable(t)
+	const id = 7402
+	keys := "sk-1\nsk-2"
+	seedLegacyHourKeyEnvironments(t, id, map[string]string{"sk-1": "claude-2.1.306-linux-x64-1h", "sk-2": ""})
+	update := func(index int, profile string) error {
+		_, err := ReconcileKeyEnvironments(model.DB, keyEnvironmentTestChannel(id, "claude", true, keys), true,
+			KeyEnvironmentUpdate{Index: index, ProfileId: &profile})
+		return err
+	}
+
+	require.ErrorContains(t, update(1, "claude-2.1.306-linux-x64"), "already assigned to key #1")
+	require.ErrorContains(t, update(1, "claude-2.1.288-linux-x64-1h"), "key environment pool")
+
+	// Editing another key leaves the legacy row as it is.
+	require.NoError(t, update(1, "claude-2.1.288-linux-x64"))
+	assert.Equal(t, map[string]string{"sk-1": "claude-2.1.306-linux-x64-1h", "sk-2": "claude-2.1.288-linux-x64"}, storedKeyEnvironments(t, id, "sk-1", "sk-2"))
+
+	// The key itself can move to its version's pool capture.
+	require.NoError(t, update(0, "claude-2.1.306-linux-x64"))
+	assert.Equal(t, map[string]string{"sk-1": "claude-2.1.306-linux-x64", "sk-2": "claude-2.1.288-linux-x64"}, storedKeyEnvironments(t, id, "sk-1", "sk-2"))
 }
 
 func TestReconcileKeyEnvironmentsSwitchOff(t *testing.T) {
 	setupKeyEnvironmentTable(t)
 	const id = 7501
-	require.NoError(t, reconcileInTx(keyEnvironmentTestChannel(id, "codex", "", true, "sk-1\nsk-2"), false))
+	require.NoError(t, reconcileInTx(keyEnvironmentTestChannel(id, "codex", true, "sk-1\nsk-2"), false))
 
 	// Off keeps the remaining keys held, so turning it back on restores them,
 	// but a key deleted while off is released.
-	require.NoError(t, reconcileInTx(keyEnvironmentTestChannel(id, "codex", "", false, "sk-2\nsk-3"), false))
+	require.NoError(t, reconcileInTx(keyEnvironmentTestChannel(id, "codex", false, "sk-2\nsk-3"), false))
 	assert.Equal(t, map[string]string{"sk-2": "codex-0.160.0-windows-x64"}, storedKeyEnvironments(t, id, "sk-1", "sk-2", "sk-3"))
 
-	require.NoError(t, reconcileInTx(keyEnvironmentTestChannel(id, "codex", "", true, "sk-2\nsk-3"), false))
+	require.NoError(t, reconcileInTx(keyEnvironmentTestChannel(id, "codex", true, "sk-2\nsk-3"), false))
 	assert.Equal(t, map[string]string{"sk-2": "codex-0.160.0-windows-x64", "sk-3": "codex-0.163.0-linux-x64"}, storedKeyEnvironments(t, id, "sk-2", "sk-3"))
 }
 
@@ -216,10 +251,10 @@ func TestKeyEnvironmentPoolIsTheAutoAssignCatalog(t *testing.T) {
 		}
 		return out
 	}
-	assert.Equal(t, []string{"claude-2.1.306-linux-x64", "claude-2.1.288-linux-x64", "claude-2.1.282-linux-x64"}, ids(KeyEnvironmentPool("claude", "")))
-	assert.Equal(t, []string{"claude-2.1.306-linux-x64-1h", "claude-2.1.288-linux-x64-1h", "claude-2.1.282-linux-x64-1h"}, ids(KeyEnvironmentPool("claude", "1h")))
-	assert.Equal(t, []string{"codex-0.163.0-linux-x64", "codex-0.160.0-windows-x64", "codex-0.156.1-windows-x64"}, ids(KeyEnvironmentPool("codex", "")))
-	assert.Empty(t, KeyEnvironmentPool("openai", ""))
+	// One capture per version: the 1h captures of the claude versions stay out.
+	assert.Equal(t, []string{"claude-2.1.306-linux-x64", "claude-2.1.288-linux-x64", "claude-2.1.282-linux-x64"}, ids(KeyEnvironmentPool("claude")))
+	assert.Equal(t, []string{"codex-0.163.0-linux-x64", "codex-0.160.0-windows-x64", "codex-0.156.1-windows-x64"}, ids(KeyEnvironmentPool("codex")))
+	assert.Empty(t, KeyEnvironmentPool("openai"))
 }
 
 func TestConsumeLogCarriesTheCLIProfileForAdminsOnly(t *testing.T) {

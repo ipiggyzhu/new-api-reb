@@ -159,11 +159,10 @@ func TestValidateKeyEnvironmentSettings(t *testing.T) {
 	}{
 		{"codex on an OpenAI channel", constant.ChannelTypeOpenAI, true, `{"synthetic_client_headers_profile":"codex","key_environments":true}`, "", true},
 		{"TLS and WebSocket together", constant.ChannelTypeOpenAI, true, `{"synthetic_client_headers_profile":"codex","key_environments":true,"tls_fingerprint":"claude-code","websocket_transport":true}`, "", true},
-		{"claude 1h on an Anthropic channel", constant.ChannelTypeAnthropic, true, `{"synthetic_client_headers_profile":"claude","key_environments":true,"key_environment_cache_ttl":"1h"}`, "", true},
+		{"a cache mode saved before the setting was removed is ignored", constant.ChannelTypeAnthropic, true, `{"synthetic_client_headers_profile":"claude","key_environments":true,"key_environment_cache_ttl":"1h"}`, "", true},
 		{"single-key channel", constant.ChannelTypeOpenAI, false, `{"synthetic_client_headers_profile":"codex","key_environments":true}`, "", false},
 		{"no client profile", constant.ChannelTypeOpenAI, true, `{"key_environments":true}`, "", false},
 		{"codex on an Anthropic channel", constant.ChannelTypeAnthropic, true, `{"synthetic_client_headers_profile":"codex","key_environments":true}`, "", false},
-		{"1h for codex", constant.ChannelTypeOpenAI, true, `{"synthetic_client_headers_profile":"codex","key_environments":true,"key_environment_cache_ttl":"1h"}`, "", false},
 		{"separate TLS override", constant.ChannelTypeOpenAI, true, `{"synthetic_client_headers_profile":"codex","key_environments":true,"tls_fingerprint":"codex-cli"}`, "", true},
 		{"WebSocket transport", constant.ChannelTypeOpenAI, true, `{"synthetic_client_headers_profile":"codex","key_environments":true,"websocket_transport":true}`, "", true},
 		{"user-agent override", constant.ChannelTypeOpenAI, true, `{"synthetic_client_headers_profile":"codex","key_environments":true}`, `{"User-Agent":"x"}`, false},

@@ -53,13 +53,6 @@ export function ChannelCLIVersionFields() {
     staleTime: Infinity,
   })
   if (family !== 'claude' && family !== 'codex') return null
-  const profiles = (data?.cli_profiles ?? []).filter(
-    (profile) => profile.family === family
-  )
-  const items = [
-    { value: 'default', label: t('Keep existing client defaults') },
-    ...profiles.map((profile) => ({ value: profile.id, label: profile.label })),
-  ]
 
   return (
     <FormField
@@ -67,6 +60,23 @@ export function ChannelCLIVersionFields() {
       name='cli_version_profile'
       render={({ field }) => {
         const value = field.value?.startsWith(`${family}-`) ? field.value : ''
+        // Newest version first: that is the one usually wanted. The cache TTL
+        // follows the caller, so a 1h variant is listed only where a channel
+        // already uses it.
+        const profiles = (data?.cli_profiles ?? [])
+          .filter(
+            (profile) =>
+              profile.family === family &&
+              (!profile.cache_ttl || profile.id === value)
+          )
+          .reverse()
+        const items = [
+          { value: 'default', label: t('Keep existing client defaults') },
+          ...profiles.map((profile) => ({
+            value: profile.id,
+            label: profile.label,
+          })),
+        ]
         const selected = profiles.find((profile) => profile.id === value)
         return (
           <FormItem className='px-4 py-3'>

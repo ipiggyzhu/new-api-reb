@@ -133,7 +133,6 @@ export interface ChannelSettings {
   synthetic_client_headers_profile?: string
   cli_version_profile?: string
   key_environments?: boolean
-  key_environment_cache_ttl?: '' | '5m' | '1h'
   /**
    * Explicit TLS ClientHello id. '' means the fingerprint follows
    * synthetic_client_headers_profile (Claude Code / Codex headers bring that

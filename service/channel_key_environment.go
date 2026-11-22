@@ -69,17 +69,18 @@ func KeyEnvironmentFamily(clientProfile string) string {
 
 // KeyEnvironmentPool is the version pool a channel with these settings draws
 // from, newest first.
-func KeyEnvironmentPool(clientProfile, cacheTTL string) []*CLIVersionProfile {
+func KeyEnvironmentPool(clientProfile string) []*CLIVersionProfile {
 	family := KeyEnvironmentFamily(clientProfile)
 	if family == "" {
 		return nil
 	}
-	return KeyEnvironmentProfiles(family, cacheTTL)
+	return KeyEnvironmentProfiles(family)
 }
 
 // planKeyEnvironments assigns versions to keys. Keys keep the version they
-// have while it is still in the pool (a cache mode change maps it to the same
-// version's other variant); keys without one take the newest free version in
+// have while it is still in the pool (a 1h capture assigned before the pool
+// stopped listing them maps to the pool's capture of the same version, so the
+// key keeps its version); keys without one take the newest free version in
 // list order. reassign instead repacks every key: keys ordered by their current
 // version, newest first, take pool[i].
 func planKeyEnvironments(keys []string, existing map[string]string, pool []*CLIVersionProfile, reassign bool) ([]KeyEnvironmentAssignment, error) {
@@ -194,7 +195,7 @@ func ReconcileKeyEnvironments(tx *gorm.DB, channel *model.Channel, allowUnassign
 // KeyEnvironmentUpdate changes one saved environment through the same
 // transaction and validation as every other reconciliation. Nil fields keep
 // their value; an empty profile leaves the key unassigned, an empty proxy
-// inherits the channel proxy. TTL remains a channel-wide pool choice.
+// inherits the channel proxy.
 type KeyEnvironmentUpdate struct {
 	Index     int
 	ProfileId *string
@@ -215,7 +216,7 @@ func PreviewKeyEnvironmentReassignment(tx *gorm.DB, channel *model.Channel) ([]K
 	if err != nil {
 		return nil, err
 	}
-	pool := KeyEnvironmentPool(setting.SyntheticClientHeadersProfile, setting.KeyEnvironmentCacheTTL)
+	pool := KeyEnvironmentPool(setting.SyntheticClientHeadersProfile)
 	return planKeyEnvironments(channelKeyList(channel), existing, pool, true)
 }
 
@@ -266,7 +267,7 @@ func reconcileKeyEnvironments(tx *gorm.DB, channel *model.Channel, allowUnassign
 		existing[tag] = env.CLIVersionProfile
 	}
 
-	pool := KeyEnvironmentPool(setting.SyntheticClientHeadersProfile, setting.KeyEnvironmentCacheTTL)
+	pool := KeyEnvironmentPool(setting.SyntheticClientHeadersProfile)
 	plan, err := planKeyEnvironments(keys, existing, pool, reassign)
 	if err != nil {
 		return nil, err
@@ -292,15 +293,20 @@ func reconcileKeyEnvironments(tx *gorm.DB, channel *model.Channel, allowUnassign
 			if update.ProfileId != nil {
 				id := strings.ToLower(strings.TrimSpace(*update.ProfileId))
 				if id != "" {
-					inPool := false
+					var chosen *CLIVersionProfile
 					for _, profile := range pool {
-						inPool = inPool || profile.ID == id
+						if profile.ID == id {
+							chosen = profile
+						}
 					}
-					if !inPool {
-						return nil, fmt.Errorf("CLI version must belong to the channel's key environment pool and cache mode")
+					if chosen == nil {
+						return nil, fmt.Errorf("CLI version must belong to the channel's key environment pool")
 					}
+					// By version, not id: a key still on a 1h capture holds
+					// that version too.
 					for _, other := range plan {
-						if other.tag != tag && other.ProfileId == id {
+						held := LookupCLIVersionProfile(other.ProfileId)
+						if other.tag != tag && held != nil && held.Family == chosen.Family && held.Version == chosen.Version {
 							return nil, fmt.Errorf("CLI version is already assigned to key #%d", other.Index+1)
 						}
 					}

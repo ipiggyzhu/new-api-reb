@@ -73,13 +73,26 @@ export function MultiKeyEnvDialog(props: MultiKeyEnvDialogProps) {
     staleTime: Infinity,
     enabled: hasCLIFamily,
   })
+  const pool = keyEnvironmentPool(data?.cli_profiles ?? [], family)
+  // A key assigned before the pool dropped the 1h captures still holds one;
+  // list it so the select shows what the key runs on.
+  const savedOutsidePool =
+    savedCLIVersion !== '' &&
+    !pool.some((profile) => profile.id === savedCLIVersion)
   const cliItems = [
     { value: 'unassigned', label: t('Unassigned') },
-    ...keyEnvironmentPool(
-      data?.cli_profiles ?? [],
-      family,
-      settings.key_environment_cache_ttl === '1h' ? '1h' : '5m'
-    ).map((profile) => ({ value: profile.id, label: profile.label })),
+    ...(savedOutsidePool
+      ? [
+          {
+            value: savedCLIVersion,
+            label:
+              data?.cli_profiles?.find(
+                (profile) => profile.id === savedCLIVersion
+              )?.label ?? savedCLIVersion,
+          },
+        ]
+      : []),
+    ...pool.map((profile) => ({ value: profile.id, label: profile.label })),
   ]
   const cliVersionChanged = cliVersion !== savedCLIVersion
   const proxyChanged = proxy.trim() !== savedProxy

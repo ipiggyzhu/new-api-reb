@@ -94,7 +94,7 @@ func TestCapturedTLSInvalidHelloBoundary(t *testing.T) {
 }
 
 func TestKeyVersionPoolShortageBoundary(t *testing.T) {
-	pool := KeyEnvironmentPool("codex", "")
+	pool := KeyEnvironmentPool("codex")
 	require.NotEmpty(t, pool)
 	plan, err := planKeyEnvironments([]string{"only"}, nil, pool, false)
 	require.NoError(t, err)
@@ -112,7 +112,7 @@ func TestKeyVersionPoolShortageBoundary(t *testing.T) {
 	original := cliVersionProfiles
 	cliVersionProfiles = nil
 	t.Cleanup(func() { cliVersionProfiles = original })
-	channel := keyEnvironmentTestChannel(99201, "codex", "", true, "sk-boundary-a\nsk-boundary-b")
+	channel := keyEnvironmentTestChannel(99201, "codex", true, "sk-boundary-a\nsk-boundary-b")
 	var shortage *KeyEnvironmentShortageError
 	require.ErrorAs(t, reconcileInTx(channel, false), &shortage)
 	assert.Zero(t, shortage.Available)

@@ -3,7 +3,7 @@
     "id": "claude-2.1.76-windows-x64",
     "family": "claude",
     "version": "2.1.76",
-    "label": "Claude Code 2.1.76 / Windows x64 / Node v22.14.0",
+    "label": "Claude Code v2.1.76",
     "ja3_md5": "1a28e69016765d92e3b381168d68922c",
     "headers": {
       "connection": "keep-alive",
@@ -146,7 +146,7 @@
     "id": "claude-2.1.198-windows-x64",
     "family": "claude",
     "version": "2.1.198",
-    "label": "Claude Code 2.1.198 / Windows x64 / Node v26.3.0",
+    "label": "Claude Code v2.1.198",
     "ja3_md5": "d871d02cecbde59abbf8f4806134addf",
     "headers": {
       "accept": "application/json",
@@ -312,7 +312,7 @@
     "id": "claude-2.1.211-windows-x64",
     "family": "claude",
     "version": "2.1.211",
-    "label": "Claude Code 2.1.211 / Windows x64 / Node v26.3.0",
+    "label": "Claude Code v2.1.211",
     "ja3_md5": "d871d02cecbde59abbf8f4806134addf",
     "headers": {
       "accept": "application/json",
@@ -478,7 +478,7 @@
     "id": "claude-2.1.260-windows-x64",
     "family": "claude",
     "version": "2.1.260",
-    "label": "Claude Code 2.1.260 / Windows x64 / Node v26.3.0",
+    "label": "Claude Code v2.1.260",
     "ja3_md5": "1523504b38f0fae0d881d4b6554aac1b",
     "headers": {
       "accept": "application/json",
@@ -645,7 +645,7 @@
     "id": "claude-2.1.282-windows-x64",
     "family": "claude",
     "version": "2.1.282",
-    "label": "Claude Code 2.1.282 / Windows x64 / Node v26.3.0",
+    "label": "Claude Code v2.1.282 · Windows",
     "ja3_md5": "1523504b38f0fae0d881d4b6554aac1b",
     "headers": {
       "accept": "application/json",
@@ -803,7 +803,7 @@
     "id": "claude-2.1.282-linux-x64",
     "family": "claude",
     "version": "2.1.282",
-    "label": "Claude Code 2.1.282 / Linux x64 / Node v26.3.0 / 5m prompt cache",
+    "label": "Claude Code v2.1.282",
     "auto_assign": true,
     "ja3_md5": "1523504b38f0fae0d881d4b6554aac1b",
     "headers": {
@@ -970,7 +970,7 @@
     "id": "claude-2.1.282-linux-x64-1h",
     "family": "claude",
     "version": "2.1.282",
-    "label": "Claude Code 2.1.282 / Linux x64 / Node v26.3.0 / 1h prompt cache",
+    "label": "Claude Code v2.1.282 · 1h",
     "auto_assign": true,
     "ja3_md5": "1523504b38f0fae0d881d4b6554aac1b",
     "headers": {
@@ -1139,7 +1139,7 @@
     "id": "claude-2.1.288-linux-x64",
     "family": "claude",
     "version": "2.1.288",
-    "label": "Claude Code 2.1.288 / Linux x64 / Node v26.3.0 / 5m prompt cache",
+    "label": "Claude Code v2.1.288",
     "auto_assign": true,
     "ja3_md5": "1523504b38f0fae0d881d4b6554aac1b",
     "headers": {
@@ -1306,7 +1306,7 @@
     "id": "claude-2.1.288-linux-x64-1h",
     "family": "claude",
     "version": "2.1.288",
-    "label": "Claude Code 2.1.288 / Linux x64 / Node v26.3.0 / 1h prompt cache",
+    "label": "Claude Code v2.1.288 · 1h",
     "auto_assign": true,
     "ja3_md5": "1523504b38f0fae0d881d4b6554aac1b",
     "headers": {
@@ -1475,7 +1475,7 @@
     "id": "claude-2.1.306-linux-x64",
     "family": "claude",
     "version": "2.1.306",
-    "label": "Claude Code 2.1.306 / Linux x64 / Node v26.3.0 / 5m prompt cache",
+    "label": "Claude Code v2.1.306",
     "auto_assign": true,
     "ja3_md5": "1523504b38f0fae0d881d4b6554aac1b",
     "headers": {
@@ -1631,7 +1631,7 @@
     "id": "claude-2.1.306-linux-x64-1h",
     "family": "claude",
     "version": "2.1.306",
-    "label": "Claude Code 2.1.306 / Linux x64 / Node v26.3.0 / 1h prompt cache",
+    "label": "Claude Code v2.1.306 · 1h",
     "auto_assign": true,
     "ja3_md5": "1523504b38f0fae0d881d4b6554aac1b",
     "headers": {
@@ -1789,7 +1789,7 @@
     "id": "codex-0.134.0-windows-x64",
     "family": "codex",
     "version": "0.134.0",
-    "label": "Codex exec 0.134.0 / Windows x64",
+    "label": "Codex v0.134.0",
     "ja3_md5": "6a5d235ee78c6aede6a61448b4e9ff1e",
     "headers": {
       "x-codex-beta-features": "terminal_resize_reflow",
@@ -1910,7 +1910,7 @@
     "id": "codex-0.145.0-windows-x64",
     "family": "codex",
     "version": "0.145.0",
-    "label": "Codex exec 0.145.0 / Windows x64",
+    "label": "Codex v0.145.0",
     "ja3_md5": "6a5d235ee78c6aede6a61448b4e9ff1e",
     "headers": {
       "x-codex-beta-features": "remote_compaction_v2",
@@ -2048,7 +2048,7 @@
     "id": "codex-0.150.0-windows-x64",
     "family": "codex",
     "version": "0.150.0",
-    "label": "Codex exec 0.150.0 / Windows x64",
+    "label": "Codex v0.150.0",
     "ja3_md5": "6a5d235ee78c6aede6a61448b4e9ff1e",
     "headers": {
       "x-codex-beta-features": "remote_compaction_v2",
@@ -2202,7 +2202,7 @@
     "id": "codex-0.156.1-windows-x64",
     "family": "codex",
     "version": "0.156.1",
-    "label": "Codex exec 0.156.1 / Windows x64",
+    "label": "Codex v0.156.1",
     "auto_assign": true,
     "ja3_md5": "6a5d235ee78c6aede6a61448b4e9ff1e",
     "headers": {
@@ -2376,7 +2376,7 @@
     "id": "codex-0.160.0-windows-x64",
     "family": "codex",
     "version": "0.160.0",
-    "label": "Codex exec 0.160.0 / Windows x64",
+    "label": "Codex v0.160.0",
     "auto_assign": true,
     "ja3_md5": "6a5d235ee78c6aede6a61448b4e9ff1e",
     "headers": {
@@ -2535,7 +2535,7 @@
     "id": "codex-0.163.0-linux-x64",
     "family": "codex",
     "version": "0.163.0",
-    "label": "Codex exec 0.163.0 / Linux x64 (Debian 13)",
+    "label": "Codex v0.163.0",
     "auto_assign": true,
     "ja3_md5": "0b85eb0d4981e69064e40753e4f0ac5f",
     "headers": {
