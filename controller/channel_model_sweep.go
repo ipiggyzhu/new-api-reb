@@ -445,7 +445,7 @@ func sweepChannelModels(ctx context.Context, channelID int, testUserID int, budg
 	for _, m := range redundant {
 		verdicts[m] = sweepVerdictFail
 	}
-	if recordChannelSweepOutage(channelID, sweepLooksLikeOutage(checked, verdicts)) {
+	if recordChannelSweepOutage(channelID, common.AutomaticDisableChannelEnabled && channel.GetAutoBan(), sweepLooksLikeOutage(checked, verdicts)) {
 		result.disabled = true
 		return result, nil
 	}

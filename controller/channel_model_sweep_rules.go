@@ -10,10 +10,14 @@ import (
 )
 
 // channelSweepOutageDisableRuns is how many sweeps in a row a channel may
-// answer nothing usable before it is taken out of rotation. A sweep that
+// have no usable model at all before it is taken out of rotation. A sweep that
 // cannot tell whether any model works (dead host, expired key, 5xx) removes no
 // model, because the models are not what is broken; without this the channel
 // kept advertising every one of them indefinitely.
+//
+// This adds no switch of its own. It obeys the two that already govern every
+// other automatic disable: the system-wide one and the channel's "Auto Ban".
+// With either off the sweep only ever removes models.
 const channelSweepOutageDisableRuns = 3
 
 // bareModelName is the part of an upstream id after its vendor prefix
@@ -87,8 +91,11 @@ func sweepLooksLikeOutage(existing []string, verdicts map[string]channelModelSwe
 
 // recordChannelSweepOutage keeps the count of consecutive outage sweeps on the
 // channel and disables it once the count reaches the limit. It returns whether
-// the channel was disabled.
-func recordChannelSweepOutage(channelID int, outage bool) bool {
+// the channel was disabled. A channel the gateway may not disable is not counted.
+func recordChannelSweepOutage(channelID int, allowDisable bool, outage bool) bool {
+	if !allowDisable {
+		outage = false
+	}
 	runs := 0
 	err := model.MutateChannelSettings(channelID, func(settings *dto.ChannelOtherSettings) bool {
 		if !outage {

@@ -632,6 +632,60 @@ func TestSweepDisablesOnlyConfirmedEmptyChannels(t *testing.T) {
 	}
 }
 
+// TestSweepOutageDisableObeysAutoDisableSwitches pins when the sweep may take a
+// channel out of rotation: only after channelSweepOutageDisableRuns sweeps in a
+// row without one usable model, and only while the system-wide switch and the
+// channel's own Auto Ban both allow it. With either off the channel stays
+// enabled, keeps its models and counts nothing.
+func TestSweepOutageDisableObeysAutoDisableSwitches(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		systemSwitch bool
+		autoBan      int
+		wantDisabled bool
+	}{
+		{"both switches on", true, 1, true},
+		{"channel Auto Ban off", true, 0, false},
+		{"system-wide switch off", false, 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newUpstreamValidationFixture(t)
+			original := common.AutomaticDisableChannelEnabled
+			t.Cleanup(func() { common.AutomaticDisableChannelEnabled = original })
+			common.AutomaticDisableChannelEnabled = tc.systemSwitch
+			// An expired key: every model is refused, none is proven missing.
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = io.WriteString(w, `{"error":{"code":"invalid_api_key","message":"invalid api key"}}`)
+			}))
+			t.Cleanup(upstream.Close)
+			channel := f.createChannel(t, dto.ChannelOtherSettings{})
+			channel.Models, channel.BaseURL, channel.AutoBan = "gpt-4o", &upstream.URL, lo.ToPtr(tc.autoBan)
+			require.NoError(t, f.db.Save(channel).Error)
+
+			for run := 1; run <= channelSweepOutageDisableRuns; run++ {
+				budget := 10
+				result, err := sweepChannelModels(context.Background(), channel.Id, 1, &budget)
+				require.NoError(t, err)
+				assert.Equal(t, 1, result.tested, "run %d", run)
+				assert.Equal(t, tc.wantDisabled && run == channelSweepOutageDisableRuns, result.disabled, "run %d", run)
+			}
+
+			stored, err := model.GetChannelById(channel.Id, true)
+			require.NoError(t, err)
+			assert.Equal(t, "gpt-4o", stored.Models, "an outage removes no model")
+			assert.Zero(t, stored.GetOtherSettings().UpstreamModelUpdateOutageRuns)
+			if tc.wantDisabled {
+				assert.Equal(t, common.ChannelStatusAutoDisabled, stored.Status)
+				assert.NotEmpty(t, stored.GetOtherInfo()["status_reason"])
+			} else {
+				assert.Equal(t, common.ChannelStatusEnabled, stored.Status)
+			}
+		})
+	}
+}
+
 func TestSweepCodexProfileUsesResponsesInsteadOfDeletingWorkingModel(t *testing.T) {
 	f := newUpstreamValidationFixture(t)
 	var responseRequests, wrongEndpointRequests atomic.Int32
