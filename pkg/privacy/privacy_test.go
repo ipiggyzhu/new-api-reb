@@ -92,6 +92,15 @@ func TestPrivacyDetectionAndExplicitValues(t *testing.T) {
 	session := NewSession()
 	require.NoError(t, session.Add("abcd"))
 	masked := session.Mask("abcd")
+	require.NotEqual(t, "abcd", masked, "the first mask must actually protect the value")
+	require.Regexp(t, "^"+Prefix+"[0-9a-f]{32}__$", masked)
+	// Derive a valid value from an issued ID so the collision is guaranteed.
+	collidingValue := masked[len(Prefix) : len(Prefix)+4]
+	require.NoError(t, session.Add(collidingValue))
+	maskedCollision := session.Mask(collidingValue)
+	require.NotEqual(t, collidingValue, maskedCollision)
+	assert.Equal(t, collidingValue, session.Restore(maskedCollision))
+	assert.Equal(t, masked+" "+maskedCollision, session.Mask(masked+" "+collidingValue))
 	assert.Equal(t, masked, session.Mask(masked), "short secrets cannot rewrite reference identifiers")
 	assert.Equal(t, "abcd", session.Restore(masked))
 	placeholderShapedPassword := "__NA_PRIV_0123456789abcdef0123456789abcdef__"

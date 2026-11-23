@@ -98,6 +98,12 @@ func ProtectHeaders(c *gin.Context, headers http.Header) {
 			delete(headers, key)
 		case "authorization", "x-api-key", "api-key", "x-goog-api-key":
 			// The selected provider's authentication is not prompt content.
+		case "content-type":
+			for i, value := range values {
+				if separator := strings.IndexByte(value, ';'); separator >= 0 {
+					values[i] = value[:separator+1] + session.Mask(value[separator+1:])
+				}
+			}
 		default:
 			for i, value := range values {
 				values[i] = session.Mask(value)

@@ -17,6 +17,14 @@ func flagSlashText() string {
 	return strings.Join([]string{"redis", "-cli -a ", "/"}, "")
 }
 
+func TestInferredShortValueIsIgnored(t *testing.T) {
+	session := NewSession()
+	protected, err := session.ProtectText("password", "abc", Options{})
+	require.NoError(t, err)
+	assert.Equal(t, "abc", protected)
+	assert.Empty(t, session.snapshot())
+}
+
 func TestSessionAddRejectsImplausibleValues(t *testing.T) {
 	for _, value := range []string{"", "a", "ab", "/", "---", "....", "////", "   "} {
 		session := NewSession()

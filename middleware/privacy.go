@@ -127,8 +127,12 @@ func PromptPrivacy() gin.HandlerFunc {
 		session.BestEffort = bestEffort
 		defer session.Clear()
 		for _, value := range input.SensitiveValues {
-			if err := session.Add(value); err != nil {
-				privacyAbort(c, http.StatusBadRequest, "privacy_limit", err.Error())
+			if err := session.AddDeclared(value); err != nil {
+				code := "privacy_limit"
+				if errors.Is(err, privacy.ErrDeclaredValue) {
+					code = "privacy_invalid_declared_value"
+				}
+				privacyAbort(c, http.StatusBadRequest, code, err.Error())
 				return
 			}
 		}
@@ -164,15 +168,26 @@ func PromptPrivacy() gin.HandlerFunc {
 		}
 		for name, values := range c.Request.Header {
 			switch strings.ToLower(name) {
-			case "authorization", "x-api-key", "api-key", "x-goog-api-key", "content-type", "x-new-api-privacy", "x-new-api-privacy-session", "x-new-api-privacy-tools":
+			case "authorization", "x-api-key", "api-key", "x-goog-api-key", "x-new-api-privacy", "x-new-api-privacy-session", "x-new-api-privacy-tools":
 				continue
 			default:
 				for i, value := range values {
+					prefix := ""
+					if strings.EqualFold(name, "Content-Type") {
+						// Keep the downstream parser's media type intact; parameters
+						// use the same discovery and references as body text.
+						separator := strings.IndexByte(value, ';')
+						if separator < 0 {
+							continue
+						}
+						prefix, value = value[:separator+1], value[separator+1:]
+					}
 					values[i], err = session.ProtectText(name, value, privacyOptions)
 					if err != nil {
 						privacyAbort(c, http.StatusBadRequest, "privacy_protection_failed", err.Error())
 						return
 					}
+					values[i] = prefix + values[i]
 				}
 			}
 		}

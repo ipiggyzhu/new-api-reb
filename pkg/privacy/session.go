@@ -29,9 +29,10 @@ const (
 )
 
 var (
-	ErrLimit       = errors.New("privacy limits exceeded")
-	ErrSession     = errors.New("privacy session expired or unavailable; resend the full conversation without the session header")
-	ErrUnsupported = errors.New("privacy supports text JSON requests only; opaque content requires local sanitization")
+	ErrLimit         = errors.New("privacy limits exceeded")
+	ErrSession       = errors.New("privacy session expired or unavailable; resend the full conversation without the session header")
+	ErrUnsupported   = errors.New("privacy supports text JSON requests only; opaque content requires local sanitization")
+	ErrDeclaredValue = errors.New("declared sensitive value cannot be safely protected; use at least 4 bytes including a Unicode letter or digit")
 )
 
 type Session struct {
@@ -67,8 +68,8 @@ func (s *Session) Clear() {
 	s.mu.Unlock()
 }
 
-// plausibleStoredValue reports whether a captured or declared value can be a
-// credential at all. Every stored value is substring-replaced wherever it
+// plausibleStoredValue screens values for global replacement safety, not
+// credential validity. Every stored value is substring-replaced wherever it
 // occurs - in bodies, headers and the URL path - so a value that is very
 // short or pure punctuation (the token after a command-line flag can be a
 // path separator, for instance) would rewrite structural text all over the
@@ -85,6 +86,24 @@ func plausibleStoredValue(value string) bool {
 	return false
 }
 
+// AddDeclared rejects declarations that cannot be safely replaced instead of
+// silently treating the declared value as public content.
+func (s *Session) AddDeclared(value string) error {
+	if !plausibleStoredValue(value) {
+		return ErrDeclaredValue
+	}
+	return s.Add(value)
+}
+
+func filterStoredValues(values map[string]string) {
+	for ref, value := range values {
+		if !plausibleStoredValue(value) {
+			delete(values, ref)
+		}
+	}
+}
+
+// Add registers inferred captures, ignoring values unsafe for replacement.
 func (s *Session) Add(value string) error {
 	if !plausibleStoredValue(value) {
 		return nil
@@ -264,6 +283,7 @@ func (s *Store) load(key string) (*Session, error) {
 	if common.Unmarshal(plain, &session.Values) != nil {
 		return nil, ErrSession
 	}
+	filterStoredValues(session.Values)
 	return session, nil
 }
 
@@ -279,6 +299,7 @@ func (s *Store) Save(owner, id string, session *Session) error {
 		}
 		old.Clear()
 	}
+	filterStoredValues(values)
 	if len(values) > MaxSecrets {
 		return ErrLimit
 	}
