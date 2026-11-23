@@ -164,7 +164,7 @@ func PromptPrivacy() gin.HandlerFunc {
 		}
 		for name, values := range c.Request.Header {
 			switch strings.ToLower(name) {
-			case "authorization", "x-api-key", "api-key", "x-goog-api-key", "x-new-api-privacy", "x-new-api-privacy-session", "x-new-api-privacy-tools":
+			case "authorization", "x-api-key", "api-key", "x-goog-api-key", "content-type", "x-new-api-privacy", "x-new-api-privacy-session", "x-new-api-privacy-tools":
 				continue
 			default:
 				for i, value := range values {

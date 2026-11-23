@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/gin-gonic/gin"
@@ -66,8 +67,26 @@ func (s *Session) Clear() {
 	s.mu.Unlock()
 }
 
+// plausibleStoredValue reports whether a captured or declared value can be a
+// credential at all. Every stored value is substring-replaced wherever it
+// occurs - in bodies, headers and the URL path - so a value that is very
+// short or pure punctuation (the token after a command-line flag can be a
+// path separator, for instance) would rewrite structural text all over the
+// gateway and must never be stored.
+func plausibleStoredValue(value string) bool {
+	if len(value) < 4 {
+		return false
+	}
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Session) Add(value string) error {
-	if value == "" {
+	if !plausibleStoredValue(value) {
 		return nil
 	}
 	s.mu.Lock()

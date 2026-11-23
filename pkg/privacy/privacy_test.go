@@ -90,10 +90,10 @@ func TestPrivacyDetectionAndExplicitValues(t *testing.T) {
 		})
 	}
 	session := NewSession()
-	require.NoError(t, session.Add("a"))
-	masked := session.Mask("a")
+	require.NoError(t, session.Add("abcd"))
+	masked := session.Mask("abcd")
 	assert.Equal(t, masked, session.Mask(masked), "short secrets cannot rewrite reference identifiers")
-	assert.Equal(t, "a", session.Restore(masked))
+	assert.Equal(t, "abcd", session.Restore(masked))
 	placeholderShapedPassword := "__NA_PRIV_0123456789abcdef0123456789abcdef__"
 	require.NoError(t, session.Add(placeholderShapedPassword))
 	maskedPassword := session.Mask(placeholderShapedPassword)

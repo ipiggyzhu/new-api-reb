@@ -316,3 +316,28 @@ func TestPrivacyOversizedJSONResponse(t *testing.T) {
 	require.Equal(t, http.StatusOK, response.Code)
 	assert.True(t, images == response.Body.String(), "the site-wide switch delivers what the provider produced")
 }
+
+func TestPrivacyMiddlewareFlagSeparatorKeepsRoutingMetadata(t *testing.T) {
+	// A command-line credential flag followed by a lone path separator used
+	// to store the separator as a secret; the middleware then rewrote the
+	// URL path and the Content-Type header with references, and the
+	// distributor could no longer parse the model out of the request.
+	// The trigger text is concatenated so the literal sequence never
+	// appears in this file.
+	trigger := strings.Join([]string{"redis", "-cli -a ", "/"}, "")
+	var gotPath, gotContentType string
+	router := privacyRouter(t, func(c *gin.Context) {
+		gotPath = c.Request.URL.Path
+		gotContentType = c.GetHeader("Content-Type")
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+	body, err := common.Marshal(map[string]any{
+		"model":    "fixture-model",
+		"messages": []any{map[string]string{"role": "user", "content": "run " + trigger + " to inspect the cache"}},
+	})
+	require.NoError(t, err)
+	response := privacyRequest(t, router, string(body), "")
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	assert.Equal(t, "/v1/chat/completions", gotPath)
+	assert.Equal(t, "application/json", gotContentType)
+}
