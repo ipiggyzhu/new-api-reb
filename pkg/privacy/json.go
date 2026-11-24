@@ -63,7 +63,12 @@ func compactCredentialAnchor(value string) bool {
 	} else if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
 		value = value[1 : len(value)-1]
 	}
-	return net.ParseIP(value) != nil || len(value) <= 253 && credentialDomainPattern.MatchString(value)
+	if net.ParseIP(value) != nil {
+		return true
+	}
+	// A trailing root dot is presentation only: a maximal DNS name is 253
+	// bytes without it and 254 with it.
+	return len(strings.TrimSuffix(value, ".")) <= 253 && credentialDomainPattern.MatchString(value)
 }
 
 // walkJSON preserves numeric lexemes (including large integers), explicit
@@ -199,9 +204,10 @@ func (s *Session) discover(key, value string, options Options) (string, error) {
 			continue
 		}
 		for end := len(field); end > 0; end = strings.LastIndexByte(field[:end], ':') {
-			// DNS names have at most 253 bytes, plus a colon and five port
-			// digits. Bound prefix validation even for very long captures.
-			if end <= 259 && compactCredentialAnchor(field[:end]) {
+			// DNS names have at most 253 bytes, plus an optional root dot,
+			// a colon and five port digits. Bound prefix validation even
+			// for very long captures.
+			if end <= 260 && compactCredentialAnchor(field[:end]) {
 				anchored = true
 				field = strings.TrimPrefix(field[end:], ":")
 				break

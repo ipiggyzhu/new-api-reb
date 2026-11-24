@@ -168,6 +168,31 @@ func TestCompactCredentialMatrix(t *testing.T) {
 	}
 }
 
+// A maximal DNS name is 253 bytes; a trailing root dot is presentation only
+// and must not push a maximal name (or a maximal name with a port) over the
+// anchor limit. Names past the limit stay rejected.
+func TestCompactCredentialDomainLengthBoundary(t *testing.T) {
+	label := strings.Repeat("a", 63)
+	dom253 := strings.Join([]string{label, label, label, strings.Repeat("a", 61)}, ".")
+	dom254 := strings.Join([]string{label, label, label, strings.Repeat("a", 62)}, ".")
+	require.Equal(t, 253, len(dom253))
+	require.Equal(t, 254, len(dom254))
+	secret := "did" + "hehue" + "hebeheh"
+	port := "655" + "35"
+	for _, tc := range []compactCredentialCase{
+		{"B253_name", dom253 + "," + secret, []string{secret}},
+		{"B254_name", dom254 + "," + secret, nil},
+		{"B253_name_root_dot", dom253 + "." + "," + secret, []string{secret}},
+		{"B259_name_port", dom253 + ":" + port + "," + secret, []string{secret}},
+		{"B260_name_port", dom254 + ":" + port + "," + secret, nil},
+		{"B260_name_root_dot_port", dom253 + "." + ":" + port + "," + secret, []string{secret}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertCompactCredentialCase(t, tc, Options{ProtectIPs: true})
+		})
+	}
+}
+
 func TestTask27Baseline(t *testing.T) {
 	ip := strings.Join([]string{"192", "0", "2", "27"}, ".")
 	invalid := strings.Join([]string{"999", "0", "2", "27"}, ".")
