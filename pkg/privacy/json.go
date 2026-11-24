@@ -215,8 +215,13 @@ func (s *Session) discover(key, value string, options Options) (string, error) {
 				continue
 			}
 			if !strings.ContainsAny(candidate, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") {
-				anchored = false
-				break
+				// Prose ends the list, while numeric or symbolic fields only
+				// skip registration; later credentials still belong to it.
+				if strings.ContainsFunc(candidate, unicode.IsLetter) {
+					anchored = false
+					break
+				}
+				continue
 			}
 			// Add retains the shared byte-length, plausibility and capacity
 			// gates. No capture spans whitespace or a list separator.
