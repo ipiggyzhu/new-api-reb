@@ -7,7 +7,9 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/QuantumNous/new-api/common"
 )
@@ -46,6 +48,22 @@ var (
 type Options struct {
 	ProtectIPs   bool
 	RestoreTools bool
+}
+
+// A dotted DNS name must have a letter-led final label, so malformed IPv4,
+// versions and decimal numbers cannot become credential anchors.
+var credentialDomainPattern = regexp.MustCompile(`^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?$`)
+
+func compactCredentialAnchor(value string) bool {
+	if host, port, err := net.SplitHostPort(value); err == nil {
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			return false
+		}
+		value = host
+	} else if strings.HasPrefix(value, "[") && strings.HasSuffix(value, "]") {
+		value = value[1 : len(value)-1]
+	}
+	return net.ParseIP(value) != nil || len(value) <= 253 && credentialDomainPattern.MatchString(value)
 }
 
 // walkJSON preserves numeric lexemes (including large integers), explicit
@@ -167,6 +185,43 @@ func (s *Session) discover(key, value string, options Options) (string, error) {
 						return "", err
 					}
 				}
+			}
+		}
+	}
+	// Compact lists have an address or hostname first. Keep IPv6 and numeric
+	// ports intact before interpreting colons as credential separators.
+	anchored := false
+	for _, field := range strings.FieldsFunc(value, func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune(",，;；", r)
+	}) {
+		if _, _, err := net.ParseCIDR(field); err == nil {
+			anchored = false
+			continue
+		}
+		for end := len(field); end > 0; end = strings.LastIndexByte(field[:end], ':') {
+			// DNS names have at most 253 bytes, plus a colon and five port
+			// digits. Bound prefix validation even for very long captures.
+			if end <= 259 && compactCredentialAnchor(field[:end]) {
+				anchored = true
+				field = strings.TrimPrefix(field[end:], ":")
+				break
+			}
+		}
+		if !anchored {
+			continue
+		}
+		for candidate := range strings.SplitSeq(field, ":") {
+			if candidate == "" {
+				continue
+			}
+			if !strings.ContainsAny(candidate, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+				anchored = false
+				break
+			}
+			// Add retains the shared byte-length, plausibility and capacity
+			// gates. No capture spans whitespace or a list separator.
+			if err := s.Add(candidate); err != nil {
+				return "", err
 			}
 		}
 	}
