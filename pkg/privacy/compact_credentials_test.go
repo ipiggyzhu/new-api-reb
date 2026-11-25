@@ -240,6 +240,21 @@ func TestCompactCredentialsStayInTheirParagraph(t *testing.T) {
 	}
 }
 
+func TestCompactCredentialsInToolDescriptions(t *testing.T) {
+	for _, tc := range []compactCredentialCase{
+		{"abbreviations", "Examples, e.g., formatting columns and exporting pages, i.e., rendering documents.", nil},
+		{"inline_filename", "Read README.md before changing the layout of a table.", nil},
+		{"inline_login", "Use service.example alice cedar", []string{"alice", "cedar"}},
+		{"inline_login_and_prose", "Connect to service.example alice maple93 then read the report", []string{"alice", "maple93"}},
+		{"inline_delimited", "Connect to service.example,alice,cedar,orchid before continuing", []string{"alice", "cedar", "orchid"}},
+		{"standalone_row", "service.example alice cedar orchid", []string{"alice", "cedar", "orchid"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertCompactCredentialCase(t, tc, Options{})
+		})
+	}
+}
+
 func TestCompactCredentialLimits(t *testing.T) {
 	ip := strings.Join([]string{"192", "0", "2", "28"}, ".")
 	for _, tc := range []struct {

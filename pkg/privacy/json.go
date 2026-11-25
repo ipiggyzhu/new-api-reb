@@ -74,7 +74,7 @@ func compactCredentialAnchor(value string) bool {
 
 // walkJSON preserves numeric lexemes (including large integers), explicit
 // zeros, unknown fields, and nested JSON tool arguments. Errors never echo input.
-func walkJSON(data []byte, key string, depth int, fn func(string, string) (string, error)) ([]byte, error) {
+func walkJSON(data []byte, field jsonField, depth int, fn func(jsonField, string) (string, error)) ([]byte, error) {
 	if depth > 48 {
 		return nil, ErrLimit
 	}
@@ -89,18 +89,30 @@ func walkJSON(data []byte, key string, depth int, fn func(string, string) (strin
 			return nil, errors.New("invalid privacy JSON")
 		}
 		// The request itself is never opaque, whatever its own "type" says.
-		if depth > 0 && opaqueObject(key, object) {
+		kind := common.JsonRawMessageToString(object["type"])
+		role := common.JsonRawMessageToString(object["role"])
+		if depth > 0 && field.opaqueObject(kind) {
+			if fn == nil {
+				return nil, ErrUnsupported
+			}
 			return data, nil
 		}
 		for name, value := range object {
-			if opaqueField(name, value) {
+			if field.scope == wireField && opaqueField(name, value) {
+				if fn == nil && name != "encrypted_content" {
+					return nil, ErrUnsupported
+				}
 				continue
 			}
-			changed, err := walkJSON(value, name, depth+1, fn)
+			child := field.child(name, kind, role, depth == 0)
+			changed, err := walkJSON(value, child, depth+1, fn)
 			if err != nil {
 				return nil, err
 			}
 			object[name] = changed
+		}
+		if fn == nil {
+			return data, nil
 		}
 		return common.Marshal(object)
 	case '[':
@@ -109,14 +121,20 @@ func walkJSON(data []byte, key string, depth int, fn func(string, string) (strin
 			return nil, errors.New("invalid privacy JSON")
 		}
 		for i := range array {
-			changed, err := walkJSON(array[i], key, depth+1, fn)
+			changed, err := walkJSON(array[i], field, depth+1, fn)
 			if err != nil {
 				return nil, err
 			}
 			array[i] = changed
 		}
+		if fn == nil {
+			return data, nil
+		}
 		return common.Marshal(array)
 	case '"':
+		if fn == nil || field.scope == structuralField {
+			return data, nil
+		}
 		var value string
 		if common.Unmarshal(data, &value) != nil {
 			return nil, errors.New("invalid privacy JSON")
@@ -124,20 +142,38 @@ func walkJSON(data []byte, key string, depth int, fn func(string, string) (strin
 		trimmed := strings.TrimSpace(value)
 		// An inline upload is encoded bytes, not text: a short secret can occur
 		// in it by chance and replacing it there would corrupt the file.
-		if strings.HasPrefix(trimmed, "data:") && strings.Contains(trimmed[:min(len(trimmed), 128)], ";base64,") {
+		if field.scope == wireField && strings.HasPrefix(trimmed, "data:") && strings.Contains(trimmed[:min(len(trimmed), 128)], ";base64,") {
 			return data, nil
 		}
 		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
 			var raw json.RawMessage
 			if common.Unmarshal([]byte(trimmed), &raw) == nil {
-				changed, err := walkJSON(raw, key, depth+1, fn)
+				if field.scope == toolData || field.scope == toolOutput {
+					// Apply whole-value declarations before descending. The
+					// serialized field names are not a second text prompt.
+					encoded := field
+					encoded.encoded = true
+					whole, err := fn(encoded, value)
+					if err != nil {
+						return nil, err
+					}
+					if whole != value {
+						return common.Marshal(whole)
+					}
+					changed, err := walkJSON(raw, jsonField{scope: toolData}, depth+1, fn)
+					if err != nil {
+						return nil, err
+					}
+					return common.Marshal(string(changed))
+				}
+				changed, err := walkJSON(raw, field, depth+1, fn)
 				if err != nil {
 					return nil, err
 				}
 				value = string(changed)
 			}
 		}
-		value, err := fn(key, value)
+		value, err := fn(field, value)
 		if err != nil {
 			return nil, err
 		}
@@ -151,11 +187,15 @@ func walkJSON(data []byte, key string, depth int, fn func(string, string) (strin
 	}
 }
 
-func (s *Session) discover(key, value string, options Options) (string, error) {
+func (s *Session) discover(field jsonField, value string, options Options) (string, error) {
+	key := field.name
 	if credentialLabel.MatchString(key) || key == "密码" || key == "密钥" || key == "口令" {
 		if err := s.Add(value); err != nil {
 			return "", err
 		}
+	}
+	if field.encoded {
+		return value, nil
 	}
 	for _, pattern := range credentialPatterns {
 		for _, match := range pattern.FindAllString(value, -1) {
@@ -197,7 +237,7 @@ func (s *Session) discover(key, value string, options Options) (string, error) {
 	// A compact record can span lines, but a blank line starts a new
 	// paragraph. A filename used as a heading can look exactly like a host.
 	for _, paragraph := range paragraphBreak.Split(value, -1) {
-		if err := s.discoverCompactCredentials(paragraph); err != nil {
+		if err := s.discoverCompactCredentials(paragraph, field.scope == toolDocumentation); err != nil {
 			return "", err
 		}
 	}
@@ -209,48 +249,129 @@ func (s *Session) discover(key, value string, options Options) (string, error) {
 	return value, nil
 }
 
-func (s *Session) discoverCompactCredentials(paragraph string) error {
-	// Compact lists have an address or hostname first. Keep IPv6 and numeric
-	// ports intact before interpreting colons as credential separators.
+const compactSeparators = ",，;；"
+
+func documentedCredentialRow(tail string, startOfLine bool) bool {
+	// An explicit list delimiter is meaningful anywhere in a description.
+	tail = strings.TrimLeft(tail, " \t")
+	if strings.IndexAny(tail, compactSeparators+":") == 0 {
+		return true
+	}
+	line, _, _ := strings.Cut(strings.TrimLeft(tail, "\r\n"), "\n")
+	count := 0
+	loginValue := false
+	for word := range strings.FieldsSeq(line) {
+		count++
+		if count > 2 {
+			return false
+		}
+		if !strings.Contains(word, Prefix) && plausibleSecret(strings.Trim(word, "()[]{}`'\".,:")) {
+			loginValue = true
+			// A login pair can be followed by instructions on the same line.
+			if count == 2 {
+				return true
+			}
+		}
+	}
+	return count > 0 && (startOfLine || loginValue)
+}
+
+// Inline hostnames can also be filenames or code symbols. Look for a
+// delimited record, a credential-like value, or a short trailing login row.
+func inlineCredentialTail(tail string) bool {
+	fields, start := 0, -1
+	for i, r := range tail {
+		switch {
+		case r == '\r' || r == '\n':
+			return true
+		case strings.ContainsRune(compactSeparators, r):
+			return fields == 0 || start >= 0 && plausibleSecret(tail[start:i])
+		case unicode.IsSpace(r):
+			if start >= 0 && !strings.Contains(tail[start:i], Prefix) &&
+				plausibleSecret(strings.Trim(tail[start:i], "()[]{}`'\".,:")) {
+				return true
+			}
+			start = -1
+		case start < 0:
+			fields++
+			if fields > 2 {
+				return false
+			}
+			start = i
+		}
+	}
+	return true
+}
+
+func (s *Session) discoverCompactCredentials(paragraph string, documentation bool) error {
 	anchored := false
+	standaloneRecord := false
+	fields := 0
+	remaining := paragraph
 	for field := range strings.FieldsFuncSeq(paragraph, func(r rune) bool {
-		return unicode.IsSpace(r) || strings.ContainsRune(",，;；", r)
+		return unicode.IsSpace(r) || strings.ContainsRune(compactSeparators, r)
 	}) {
+		start := strings.Index(remaining, field)
+		gap := remaining[:start]
+		newLine := strings.ContainsAny(gap, "\n\r")
+		startOfLine := len(remaining) == len(paragraph) || newLine
+		remaining = remaining[start+len(field):]
+		if newLine {
+			standaloneRecord = false
+		}
+		// Standalone rows and explicitly separated lists may have more
+		// fields. Within a sentence, spaces can introduce a login pair.
+		if !standaloneRecord && fields >= 2 && !strings.ContainsAny(gap, compactSeparators) {
+			anchored = false
+		}
 		if _, _, err := net.ParseCIDR(field); err == nil {
 			anchored = false
 			continue
 		}
 		for end := len(field); end > 0; end = strings.LastIndexByte(field[:end], ':') {
-			// DNS names have at most 253 bytes, plus an optional root dot,
-			// a colon and five port digits. Bound prefix validation even
-			// for very long captures.
-			if end <= 260 && compactCredentialAnchor(field[:end]) {
-				anchored = true
-				field = strings.TrimPrefix(field[end:], ":")
+			if end > 260 || !compactCredentialAnchor(field[:end]) {
+				continue
+			}
+			// In descriptions, an embedded hostname or filename followed
+			// by prose is common. Retain explicitly delimited records and
+			// standalone login rows as well as the labelled patterns above.
+			if documentation && end == len(field) && !documentedCredentialRow(remaining, startOfLine) {
 				break
 			}
+			if !startOfLine && end == len(field) {
+				word := strings.TrimSuffix(field, ".")
+				if strings.EqualFold(word, "e.g") || strings.EqualFold(word, "i.e") {
+					break
+				}
+				if !strings.ContainsAny(gap, compactSeparators) && !strings.Contains(field, ":") &&
+					net.ParseIP(field) == nil && !inlineCredentialTail(remaining) {
+					break
+				}
+			}
+			anchored = true
+			standaloneRecord = startOfLine
+			fields = 0
+			field = strings.TrimPrefix(field[end:], ":")
+			break
 		}
 		if !anchored {
 			continue
 		}
 		for candidate := range strings.SplitSeq(field, ":") {
-			if candidate == "" {
-				continue
-			}
 			if !strings.ContainsAny(candidate, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") {
-				// Prose ends the list, while numeric or symbolic fields only
-				// skip registration; later credentials still belong to it.
 				if strings.ContainsFunc(candidate, unicode.IsLetter) {
 					anchored = false
 					break
 				}
 				continue
 			}
-			// Add retains the shared byte-length, plausibility and capacity
-			// gates. No capture spans whitespace or a list separator.
+			if !plausibleStoredValue(candidate) {
+				continue
+			}
 			if err := s.Add(candidate); err != nil {
 				return err
 			}
+			fields++
 		}
 	}
 	return nil
@@ -307,7 +428,7 @@ func plausibleSecret(value string) bool {
 }
 
 func (s *Session) ProtectText(key, value string, options Options) (string, error) {
-	if _, err := s.discover(key, value, options); err != nil {
+	if _, err := s.discover(jsonField{name: key}, value, options); err != nil {
 		return "", err
 	}
 	return s.Mask(value), nil
@@ -336,11 +457,11 @@ func (s *Session) ProtectJSON(data []byte, options Options) ([]byte, error) {
 	// Credentials claim their references first, so that addresses met earlier in
 	// the conversation cannot use up the room a password needs.
 	var addresses []string
-	discovered, err := walkJSON(data, "", 0, func(key, value string) (string, error) {
-		if options.ProtectIPs {
+	discovered, err := walkJSON(data, jsonField{}, 0, func(field jsonField, value string) (string, error) {
+		if options.ProtectIPs && !field.encoded {
 			addresses = append(addresses, ipAddresses(value)...)
 		}
-		return s.discover(key, value, Options{})
+		return s.discover(field, value, Options{})
 	})
 	clear(discovered)
 	if err == nil {
@@ -349,11 +470,8 @@ func (s *Session) ProtectJSON(data []byte, options Options) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return walkJSON(data, "", 0, func(key string, value string) (string, error) {
-		if protocolField(key) {
-			return value, nil
-		}
-		return s.Mask(value), nil
+	return walkJSON(data, jsonField{}, 0, func(field jsonField, value string) (string, error) {
+		return s.maskField(field, value), nil
 	})
 }
 
@@ -366,10 +484,10 @@ func protocolField(key string) bool {
 }
 
 func (s *Session) RestoreJSON(data []byte, restoreTools bool) ([]byte, error) {
-	return s.restoreResponse(data, restoreTools, 0)
+	return s.restoreResponse(data, restoreTools, 0, jsonField{})
 }
 
-func (s *Session) restoreResponse(data []byte, restoreTools bool, depth int) ([]byte, error) {
+func (s *Session) restoreResponse(data []byte, restoreTools bool, depth int, field jsonField) ([]byte, error) {
 	if depth > 48 {
 		return nil, ErrLimit
 	}
@@ -383,6 +501,7 @@ func (s *Session) restoreResponse(data []byte, restoreTools bool, depth int) ([]
 			return nil, errors.New("invalid privacy response")
 		}
 		kind := common.JsonRawMessageToString(object["type"])
+		role := common.JsonRawMessageToString(object["role"])
 		if !restoreTools && (kind == "tool_use" || kind == "function_call" || kind == "custom_tool_call" || strings.Contains(kind, "function_call_arguments") || strings.Contains(kind, "custom_tool_call_input")) {
 			return data, nil
 		}
@@ -390,10 +509,11 @@ func (s *Session) restoreResponse(data []byte, restoreTools bool, depth int) ([]
 			if !restoreTools && (key == "tool_calls" || key == "function_call" || key == "functionCall" || key == "partial_json") {
 				continue
 			}
-			if protocolField(key) {
+			child := field.child(key, kind, role, depth == 0)
+			if child.structural() {
 				continue
 			}
-			changed, err := s.restoreResponse(value, restoreTools, depth+1)
+			changed, err := s.restoreResponse(value, restoreTools, depth+1, child)
 			if err != nil {
 				return nil, err
 			}
@@ -407,7 +527,7 @@ func (s *Session) restoreResponse(data []byte, restoreTools bool, depth int) ([]
 			return nil, errors.New("invalid privacy response")
 		}
 		for i := range array {
-			changed, err := s.restoreResponse(array[i], restoreTools, depth+1)
+			changed, err := s.restoreResponse(array[i], restoreTools, depth+1, field)
 			if err != nil {
 				return nil, err
 			}
@@ -415,7 +535,12 @@ func (s *Session) restoreResponse(data []byte, restoreTools bool, depth int) ([]
 		}
 		return common.Marshal(array)
 	}
-	return walkJSON(data, "", depth, func(_ string, value string) (string, error) { return s.Restore(value), nil })
+	return walkJSON(data, field, depth, func(f jsonField, value string) (string, error) {
+		if f.encoded {
+			return value, nil // restore the decoded values, preserving JSON escaping
+		}
+		return s.Restore(value), nil
+	})
 }
 
 // opaqueObject and opaqueField mark what this layer never rewrites: media and
@@ -423,13 +548,18 @@ func (s *Session) restoreResponse(data []byte, restoreTools bool, depth int) ([]
 // provider-side tools whose settings must stay usable. Such content passes
 // through byte for byte; a strict request that carries an upload or a
 // provider-side tool is refused instead (see ValidateTextRequest).
-func opaqueObject(parentKey string, object map[string]json.RawMessage) bool {
-	kind := common.JsonRawMessageToString(object["type"])
+func (field jsonField) opaqueObject(kind string) bool {
+	if field.scope == toolDefinition {
+		return field.name == "tools" && kind != "" && kind != "function" && kind != "custom" && kind != "namespace"
+	}
+	if field.scope != wireField && field.scope != toolOutput {
+		return false
+	}
 	switch kind {
 	case "image", "image_url", "input_image", "input_audio", "audio", "video", "input_video", "document", "file", "input_file", "computer", "computer_20250124":
 		return true
 	}
-	return parentKey == "tools" && kind != "" && kind != "function" && kind != "custom"
+	return false
 }
 
 func opaqueField(key string, value json.RawMessage) bool {
@@ -445,43 +575,6 @@ func opaqueField(key string, value json.RawMessage) bool {
 // under a false promise of protection. A text secret is substituted, never
 // rejected. Encrypted reasoning comes back from the provider and is allowed.
 func ValidateTextRequest(data []byte) error {
-	return validateText(data, "", 0)
-}
-
-func validateText(data []byte, key string, depth int) error {
-	if depth > 48 {
-		return ErrLimit
-	}
-	switch common.GetJsonType(data) {
-	case "object":
-		var object map[string]json.RawMessage
-		if common.Unmarshal(data, &object) != nil {
-			return errors.New("invalid privacy JSON")
-		}
-		if opaqueObject(key, object) {
-			return ErrUnsupported
-		}
-		for name, value := range object {
-			if name == "encrypted_content" {
-				continue
-			}
-			if opaqueField(name, value) {
-				return ErrUnsupported
-			}
-			if err := validateText(value, name, depth+1); err != nil {
-				return err
-			}
-		}
-	case "array":
-		var array []json.RawMessage
-		if common.Unmarshal(data, &array) != nil {
-			return errors.New("invalid privacy JSON")
-		}
-		for _, value := range array {
-			if err := validateText(value, key, depth+1); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+	_, err := walkJSON(data, jsonField{}, 0, nil)
+	return err
 }

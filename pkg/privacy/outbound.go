@@ -78,8 +78,8 @@ func CheckOutboundJSON(c *gin.Context, data []byte) error {
 	if session.BestEffort && !gjson.ValidBytes(data) {
 		return nil
 	}
-	_, err := walkJSON(data, "", 0, func(key, value string) (string, error) {
-		if !protocolField(key) && session.Mask(value) != value {
+	_, err := walkJSON(data, jsonField{}, 0, func(field jsonField, value string) (string, error) {
+		if session.maskField(field, value) != value {
 			return "", errors.New("privacy final request check failed")
 		}
 		return value, nil
