@@ -53,6 +53,7 @@ type Options struct {
 // A dotted DNS name must have a letter-led final label, so malformed IPv4,
 // versions and decimal numbers cannot become credential anchors.
 var credentialDomainPattern = regexp.MustCompile(`^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?$`)
+var paragraphBreak = regexp.MustCompile(`\n[\t\r\p{Zs}]*\n`)
 
 func compactCredentialAnchor(value string) bool {
 	if host, port, err := net.SplitHostPort(value); err == nil {
@@ -193,10 +194,26 @@ func (s *Session) discover(key, value string, options Options) (string, error) {
 			}
 		}
 	}
+	// A compact record can span lines, but a blank line starts a new
+	// paragraph. A filename used as a heading can look exactly like a host.
+	for _, paragraph := range paragraphBreak.Split(value, -1) {
+		if err := s.discoverCompactCredentials(paragraph); err != nil {
+			return "", err
+		}
+	}
+	if options.ProtectIPs {
+		if err := s.addAddresses(ipAddresses(value)); err != nil {
+			return "", err
+		}
+	}
+	return value, nil
+}
+
+func (s *Session) discoverCompactCredentials(paragraph string) error {
 	// Compact lists have an address or hostname first. Keep IPv6 and numeric
 	// ports intact before interpreting colons as credential separators.
 	anchored := false
-	for _, field := range strings.FieldsFunc(value, func(r rune) bool {
+	for field := range strings.FieldsFuncSeq(paragraph, func(r rune) bool {
 		return unicode.IsSpace(r) || strings.ContainsRune(",，;；", r)
 	}) {
 		if _, _, err := net.ParseCIDR(field); err == nil {
@@ -232,16 +249,11 @@ func (s *Session) discover(key, value string, options Options) (string, error) {
 			// Add retains the shared byte-length, plausibility and capacity
 			// gates. No capture spans whitespace or a list separator.
 			if err := s.Add(candidate); err != nil {
-				return "", err
+				return err
 			}
 		}
 	}
-	if options.ProtectIPs {
-		if err := s.addAddresses(ipAddresses(value)); err != nil {
-			return "", err
-		}
-	}
-	return value, nil
+	return nil
 }
 
 func ipAddresses(text string) []string {

@@ -230,6 +230,16 @@ func TestCompactCredentialWithoutAddressMasking(t *testing.T) {
 	}, Options{})
 }
 
+func TestCompactCredentialsStayInTheirParagraph(t *testing.T) {
+	for _, paragraphBreak := range []string{"\n\n", "\r\n \t\r\n"} {
+		input := "README.md" + paragraphBreak + "Project documentation and release notes." + paragraphBreak +
+			"service.example\nfixture-user,fixture-pass" + paragraphBreak + "Review the deployment steps."
+		assertCompactCredentialCase(t, compactCredentialCase{
+			input: input, want: []string{"fixture-user", "fixture-pass"},
+		}, Options{})
+	}
+}
+
 func TestCompactCredentialLimits(t *testing.T) {
 	ip := strings.Join([]string{"192", "0", "2", "28"}, ".")
 	for _, tc := range []struct {
