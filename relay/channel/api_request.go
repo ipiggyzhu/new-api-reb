@@ -688,7 +688,9 @@ func DoRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 }
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
 	if session := privacy.FromContext(c); session != nil {
-		privacy.ProtectHeaders(c, req.Header)
+		if err := privacy.ProtectHeaders(c, req.Header); err != nil {
+			return nil, types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
 		if req.GetBody == nil {
 			return nil, types.NewError(fmt.Errorf("privacy requires a replayable request"), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 		}

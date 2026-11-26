@@ -17,6 +17,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/privacy"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/reasoning"
@@ -336,6 +337,12 @@ func prepareCLIRequest(c *gin.Context, info *relaycommon.RelayInfo, requestURL s
 	if err != nil {
 		return requestURL, reader, nil, fmt.Errorf("encode CLI request body: %w", err)
 	}
+	if session := privacy.FromContext(c); session != nil {
+		data, err = session.MaskJSON(data)
+		if err != nil {
+			return requestURL, reader, nil, err
+		}
+	}
 	if version != nil {
 		data = orderVersionedCLIJSON(gjson.ParseBytes(data), gjson.ParseBytes(reference), "", version)
 		if claude {
@@ -344,8 +351,12 @@ func prepareCLIRequest(c *gin.Context, info *relaycommon.RelayInfo, requestURL s
 			headers.Set("anthropic-beta", service.CoherentAnthropicBeta(version.Headers["anthropic-beta"], claudeBodyHasHourTTL(data)))
 		}
 		if codex {
-			turn := orderVersionedCLIJSON(gjson.Parse(headers.Get("x-codex-turn-metadata")), gjson.Result{}, "turn_metadata", version)
-			headers.Set("x-codex-turn-metadata", string(turn))
+			if turn := gjson.GetBytes(data, "client_metadata.x-codex-turn-metadata"); turn.Exists() {
+				headers.Set("x-codex-turn-metadata", turn.String())
+			} else {
+				turn := orderVersionedCLIJSON(gjson.Parse(headers.Get("x-codex-turn-metadata")), gjson.Result{}, "turn_metadata", version)
+				headers.Set("x-codex-turn-metadata", string(turn))
+			}
 		}
 	} else if codex {
 		data = orderCodexJSON(gjson.ParseBytes(data), gjson.ParseBytes(reference), "")

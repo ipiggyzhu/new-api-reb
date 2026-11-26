@@ -9,6 +9,7 @@ import (
 
 	appcommon "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/pkg/privacy"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/types"
@@ -160,6 +161,49 @@ func shapeClaudeMessagesBody(t *testing.T, c *gin.Context, info *relaycommon.Rel
 	final, err := io.ReadAll(reader)
 	require.NoError(t, err)
 	return final
+}
+
+func TestClaudeToolListingPassesPrivacyCheckAfterShaping(t *testing.T) {
+	c, info := nativeClaudeCodeRequest()
+	info.ChannelSetting.CLIVersionProfile = "claude-2.1.306-linux-x64"
+	s := privacy.NewSession()
+	c.Set(privacy.ContextKey, s)
+	body := []byte(`{"model":"claude-test","messages":[
+		{"role":"user","content":"List the files"},
+		{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"list","input":{}}]},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"worker.log\npreview.png\nbilling\npassword=fixture-secret"}]}]}`)
+	protected, err := privacy.ProtectOutboundJSON(c, body)
+	require.NoError(t, err)
+	final := shapeClaudeMessagesBody(t, c, info, protected)
+	assert.NotContains(t, string(final), "fixture-secret")
+	require.Contains(t, gjson.GetBytes(final, "system.0.text").String(), "billing")
+	require.NoError(t, privacy.CheckOutboundJSON(c, final))
+}
+
+func TestShapedRequestMasksGeneratedTextAndPreservesToolSchema(t *testing.T) {
+	c, info := versionedCLITestRequest("codex")
+	info.ChannelSetting.CLIVersionProfile = "codex-0.163.0-linux-x64"
+	info.RelayFormat = types.RelayFormatOpenAIResponses
+	info.InitRequestConversionChain()
+	s := privacy.NewSession()
+	c.Set(privacy.ContextKey, s)
+	for _, value := range []string{"fixture-catalog", "string", "installation_id"} {
+		require.NoError(t, s.AddDeclared(value))
+	}
+	raw := []byte(`{"model":"gpt-test","input":"hi","tools":[{"type":"namespace","name":"fixture-catalog","tools":[{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"password":{"type":"string","default":"fixture-password"}}}}]}]}`)
+	body, err := privacy.ProtectOutboundJSON(c, raw)
+	require.NoError(t, err)
+	_, reader, _, err := prepareCLIRequest(c, info, "https://upstream.test/v1/responses", bytes.NewReader(body))
+	require.NoError(t, err)
+	final, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	tool := gjson.GetBytes(final, "input.0.tools.0")
+	assert.Equal(t, "fixture-catalog", tool.Get("name").String())
+	assert.Equal(t, "Tools in the "+s.Mask("fixture-catalog")+" namespace.", tool.Get("description").String())
+	assert.Equal(t, "string", tool.Get("tools.0.parameters.properties.password.type").String())
+	assert.NotContains(t, string(final), "fixture-password")
+	require.NoError(t, privacy.CheckOutboundJSON(c, final))
+	require.Error(t, privacy.CheckOutboundJSON(c, []byte(`{"instructions":"fixture-password"}`)))
 }
 
 // A Claude body with Claude Code's own cache layout: 1h tool and system

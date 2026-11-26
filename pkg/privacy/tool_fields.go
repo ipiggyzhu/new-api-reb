@@ -18,10 +18,11 @@ const (
 )
 
 type jsonField struct {
-	name     string
-	scope    fieldScope
-	property string // property whose schema may supply a literal default or example
-	encoded  bool   // complete value of a JSON-encoded tool argument or output
+	name       string
+	scope      fieldScope
+	property   string // property whose schema may supply a literal default or example
+	encoded    bool   // complete value of a JSON-encoded tool argument or output
+	toolResult bool   // includes nested values inside structured or encoded tool output
 }
 
 func (s *Session) maskField(field jsonField, value string) string {
@@ -42,7 +43,7 @@ func (s *Session) maskField(field jsonField, value string) string {
 }
 
 func (f jsonField) child(name, kind, role string, atRoot bool) jsonField {
-	child := jsonField{name: name}
+	child := jsonField{name: name, toolResult: f.toolResult}
 	switch f.scope {
 	case toolData:
 		child.scope = toolData
@@ -93,16 +94,23 @@ func (f jsonField) child(name, kind, role string, atRoot bool) jsonField {
 		}
 	default:
 		switch {
-		case atRoot && (name == "tools" || name == "functions"):
+		case atRoot && (name == "tools" || name == "functions"),
+			f.name == "input" && kind == "additional_tools" && name == "tools":
 			child.scope = toolDefinition
+		case f.name == "client_metadata" && name == "x-codex-turn-metadata",
+			f.name == "metadata" && name == "user_id":
+			// These fields may carry a JSON object encoded as a string.
+			// Mask its values without rewriting its property names.
+			child.scope = toolData
 		case name == "arguments" && (f.name == "function" || f.name == "function_call" || kind == "function_call"),
 			name == "input" && (kind == "tool_use" || kind == "custom_tool_call"),
-			name == "args" && (f.name == "functionCall" || f.name == "function_call"),
-			name == "response" && (f.name == "functionResponse" || f.name == "function_response"):
+			name == "args" && (f.name == "functionCall" || f.name == "function_call"):
 			child.scope = toolData
+		case name == "response" && (f.name == "functionResponse" || f.name == "function_response"):
+			child.scope, child.toolResult = toolData, true
 		case name == "content" && (role == "tool" || role == "function" || kind == "tool_result"),
 			name == "output" && (kind == "function_call_output" || kind == "custom_tool_call_output"):
-			child.scope = toolOutput
+			child.scope, child.toolResult = toolOutput, true
 		}
 	}
 	return child

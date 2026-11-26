@@ -599,7 +599,9 @@ func TryResponsesWebsocket(a Adaptor, c *gin.Context, info *common.RelayInfo, re
 	}
 	stripHTTPOnlyHandshakeHeaders(header)
 	applyResponsesWebsocketBetaHeader(header)
-	privacy.ProtectHeaders(c, header)
+	if err := privacy.ProtectHeaders(c, header); err != nil {
+		return nil, types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+	}
 	if err := privacy.CheckOutboundJSON(c, body); err != nil {
 		return nil, types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
 	}

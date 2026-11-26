@@ -2,6 +2,7 @@ package privacy
 
 import (
 	"fmt"
+	"net/http"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -112,6 +113,59 @@ func TestToolResultMediaAndTextBoundaries(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, gjson.GetBytes(raw, "messages.0.content.0.content.0").Raw, gjson.GetBytes(protected, "messages.0.content.0.content.0").Raw)
 	assert.NotContains(t, string(protected), "fixture-value")
+}
+
+func TestPrivacyMetadataKeepsNamesAndMasksEncodedValues(t *testing.T) {
+	s := NewSession()
+	require.NoError(t, s.AddDeclared("installation_id"))
+	require.NoError(t, s.AddDeclared("fixture-secret"))
+	c := &gin.Context{}
+	c.Set(ContextKey, s)
+	const metadata = `{ "installation_id":"fixture-secret", "note":"ok" }`
+	headers := http.Header{}
+	headers.Set("X-Codex-Turn-Metadata", metadata)
+	require.NoError(t, ProtectHeaders(c, headers))
+	got := headers.Get("X-Codex-Turn-Metadata")
+	assert.Equal(t, s.Mask("fixture-secret"), gjson.Get(got, "installation_id").String())
+	assert.NotContains(t, got, "fixture-secret")
+	require.NoError(t, ProtectHeaders(c, headers))
+	assert.Equal(t, got, headers.Get("X-Codex-Turn-Metadata"))
+	const unchanged = `{"model":"model","input":"hi"}`
+	src := []byte(unchanged)
+	protected, err := s.ProtectJSON(src, Options{})
+	require.NoError(t, err)
+	clear(src)
+	assert.Equal(t, unchanged, string(protected))
+}
+
+func TestToolResultListingAndAdjacentCredentials(t *testing.T) {
+	type obj = map[string]any
+	const listing = "access.log\r\npreview.PNG\r\nreport\r\nhost.example\r\nfixture-login\r\npassword=fixture-explicit"
+	encoded, err := common.Marshal(obj{"stdout": listing})
+	require.NoError(t, err)
+	for name, body := range map[string]obj{
+		"claude":    {"messages": []any{obj{"role": "user", "content": []any{obj{"type": "tool_result", "content": []any{obj{"type": "text", "text": listing}}}}}}},
+		"chat":      {"messages": []any{obj{"role": "tool", "content": listing}}},
+		"responses": {"input": []any{obj{"type": "function_call_output", "output": string(encoded)}}},
+		"gemini":    {"contents": []any{obj{"parts": []any{obj{"functionResponse": obj{"response": obj{"stdout": listing}}}}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := common.Marshal(body)
+			require.NoError(t, err)
+			s := NewSession()
+			out, err := s.ProtectJSON(raw, Options{})
+			require.NoError(t, err)
+			assert.Contains(t, string(out), "report")
+			assert.NotContains(t, string(out), "fixture-login")
+			assert.NotContains(t, string(out), "fixture-explicit")
+			c := &gin.Context{}
+			c.Set(ContextKey, s)
+			require.NoError(t, CheckOutboundJSON(c, []byte(`{"system":"report generation"}`)))
+			require.Error(t, CheckOutboundJSON(c, []byte(`{"system":"fixture-login"}`)))
+			require.NoError(t, s.AddDeclared("report"))
+			require.Error(t, CheckOutboundJSON(c, []byte(`{"system":"report generation"}`)))
+		})
+	}
 }
 
 func TestToolDefinitionCompactLoginAndDeclaredArguments(t *testing.T) {

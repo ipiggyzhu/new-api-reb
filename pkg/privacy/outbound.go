@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -87,10 +88,10 @@ func CheckOutboundJSON(c *gin.Context, data []byte) error {
 	return err
 }
 
-func ProtectHeaders(c *gin.Context, headers http.Header) {
+func ProtectHeaders(c *gin.Context, headers http.Header) error {
 	session := FromContext(c)
 	if session == nil {
-		return
+		return nil
 	}
 	for key, values := range headers {
 		switch strings.ToLower(key) {
@@ -98,6 +99,20 @@ func ProtectHeaders(c *gin.Context, headers http.Header) {
 			delete(headers, key)
 		case "authorization", "x-api-key", "api-key", "x-goog-api-key":
 			// The selected provider's authentication is not prompt content.
+		case "x-codex-turn-metadata":
+			for i, value := range values {
+				encoded, err := common.Marshal(value)
+				if err != nil {
+					return err
+				}
+				protected, err := session.maskJSON(encoded, jsonField{scope: toolData})
+				if err != nil {
+					return err
+				}
+				if err := common.Unmarshal(protected, &values[i]); err != nil {
+					return err
+				}
+			}
 		case "content-type":
 			for i, value := range values {
 				if separator := strings.IndexByte(value, ';'); separator >= 0 {
@@ -110,4 +125,5 @@ func ProtectHeaders(c *gin.Context, headers http.Header) {
 			}
 		}
 	}
+	return nil
 }

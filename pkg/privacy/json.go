@@ -55,6 +55,12 @@ type Options struct {
 var credentialDomainPattern = regexp.MustCompile(`^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.?$`)
 var paragraphBreak = regexp.MustCompile(`\n[\t\r\p{Zs}]*\n`)
 
+// Consecutive, one-per-line filenames in a tool result delimit directory
+// listings. Keep individual host-like names eligible for multiline logins.
+const listingFilename = `[\t ]*[a-z0-9_./-]+\.(?:png|jpe?g|gif|svg|webp|log|json|ya?ml|toml|csv|txt|html|css|js)[\t ]*\r?`
+
+var listingFileRun = regexp.MustCompile(`(?im)(?:^` + listingFilename + `\n)+(?:^` + listingFilename + `$)`)
+
 func compactCredentialAnchor(value string) bool {
 	if host, port, err := net.SplitHostPort(value); err == nil {
 		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
@@ -160,7 +166,7 @@ func walkJSON(data []byte, field jsonField, depth int, fn func(jsonField, string
 					if whole != value {
 						return common.Marshal(whole)
 					}
-					changed, err := walkJSON(raw, jsonField{scope: toolData}, depth+1, fn)
+					changed, err := walkJSON(raw, jsonField{scope: toolData, toolResult: field.toolResult}, depth+1, fn)
 					if err != nil {
 						return nil, err
 					}
@@ -237,6 +243,16 @@ func (s *Session) discover(field jsonField, value string, options Options) (stri
 	// A compact record can span lines, but a blank line starts a new
 	// paragraph. A filename used as a heading can look exactly like a host.
 	for _, paragraph := range paragraphBreak.Split(value, -1) {
+		if field.toolResult {
+			// Explicit credentials and addresses are detected independently
+			// of this heuristic, including inside filenames.
+			for _, part := range listingFileRun.Split(paragraph, -1) {
+				if err := s.discoverCompactCredentials(part, false); err != nil {
+					return "", err
+				}
+			}
+			continue
+		}
 		if err := s.discoverCompactCredentials(paragraph, field.scope == toolDocumentation); err != nil {
 			return "", err
 		}
@@ -470,9 +486,27 @@ func (s *Session) ProtectJSON(data []byte, options Options) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return walkJSON(data, jsonField{}, 0, func(field jsonField, value string) (string, error) {
-		return s.maskField(field, value), nil
+	return s.MaskJSON(data)
+}
+
+// MaskJSON reapplies existing references to a transformed request. Shaping
+// can introduce text after credential discovery and before the final check.
+func (s *Session) MaskJSON(data []byte) ([]byte, error) {
+	return s.maskJSON(data, jsonField{})
+}
+
+func (s *Session) maskJSON(data []byte, root jsonField) ([]byte, error) {
+	changed := false
+	out, err := walkJSON(data, root, 0, func(field jsonField, value string) (string, error) {
+		masked := s.maskField(field, value)
+		changed = changed || masked != value
+		return masked, nil
 	})
+	if err != nil || changed {
+		return out, err
+	}
+	// Callers clear the source buffer after protection.
+	return bytes.Clone(data), nil
 }
 
 func protocolField(key string) bool {
